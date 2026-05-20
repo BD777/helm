@@ -6,3 +6,6 @@ DerivedData/
 *.xcworkspace/xcuserdata
 .swiftpm/
 Package.resolved
+
+# Build artifacts
+build/
