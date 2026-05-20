@@ -174,6 +174,13 @@
   .dot.yellow { background: var(--yellow); }
   .dot.red { background: var(--red); }
   .dot.gray { background: var(--text-3); }
+  .proj-icon {
+    width: 11px; height: 11px;
+    color: var(--text-3);
+    display: inline-block; vertical-align: -1px;
+  }
+  .proj-icon.local { color: var(--text-2); }
+  .proj-icon.ssh-bad { color: var(--red); }
 
   .session-list { display: flex; flex-direction: column; gap: 1px; }
   .session {
@@ -600,7 +607,7 @@
             <svg class="chev" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg>
             <span>helm</span>
             <span class="project-meta">
-              <span class="dot"></span>
+              <svg class="proj-icon local" viewBox="0 0 12 10" fill="currentColor"><path d="M1 2.2A1.2 1.2 0 0 1 2.2 1h2.6l.9.9h4.1A1.2 1.2 0 0 1 11 3.1v5.7A1.2 1.2 0 0 1 9.8 10H2.2A1.2 1.2 0 0 1 1 8.8V2.2z"/></svg>
               local
             </span>
           </div>
@@ -636,7 +643,7 @@
             <svg class="chev" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg>
             <span>ccm</span>
             <span class="project-meta">
-              <span class="dot"></span>
+              <svg class="proj-icon local" viewBox="0 0 12 10" fill="currentColor"><path d="M1 2.2A1.2 1.2 0 0 1 2.2 1h2.6l.9.9h4.1A1.2 1.2 0 0 1 11 3.1v5.7A1.2 1.2 0 0 1 9.8 10H2.2A1.2 1.2 0 0 1 1 8.8V2.2z"/></svg>
               local
             </span>
           </div>
@@ -657,7 +664,7 @@
           <div class="project-header" onclick="this.parentElement.classList.toggle('collapsed')">
             <svg class="chev" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg>
             <span>prod-api</span>
-            <span class="project-meta">
+            <span class="project-meta" title="SSH: reconnecting">
               <span class="dot yellow"></span>
               ssh prod-1
             </span>
@@ -904,15 +911,7 @@ drwxr-xr-x  2 deng staff    64 May 20 15:40 docs/
       </div>
     </div>
     <div class="menu-group">
-      <div class="menu-label">Switch provider</div>
-      <div class="menu-item">
-        <span class="vendor cx" style="width:14px;height:14px;font-size:8px">Cx</span>
-        <span>Codex · gpt-5</span>
-        <span class="sub">opens new session</span>
-      </div>
-    </div>
-    <div class="menu-group">
-      <div class="menu-label">Profile</div>
+      <div class="menu-label">Profile · Claude  <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-3);">— switch keeps this session</span></div>
       <div class="menu-item">
         <span class="check">✓</span>
         <span>super-relay</span>
@@ -927,6 +926,37 @@ drwxr-xr-x  2 deng staff    64 May 20 15:40 docs/
         <span class="check"></span>
         <span>modelhub-bridge</span>
         <span class="sub">mhclaude wrapper</span>
+      </div>
+    </div>
+    <div class="menu-group">
+      <div class="menu-label">Claude settings</div>
+      <div class="menu-item">
+        <span style="width:12px"></span>
+        <span>Extended thinking</span>
+        <span class="sub" style="display:inline-flex;align-items:center;gap:4px;">
+          on
+          <span style="width:22px;height:12px;background:var(--accent);border-radius:999px;position:relative;">
+            <span style="position:absolute;right:1px;top:1px;width:10px;height:10px;background:white;border-radius:50%;"></span>
+          </span>
+        </span>
+      </div>
+      <div class="menu-item">
+        <span style="width:12px"></span>
+        <span>Compaction window</span>
+        <span class="sub">200k ▾</span>
+      </div>
+      <div class="menu-item">
+        <span style="width:12px"></span>
+        <span>Subagent model</span>
+        <span class="sub">same ▾</span>
+      </div>
+    </div>
+    <div class="menu-group">
+      <div class="menu-label">Switch ecosystem  <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-3);">— starts new session</span></div>
+      <div class="menu-item">
+        <span class="vendor cx" style="width:14px;height:14px;font-size:8px">Cx</span>
+        <span>Codex · gpt-5</span>
+        <span class="sub">reasoning effort: medium</span>
       </div>
     </div>
   </div>

@@ -13,4 +13,4 @@ Pre-MVP. Currently designing UI; see `design/`.
 - `Helm/` — Xcode project (TBD)
 
 ## Working name
-"Helm" is a placeholder. Rename when we know better.
+Locked: **Helm**.
