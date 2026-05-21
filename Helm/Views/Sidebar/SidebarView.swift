@@ -109,8 +109,12 @@ private struct ProjectSection: View {
             header
             if !project.collapsed {
                 ForEach(store.sessions(in: project.id)) { s in
-                    SessionRow(session: s, isActive: s.id == store.selectedSessionId)
-                        .onTapGesture { store.selectedSessionId = s.id }
+                    Button {
+                        store.selectedSessionId = s.id
+                    } label: {
+                        SessionRow(session: s, isActive: s.id == store.selectedSessionId)
+                    }
+                    .buttonStyle(.plain)
                 }
                 newChatRow
             }
@@ -245,6 +249,10 @@ private struct SessionRow: View {
         )
         .contentShape(Rectangle())
         .help(isRunning ? "Conversation is running" : session.title)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(session.title)
+        .accessibilityValue("\(modelLabel), \(isRunning ? "running" : session.lastUpdate)")
+        .accessibilityHint(isRunning ? "Conversation is running" : "Open conversation")
     }
 }
 
