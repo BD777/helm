@@ -92,6 +92,12 @@ struct ComposerView: View {
         return .accentColor
     }
 
+    private var submitButtonHelp: String {
+        if store.selectedSessionIsStreaming { return "Stop current response" }
+        if isStreamingInAnotherSession { return "Another conversation is running" }
+        return "Send message"
+    }
+
     private func sendIfPossible() {
         if store.selectedSessionIsStreaming {
             store.cancelStreaming()
@@ -212,9 +218,7 @@ struct ComposerView: View {
             .buttonStyle(.plain)
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(!canSubmit)
-            .help(isStreamingInAnotherSession
-                  ? "Another conversation is running"
-                  : "Send message")
+            .help(submitButtonHelp)
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
