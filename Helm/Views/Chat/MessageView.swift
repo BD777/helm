@@ -493,21 +493,27 @@ private struct ThinkingBlock: View {
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(.system(size: 12.5))
-                .foregroundStyle(.tertiary)
-            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-            Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
+        Button {
             withAnimation(.easeOut(duration: 0.18)) {
                 userPreference = !collapsed
             }
+        } label: {
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.tertiary)
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .accessibilityValue(collapsed ? "collapsed" : "expanded")
+            .accessibilityHint(collapsed ? "Show steps" : "Hide steps")
         }
+        .buttonStyle(.plain)
     }
 }
 

@@ -29,7 +29,25 @@ struct ToolCallCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
     private var header: some View {
+        if hasBody {
+            Button {
+                collapsed.toggle()
+            } label: {
+                headerContent
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(call.name) \(argDisplay)")
+                    .accessibilityValue(collapsed ? "collapsed" : "expanded")
+                    .accessibilityHint(collapsed ? "Show output" : "Hide output")
+            }
+            .buttonStyle(.plain)
+        } else {
+            headerContent
+        }
+    }
+
+    private var headerContent: some View {
         HStack(spacing: 8) {
             leadingIcon
                 .frame(width: 14, alignment: .center)
@@ -49,10 +67,6 @@ struct ToolCallCard: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            guard hasBody else { return }
-            collapsed.toggle()
-        }
     }
 
     /// One-line preview of the call's args. Newlines collapse to spaces so
