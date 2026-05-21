@@ -195,6 +195,7 @@ private struct SessionRow: View {
         let profile = store.profile(session.profileId)
         let model = profile.flatMap { store.model($0.primaryModelId) }
         let modelLabel = model?.label ?? "no model"
+        let isRunning = store.isSessionStreaming(session.id)
         return HStack(spacing: 8) {
             if let profile {
                 VendorBadge(vendor: profile.vendor)
@@ -212,9 +213,17 @@ private struct SessionRow: View {
                 HStack(spacing: 4) {
                     Text(modelLabel).font(.system(size: 10.5))
                     Text("·").font(.system(size: 10.5))
-                    Text(session.lastUpdate).font(.system(size: 10.5))
+                    if isRunning {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.55)
+                            .frame(width: 10, height: 10)
+                        Text("running").font(.system(size: 10.5))
+                    } else {
+                        Text(session.lastUpdate).font(.system(size: 10.5))
+                    }
                 }
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(isRunning ? .secondary : .tertiary)
             }
             Spacer(minLength: 0)
         }
@@ -225,6 +234,7 @@ private struct SessionRow: View {
                 .fill(isActive ? Color.helmSelected : Color.clear)
         )
         .contentShape(Rectangle())
+        .help(isRunning ? "Conversation is running" : session.title)
     }
 }
 

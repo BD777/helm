@@ -31,7 +31,8 @@ final class AppStore {
     }
     var isStreaming: Bool = false
     var selectedSessionIsStreaming: Bool {
-        isStreaming && activeSessionId == selectedSessionId
+        guard let selectedSessionId else { return false }
+        return isSessionStreaming(selectedSessionId)
     }
     var showProfilesSheet: Bool = false
 
@@ -237,6 +238,10 @@ final class AppStore {
             guard let new = newValue, let idx = sessions.firstIndex(where: { $0.id == new.id }) else { return }
             sessions[idx] = new
         }
+    }
+
+    func isSessionStreaming(_ sessionId: UUID) -> Bool {
+        isStreaming && activeSessionId == sessionId
     }
 
     func project(for sessionId: UUID) -> Project? {
