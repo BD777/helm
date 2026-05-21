@@ -32,6 +32,14 @@ struct HelmApp: App {
 final class HelmAppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // applicationWillTerminate is delivered on the main thread by AppKit;
         // assume MainActor isolation so we can call the @MainActor-isolated
@@ -41,4 +49,3 @@ final class HelmAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 }
-
