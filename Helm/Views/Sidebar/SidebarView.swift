@@ -211,19 +211,29 @@ private struct SessionRow: View {
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    Text(modelLabel).font(.system(size: 10.5))
-                    Text("·").font(.system(size: 10.5))
+                    Text(modelLabel)
+                        .font(.system(size: 10.5))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("·")
+                        .font(.system(size: 10.5))
+                        .fixedSize()
                     if isRunning {
                         ProgressView()
                             .controlSize(.mini)
                             .scaleEffect(0.55)
                             .frame(width: 10, height: 10)
-                        Text("running").font(.system(size: 10.5))
+                        Text("running")
+                            .font(.system(size: 10.5))
+                            .fixedSize()
                     } else {
-                        Text(session.lastUpdate).font(.system(size: 10.5))
+                        Text(session.lastUpdate)
+                            .font(.system(size: 10.5))
+                            .fixedSize()
                     }
                 }
                 .foregroundStyle(isRunning ? .secondary : .tertiary)
+                .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
