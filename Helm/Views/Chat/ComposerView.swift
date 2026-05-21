@@ -169,6 +169,7 @@ struct ComposerView: View {
         let profile = session.flatMap { store.profile($0.profileId) }
         let model = profile.flatMap { store.model($0.primaryModelId) }
         let modelLabel = model?.label ?? "no model"
+        let configLocked = session.map { store.isSessionStreaming($0.id) } ?? false
 
         return HStack(spacing: 8) {
             Button { pickerOpen.toggle() } label: {
@@ -184,6 +185,8 @@ struct ComposerView: View {
             .popover(isPresented: $pickerOpen, arrowEdge: .bottom) {
                 ModelPickerMenu().frame(width: 360)
             }
+            .disabled(configLocked)
+            .help(runConfigHelp(configLocked, "Change model"))
 
             if let session, let profile {
                 switch profile.vendor {
@@ -225,7 +228,12 @@ struct ComposerView: View {
         .padding(.top, 4)
     }
 
+    private func runConfigHelp(_ isLocked: Bool, _ unlockedHelp: String) -> String {
+        isLocked ? "Cannot change while response is running" : unlockedHelp
+    }
+
     private func claudePermissionChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
         let binding = Binding<ClaudePermissionMode>(
             get: { session.claudePermissionMode },
             set: { store.setClaudePermission($0, on: session.id) }
@@ -242,10 +250,12 @@ struct ComposerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Claude --permission-mode")
+        .disabled(isLocked)
+        .help(runConfigHelp(isLocked, "Claude --permission-mode"))
     }
 
     private func codexSandboxChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
         let binding = Binding<Profile.SandboxMode>(
             get: { session.codexSandboxMode },
             set: { store.setCodexSandbox($0, on: session.id) }
@@ -262,10 +272,12 @@ struct ComposerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Codex sandbox_mode")
+        .disabled(isLocked)
+        .help(runConfigHelp(isLocked, "Codex sandbox_mode"))
     }
 
     private func codexApprovalChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
         let binding = Binding<CodexApprovalMode>(
             get: { session.codexApprovalMode },
             set: { store.setCodexApproval($0, on: session.id) }
@@ -282,10 +294,12 @@ struct ComposerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Codex approval_policy")
+        .disabled(isLocked)
+        .help(runConfigHelp(isLocked, "Codex approval_policy"))
     }
 
     private func claudeEffortChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
         let binding = Binding<ClaudeEffort>(
             get: { session.claudeEffort },
             set: { store.setClaudeEffort($0, on: session.id) }
@@ -302,10 +316,12 @@ struct ComposerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Claude --effort")
+        .disabled(isLocked)
+        .help(runConfigHelp(isLocked, "Claude --effort"))
     }
 
     private func codexEffortChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
         let binding = Binding<Profile.ReasoningEffort>(
             get: { session.codexEffort },
             set: { store.setCodexEffort($0, on: session.id) }
@@ -322,7 +338,8 @@ struct ComposerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Codex model_reasoning_effort")
+        .disabled(isLocked)
+        .help(runConfigHelp(isLocked, "Codex model_reasoning_effort"))
     }
 
     private func chipLabel(icon: String, text: String) -> some View {
