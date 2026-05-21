@@ -41,6 +41,7 @@ struct SidebarView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(store.projects.isEmpty)
+            .keyboardShortcut("n", modifiers: .command)
             .help("New conversation (⌘N)")
 
             Spacer()
