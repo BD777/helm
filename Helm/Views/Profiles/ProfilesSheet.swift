@@ -1,0 +1,388 @@
+import SwiftUI
+
+/// Two-section sheet: Providers (with their Models nested underneath) and
+/// Profiles. Picking any row in the sidebar swaps the right pane to the
+/// corresponding editor.
+struct ProfilesSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: Selection? = nil
+    /// Set when the user clicks a provider's [+] — drives the AddModelsSheet
+    /// presentation. Cleared on dismiss.
+    @State private var addingForProvider: Provider? = nil
+    /// Providers expanded in the sidebar. New providers default to expanded
+    /// so freshly-added rows show their (initially empty) model bucket.
+    @State private var expanded: Set<UUID> = []
+
+    enum Selection: Hashable {
+        case provider(UUID)
+        case model(UUID)
+        case profile(UUID)
+    }
+
+    var body: some View {
+        HSplitView {
+            sidebar
+                .frame(minWidth: 240, idealWidth: 260, maxWidth: 320)
+
+            Group {
+                switch selection {
+                case .provider(let id):
+                    if let binding = providerBinding(id) {
+                        ProviderEditor(provider: binding,
+                                       onDelete: { store.deleteProvider(id); selection = nil })
+                            .id(id)
+                    } else { placeholder }
+                case .model(let id):
+                    if let binding = modelBinding(id) {
+                        ModelEditor(model: binding,
+                                    onDelete: { store.deleteModel(id); selection = nil })
+                            .id(id)
+                    } else { placeholder }
+                case .profile(let id):
+                    if let binding = profileBinding(id) {
+                        ProfileEditor(profile: binding,
+                                      onDelete: { store.deleteProfile(id); selection = nil })
+                            .id(id)
+                    } else { placeholder }
+                case .none:
+                    placeholder
+                }
+            }
+            .frame(minWidth: 480)
+        }
+        .frame(minWidth: 820, idealWidth: 940, minHeight: 520, idealHeight: 620)
+        .background(Color.helmChatBg)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .onAppear { syncSelection() }
+        .sheet(item: $addingForProvider) { provider in
+            AddModelsSheet(
+                provider: provider,
+                existingWireIds: Set(store.models(in: provider.id).map(\.providerModelId)),
+                onAdd: { entries in handleAdd(entries, to: provider) }
+            )
+        }
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    section(
+                        title: "Providers",
+                        addMenu: AnyView(
+                            Menu {
+                                Button("New Claude provider") { addProvider(.claude) }
+                                Button("New Codex provider")  { addProvider(.codex) }
+                            } label: { Image(systemName: "plus") }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                        )
+                    )
+                    if store.providers.isEmpty {
+                        empty("No providers yet.")
+                    } else {
+                        ForEach(store.providers) { p in
+                            providerRow(p)
+                            if expanded.contains(p.id) {
+                                let ms = store.models(in: p.id)
+                                if ms.isEmpty {
+                                    nestedEmpty("No models — click + to add.")
+                                } else {
+                                    ForEach(ms) { m in
+                                        modelRow(m)
+                                            .onTapGesture { selection = .model(m.id) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    section(
+                        title: "Profiles",
+                        addMenu: AnyView(
+                            Menu {
+                                Button("New Claude profile") { addProfile(.claude) }
+                                    .disabled(!hasViableProfileTargets(.claude))
+                                Button("New Codex profile")  { addProfile(.codex) }
+                                    .disabled(!hasViableProfileTargets(.codex))
+                            } label: { Image(systemName: "plus") }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                        )
+                    )
+                    if store.profiles.isEmpty {
+                        empty("No profiles yet.")
+                    } else {
+                        ForEach(store.profiles) { p in
+                            profileRow(p)
+                                .onTapGesture { selection = .profile(p.id) }
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .background(Color.helmSidebarBg)
+    }
+
+    private func section(title: String, addMenu: AnyView) -> some View {
+        HStack {
+            Text(title.uppercased())
+                .font(.system(size: 10.5, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+            Spacer()
+            addMenu
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+
+    private func providerRow(_ p: Provider) -> some View {
+        let isActive = selection == .provider(p.id)
+        let isExpanded = expanded.contains(p.id)
+        return HStack(spacing: 6) {
+            Button {
+                toggleExpanded(p.id)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+
+            VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(p.name).font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                Text(p.baseURL.isEmpty ? "no base URL" : p.baseURL)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            Button {
+                expanded.insert(p.id)
+                addingForProvider = p
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Add models from \(p.name)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(isActive ? Color.helmSelected : Color.clear)
+        )
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+        .onTapGesture { selection = .provider(p.id) }
+    }
+
+    private func modelRow(_ m: Model) -> some View {
+        let isActive = selection == .model(m.id)
+        return HStack(spacing: 8) {
+            Image(systemName: "cube.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .frame(width: 14, height: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(m.label)
+                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .lineLimit(1)
+                if !m.alias.isEmpty {
+                    Text(m.providerModelId)
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 32)
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(isActive ? Color.helmSelected : Color.clear)
+        )
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+    }
+
+    private func profileRow(_ p: Profile) -> some View {
+        let isActive = selection == .profile(p.id)
+        return HStack(spacing: 8) {
+            VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(p.name)
+                    .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                if let m = store.model(p.primaryModelId) {
+                    Text(m.label)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                } else {
+                    Text("missing model").font(.system(size: 10.5)).foregroundStyle(.red)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(isActive ? Color.helmSelected : Color.clear)
+        )
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+    }
+
+    private func empty(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 4)
+    }
+
+    private func nestedEmpty(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10.5))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 36)
+            .padding(.trailing, 8)
+            .padding(.vertical, 3)
+    }
+
+    private var placeholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "person.crop.rectangle.stack")
+                .font(.system(size: 36, weight: .regular))
+                .foregroundStyle(.tertiary)
+            Text("Pick a provider, model, or profile — or create one with the + buttons.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Bindings
+
+    private func providerBinding(_ id: UUID) -> Binding<Provider>? {
+        guard store.providers.contains(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { store.providers.first { $0.id == id }! },
+            set: { store.upsertProvider($0) }
+        )
+    }
+
+    private func modelBinding(_ id: UUID) -> Binding<Model>? {
+        guard store.models.contains(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { store.models.first { $0.id == id }! },
+            set: { store.upsertModel($0) }
+        )
+    }
+
+    private func profileBinding(_ id: UUID) -> Binding<Profile>? {
+        guard store.profiles.contains(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { store.profiles.first { $0.id == id }! },
+            set: { store.upsertProfile($0) }
+        )
+    }
+
+    // MARK: - Add actions
+
+    private func addProvider(_ vendor: Vendor) {
+        let p = Provider.newDefault(vendor: vendor, name: "new-\(vendor.rawValue)")
+        store.upsertProvider(p)
+        expanded.insert(p.id)
+        selection = .provider(p.id)
+    }
+
+    /// Called by AddModelsSheet's onAdd callback. Each catalog entry becomes
+    /// a Model row with empty alias — the user fills aliases later in the
+    /// per-model editor.
+    private func handleAdd(_ entries: [ModelCatalogEntry], to provider: Provider) {
+        var lastId: UUID? = nil
+        for entry in entries {
+            let m = Model(id: UUID(),
+                          providerId: provider.id,
+                          providerModelId: entry.id,
+                          alias: "")
+            store.upsertModel(m)
+            lastId = m.id
+        }
+        expanded.insert(provider.id)
+        if entries.count == 1, let id = lastId {
+            // Single add → jump straight to the editor so the user can name it.
+            selection = .model(id)
+        }
+    }
+
+    private func addProfile(_ vendor: Vendor) {
+        guard let provider = store.providers(for: vendor).first else { return }
+        guard let model = store.models(in: provider.id).first else { return }
+        let p = Profile(
+            id: UUID(),
+            name: "new-\(vendor.rawValue)",
+            vendor: vendor,
+            providerId: provider.id,
+            primaryModelId: model.id,
+            commandPath: "",
+            configRoot: nil,
+            opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
+            subagentModelId: nil,
+            autoCompactWindow: nil,
+            reasoningEffort: nil, serviceTier: nil, sandboxMode: nil,
+            delegateVendorProfile: nil
+        )
+        store.upsertProfile(p)
+        selection = .profile(p.id)
+    }
+
+    private func hasViableProfileTargets(_ vendor: Vendor) -> Bool {
+        store.providers(for: vendor).contains { provider in
+            !store.models(in: provider.id).isEmpty
+        }
+    }
+
+    private func toggleExpanded(_ id: UUID) {
+        if expanded.contains(id) { expanded.remove(id) }
+        else { expanded.insert(id) }
+    }
+
+    private func syncSelection() {
+        if selection == nil, let p = store.providers.first {
+            selection = .provider(p.id)
+        }
+        if expanded.isEmpty {
+            // Default-expand all providers on first open so models are visible.
+            expanded = Set(store.providers.map(\.id))
+        }
+    }
+}

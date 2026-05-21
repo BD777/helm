@@ -1,28 +1,48 @@
 import SwiftUI
 
+/// Lists profiles compatible with the current session's vendor. Tapping a
+/// profile rebinds the session. Cross-vendor switches need a new session
+/// (added later via the sidebar).
 struct ModelPickerMenu: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            group("Model · Claude") {
-                item(check: true,  title: "Opus 4.7",   sub: "latest · best")
-                item(check: false, title: "Sonnet 4.6", sub: "balanced")
-                item(check: false, title: "Haiku 4.5",  sub: "fast")
-            }
-            divider
-            group("Profile · Claude", hint: "switch keeps this session") {
-                item(check: true,  title: "super-relay", sub: "env overlay")
-                item(check: false, title: "direct (anthropic.com)", sub: "~/.claude default")
-                item(check: false, title: "modelhub-bridge", sub: "mhclaude wrapper")
-            }
-            divider
-            group("Claude settings") {
-                toggleRow(title: "Extended thinking", on: true)
-                pickerRow(title: "Compaction window", value: "200k")
-                pickerRow(title: "Subagent model", value: "same")
-            }
-            divider
-            group("Switch ecosystem", hint: "starts new session") {
-                ecosystemItem(label: "Cx", title: "Codex · gpt-5", sub: "reasoning effort: medium")
+            if let session = store.selectedSession,
+               let current = store.profile(session.profileId) {
+                let matching = store.profiles(for: current.vendor)
+                groupHeader("Profile · \(current.vendor.displayName)")
+                if matching.isEmpty {
+                    emptyHint("No profiles. Open Profiles (gear icon) to add one.")
+                } else {
+                    ForEach(matching) { profile in
+                        profileRow(profile, isCurrent: profile.id == current.id) {
+                            store.setProfile(profile, on: session.id)
+                            dismiss()
+                        }
+                    }
+                }
+                divider
+                Button {
+                    store.showProfilesSheet = true
+                    dismiss()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 11))
+                            .frame(width: 12)
+                        Text("Manage providers, models, profiles…")
+                            .font(.system(size: 12.5))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                emptyHint("No session selected.")
             }
         }
         .padding(6)
@@ -35,69 +55,41 @@ struct ModelPickerMenu: View {
             .padding(.vertical, 4)
     }
 
-    private func group<V: View>(_ label: String, hint: String? = nil, @ViewBuilder content: () -> V) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 0) {
-                Text(label.uppercased())
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(.tertiary)
-                if let hint {
-                    Text(" — \(hint)")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary.opacity(0.8))
-                }
-            }
+    private func groupHeader(_ label: String) -> some View {
+        Text(label.uppercased())
+            .font(.system(size: 10.5, weight: .semibold))
+            .tracking(0.5)
+            .foregroundStyle(.tertiary)
             .padding(.horizontal, 10)
             .padding(.top, 6)
             .padding(.bottom, 4)
-            content()
-        }
     }
 
-    private func item(check: Bool, title: String, sub: String) -> some View {
-        Button { } label: {
+    private func profileRow(_ profile: Profile, isCurrent: Bool, action: @escaping () -> Void) -> some View {
+        let model = store.model(profile.primaryModelId)
+        let modelLabel = model?.label ?? "missing model"
+        return Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: check ? "checkmark" : "")
+                Image(systemName: isCurrent ? "checkmark" : "")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.tint)
                     .frame(width: 12)
-                Text(title).font(.system(size: 12.5))
-                Spacer()
-                Text(sub).font(.system(size: 11)).foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func toggleRow(title: String, on: Bool) -> some View {
-        HStack(spacing: 10) {
-            Color.clear.frame(width: 12)
-            Text(title).font(.system(size: 12.5))
-            Spacer()
-            Toggle("", isOn: .constant(on))
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-    }
-
-    private func pickerRow(title: String, value: String) -> some View {
-        Button { } label: {
-            HStack(spacing: 10) {
-                Color.clear.frame(width: 12)
-                Text(title).font(.system(size: 12.5))
-                Spacer()
-                HStack(spacing: 3) {
-                    Text(value).font(.system(size: 11))
-                    Image(systemName: "chevron.down").font(.system(size: 8))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(profile.name).font(.system(size: 12.5))
+                    Text(modelLabel)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
-                .foregroundStyle(.tertiary)
+                Spacer()
+                if let m = model, !m.providerModelId.isEmpty {
+                    Text(m.providerModelId)
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 160, alignment: .trailing)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -106,18 +98,12 @@ struct ModelPickerMenu: View {
         .buttonStyle(.plain)
     }
 
-    private func ecosystemItem(label: String, title: String, sub: String) -> some View {
-        Button { } label: {
-            HStack(spacing: 10) {
-                VendorBadge(vendor: .codex).frame(width: 14, height: 14)
-                Text(title).font(.system(size: 12.5))
-                Spacer()
-                Text(sub).font(.system(size: 11)).foregroundStyle(.tertiary)
-            }
+    private func emptyHint(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

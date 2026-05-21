@@ -25,10 +25,11 @@ struct ComposerView: View {
             TextEditor(text: $text)
                 .font(.system(size: 13.5))
                 .scrollContentBackground(.hidden)
-                .frame(minHeight: 24, maxHeight: 200)
+                .frame(minHeight: 32, maxHeight: 200)
+                .padding(.top, 8)
                 .overlay(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text("Message Claude (⌘↵ to send, ⇧↵ for newline, / for slash commands)")
+                        Text("Message Claude (⌘↵ to send, ⇧↵ for newline)")
                             .font(.system(size: 13.5))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 5)
@@ -37,7 +38,6 @@ struct ComposerView: View {
                     }
                 }
                 .padding(.horizontal, 9)
-                .padding(.top, 4)
             footer
         }
         .background(
@@ -51,27 +51,24 @@ struct ComposerView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            Button { } label: {
-                Image(systemName: "paperclip")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 4)
+        let session = store.selectedSession
+        let profile = session.flatMap { store.profile($0.profileId) }
+        let model = profile.flatMap { store.model($0.primaryModelId) }
+        let modelLabel = model?.label ?? "no model"
 
+        return HStack(spacing: 8) {
             Button { pickerOpen.toggle() } label: {
-                if let s = store.selectedSession {
+                if let profile {
                     HStack(spacing: 6) {
-                        VendorBadge(vendor: s.vendor).frame(width: 14, height: 14)
-                        Text(s.model).font(.system(size: 12)).foregroundStyle(.secondary)
+                        VendorBadge(vendor: profile.vendor).frame(width: 14, height: 14)
+                        Text(modelLabel).font(.system(size: 12)).foregroundStyle(.secondary)
                         Image(systemName: "chevron.down").font(.system(size: 8)).foregroundStyle(.tertiary)
                     }
                 }
             }
             .buttonStyle(.plain)
             .popover(isPresented: $pickerOpen, arrowEdge: .bottom) {
-                ModelPickerMenu().frame(width: 320)
+                ModelPickerMenu().frame(width: 360)
             }
 
             Spacer()
@@ -82,10 +79,11 @@ struct ComposerView: View {
 
             Button {
                 if store.isStreaming {
-                    store.isStreaming = false
-                } else if !text.isEmpty {
+                    store.cancelStreaming()
+                } else {
+                    let toSend = text
                     text = ""
-                    store.isStreaming = true
+                    store.send(toSend)
                 }
             } label: {
                 Text(store.isStreaming ? "Stop" : "Send")
@@ -99,6 +97,7 @@ struct ComposerView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!store.isStreaming && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)

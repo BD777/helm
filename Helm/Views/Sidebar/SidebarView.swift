@@ -2,31 +2,38 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
-    @State private var search: String = ""
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var store = store
+        return VStack(spacing: 0) {
             toolbar
-            searchField
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.projects) { project in
-                        ProjectSection(project: project)
+                    if store.projects.isEmpty {
+                        emptyState
+                    } else {
+                        ForEach(store.projects) { project in
+                            ProjectSection(project: project)
+                        }
                     }
                     addProjectButton
                         .padding(.top, 4)
                 }
-                .padding(.horizontal, 6)
+                .padding(.top, 4)
                 .padding(.bottom, 12)
             }
         }
         .background(Color.helmSidebarBg)
+        .sheet(isPresented: $store.showProfilesSheet) {
+            ProfilesSheet()
+                .environment(store)
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 6) {
             Button {
-                // new chat
+                newChat()
             } label: {
                 Label("New", systemImage: "square.and.pencil")
                     .labelStyle(.titleAndIcon)
@@ -34,54 +41,42 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .disabled(store.projects.isEmpty)
             .help("New conversation (⌘N)")
 
             Spacer()
 
             Button {
-                // refresh
-            } label: { Image(systemName: "arrow.clockwise") }
+                store.showProfilesSheet = true
+            } label: { Image(systemName: "gearshape") }
                 .buttonStyle(.borderless)
-                .help("Refresh")
+                .help("Profiles & vendor settings")
         }
         .padding(.horizontal, 10)
         .frame(height: 44)
     }
 
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("No projects yet")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Add a folder to start a conversation in it.")
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-            TextField("Search sessions…", text: $search)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-            Text("⌘K")
-                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                .fill(Color.helmChatBg)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                        .stroke(Color.helmBorder, lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 10)
-        .padding(.bottom, 8)
+        .padding(.vertical, 12)
     }
 
     private var addProjectButton: some View {
         Button {
-            // add project
+            store.addLocalProjectViaPicker()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "plus")
                     .font(.system(size: 10, weight: .semibold))
-                Text("Add project (folder or SSH host)")
+                Text("Add project (folder)")
                     .font(.system(size: 12))
                 Spacer()
             }
@@ -91,6 +86,17 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// New chat in the active session's project, or in the first project if
+    /// nothing is selected. If no profile exists yet (so newSession would
+    /// silently no-op), route the user to the profiles sheet instead.
+    private func newChat() {
+        let projectId = store.selectedSession?.projectId ?? store.projects.first?.id
+        guard let projectId else { return }
+        if store.newSession(in: projectId) == nil {
+            store.showProfilesSheet = true
+        }
     }
 }
 
@@ -125,7 +131,7 @@ private struct ProjectSection: View {
             Spacer()
         }
         .padding(.vertical, 4)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .contentShape(Rectangle())
         .onTapGesture { store.toggleCollapsed(project.id) }
     }
@@ -164,7 +170,9 @@ private struct ProjectSection: View {
 
     private var newChatRow: some View {
         Button {
-            // new chat in this project
+            if store.newSession(in: project.id) == nil {
+                store.showProfilesSheet = true
+            }
         } label: {
             Text("+ New chat in \(project.name)")
                 .font(.system(size: 11.5))
@@ -179,20 +187,30 @@ private struct ProjectSection: View {
 }
 
 private struct SessionRow: View {
+    @Environment(AppStore.self) private var store
     let session: Session
     let isActive: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            VendorBadge(vendor: session.vendor)
-                .frame(width: 18, height: 18)
+        let profile = store.profile(session.profileId)
+        let model = profile.flatMap { store.model($0.primaryModelId) }
+        let modelLabel = model?.label ?? "no model"
+        return HStack(spacing: 8) {
+            if let profile {
+                VendorBadge(vendor: profile.vendor)
+                    .frame(width: 18, height: 18)
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.secondary.opacity(0.2))
+                    .frame(width: 18, height: 18)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.title)
                     .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 HStack(spacing: 4) {
-                    Text(session.model.lowercased()).font(.system(size: 10.5))
+                    Text(modelLabel).font(.system(size: 10.5))
                     Text("·").font(.system(size: 10.5))
                     Text(session.lastUpdate).font(.system(size: 10.5))
                 }
@@ -222,10 +240,4 @@ struct VendorBadge: View {
                 .foregroundStyle(.white)
         }
     }
-}
-
-#Preview {
-    SidebarView()
-        .environment(AppStore.demo())
-        .frame(width: 280, height: 600)
 }

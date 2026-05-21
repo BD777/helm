@@ -17,9 +17,3 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
     }
 }
-
-#Preview {
-    ContentView()
-        .environment(AppStore.demo())
-        .frame(width: 1180, height: 760)
-}

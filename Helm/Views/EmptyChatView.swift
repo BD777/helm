@@ -8,18 +8,34 @@ struct EmptyChatView: View {
             Image(systemName: "bubble.left.and.text.bubble.right")
                 .font(.system(size: 44, weight: .regular))
                 .foregroundStyle(.tertiary)
-            Text("No conversation selected")
+            Text(store.projects.isEmpty ? "No projects yet" : "No conversation selected")
                 .font(.system(size: 18, weight: .semibold))
-            Text("Pick a session on the left, or press ⌘N to start a new conversation.")
+            Text(store.projects.isEmpty
+                 ? "Add a project folder, then start a conversation in it."
+                 : "Pick a session on the left, or start a new conversation.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
             HStack(spacing: 8) {
-                Button("+ New chat") { }
+                if store.projects.isEmpty {
+                    Button("Add project") {
+                        store.addLocalProjectViaPicker()
+                    }
                     .buttonStyle(.borderedProminent)
-                Button("Add project") { }
+                } else {
+                    Button("+ New chat") {
+                        if let pid = store.projects.first?.id,
+                           store.newSession(in: pid) == nil {
+                            store.showProfilesSheet = true
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Add project") {
+                        store.addLocalProjectViaPicker()
+                    }
                     .buttonStyle(.bordered)
+                }
             }
             .padding(.top, 6)
         }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -6,16 +7,220 @@ import Observation
 final class AppStore {
     var projects: [Project]
     var sessions: [Session]
-    var selectedSessionId: UUID?
-    var pendingApproval: Bool = false
-    var isStreaming: Bool = false
-    var showPickerMenu: Bool = false
-
-    init(projects: [Project], sessions: [Session], selectedSessionId: UUID? = nil) {
-        self.projects = projects
-        self.sessions = sessions
-        self.selectedSessionId = selectedSessionId
+    var providers: [Provider]
+    var models: [Model]
+    var profiles: [Profile]
+    var selectedSessionId: UUID? {
+        didSet {
+            guard oldValue != selectedSessionId else { return }
+            // Drop the previously-selected session if it was an unsent draft.
+            // Codex-style: a draft only becomes a real sidebar row after the
+            // first message is sent (which flips isDraft to false in `send`).
+            if let oldId = oldValue,
+               let oldIdx = sessions.firstIndex(where: { $0.id == oldId }),
+               sessions[oldIdx].isDraft {
+                sessions.remove(at: oldIdx)
+            }
+            scheduleStateSave()
+            if let id = selectedSessionId {
+                Task { @MainActor [weak self] in
+                    await self?.ensureHistoryLoaded(for: id)
+                }
+            }
+        }
     }
+    var isStreaming: Bool = false
+    var showProfilesSheet: Bool = false
+
+    /// Wall-clock time of the most recent successful write to profiles.json
+    /// / state.json. Editors read these to render a "Saved · HH:mm:ss" hint
+    /// so the auto-save isn't invisible.
+    var lastProfilesSaveAt: Date?
+    var lastStateSaveAt: Date?
+
+    private let profileStore: ProfileStore
+    private let stateStore: StateStore
+    /// One vendor-specific session store per vendor, used to lazily load
+    /// history from the agent's own jsonl on disk and to enumerate sessions
+    /// for "import existing CLI session" flows. Keep one instance each so
+    /// repeated reads don't pay startup cost.
+    private let sessionStores: [Vendor: AgentSessionStore]
+
+    init(projects: [Project] = [],
+         sessions: [Session] = [],
+         selectedSessionId: UUID? = nil,
+         profileStore: ProfileStore = ProfileStore(),
+         stateStore: StateStore = StateStore()) {
+        self.profileStore = profileStore
+        self.stateStore = stateStore
+        self.sessionStores = [
+            .claude: ClaudeSessionStore(),
+            .codex:  CodexSessionStore(),
+        ]
+
+        let profilesFile = profileStore.load()
+        self.providers = profilesFile.providers
+        // Skip Models that lack a providerModelId — those are partial drafts
+        // that an earlier code path persisted before we added validation.
+        // They have no value and they pollute pickers.
+        let cleanModels = profilesFile.models.filter { !$0.providerModelId.isEmpty }
+        self.models = cleanModels
+        self.profiles = profilesFile.profiles
+
+        // Caller-provided projects/sessions (previews / tests) win over disk.
+        let stateFile = stateStore.load()
+        self.projects = projects.isEmpty ? stateFile.projects : projects
+        // Drop sessions that were never sent (no vendor-issued id, no jsonl
+        // backing). These are leftovers from clicks that pre-date the draft
+        // pattern — keeping them just clutters the sidebar.
+        let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
+            .filter { $0.vendorSessionId != nil }
+        self.sessions = cleanSessions
+        let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
+        self.selectedSessionId = cleanSessions.contains { $0.id == restoredSelection }
+            ? restoredSelection
+            : nil
+
+        // didSet doesn't fire from `init`, so kick off the lazy-load
+        // explicitly if there's a selected session restored from disk.
+        if let sid = self.selectedSessionId {
+            Task { @MainActor [weak self] in
+                await self?.ensureHistoryLoaded(for: sid)
+            }
+        }
+
+        // Expose write-completed timestamps for the UI. The stores invoke
+        // these callbacks via `DispatchQueue.main.async`, so we're already on
+        // the main thread — but the closures are `@Sendable`, so Swift needs
+        // `MainActor.assumeIsolated` to let us mutate `self`.
+        profileStore.onSaved = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.lastProfilesSaveAt = Date()
+            }
+        }
+        stateStore.onSaved = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.lastStateSaveAt = Date()
+            }
+        }
+
+        // If we filtered any invalid records during load, persist the cleaned
+        // table so the JSON on disk stops carrying the orphan.
+        if cleanModels.count != profilesFile.models.count {
+            scheduleProfilesSave()
+        }
+        if cleanSessions.count != stateFile.sessions.count {
+            scheduleStateSave()
+        }
+    }
+
+    // MARK: - Lookups
+
+    func profile(_ id: UUID) -> Profile? { profiles.first { $0.id == id } }
+    func provider(_ id: UUID) -> Provider? { providers.first { $0.id == id } }
+    func model(_ id: UUID) -> Model? { models.first { $0.id == id } }
+
+    func profiles(for vendor: Vendor) -> [Profile] {
+        profiles.filter { $0.vendor == vendor }
+    }
+
+    func providers(for vendor: Vendor) -> [Provider] {
+        providers.filter { $0.vendor == vendor }
+    }
+
+    func models(in providerId: UUID) -> [Model] {
+        models.filter { $0.providerId == providerId }
+    }
+
+    // MARK: - Provider / Model / Profile mutations
+
+    func upsertProvider(_ p: Provider) {
+        if let i = providers.firstIndex(where: { $0.id == p.id }) { providers[i] = p }
+        else { providers.append(p) }
+        scheduleProfilesSave()
+    }
+
+    func deleteProvider(_ id: UUID) {
+        providers.removeAll { $0.id == id }
+        // Cascade: drop models on this provider, profiles pointing at them.
+        let dropped = models.filter { $0.providerId == id }.map(\.id)
+        models.removeAll { $0.providerId == id }
+        profiles.removeAll { p in
+            p.providerId == id ||
+            dropped.contains(p.primaryModelId) ||
+            (p.opusModelId.map { dropped.contains($0) } ?? false) ||
+            (p.sonnetModelId.map { dropped.contains($0) } ?? false) ||
+            (p.haikuModelId.map { dropped.contains($0) } ?? false)
+        }
+        scheduleProfilesSave()
+    }
+
+    func upsertModel(_ m: Model) {
+        if let i = models.firstIndex(where: { $0.id == m.id }) { models[i] = m }
+        else { models.append(m) }
+        scheduleProfilesSave()
+    }
+
+    func deleteModel(_ id: UUID) {
+        models.removeAll { $0.id == id }
+        // Profiles pointing at it become invalid; drop them rather than
+        // leave dangling pointers.
+        profiles.removeAll { p in
+            p.primaryModelId == id ||
+            p.opusModelId == id ||
+            p.sonnetModelId == id ||
+            p.haikuModelId == id
+        }
+        scheduleProfilesSave()
+    }
+
+    func upsertProfile(_ p: Profile) {
+        if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
+        else { profiles.append(p) }
+        scheduleProfilesSave()
+    }
+
+    func deleteProfile(_ id: UUID) {
+        profiles.removeAll { $0.id == id }
+        scheduleProfilesSave()
+    }
+
+    private func scheduleProfilesSave() {
+        profileStore.scheduleSave(ProfileStoreFile(
+            version: ProfileStoreFile.currentVersion,
+            providers: providers,
+            models: models,
+            profiles: profiles
+        ))
+    }
+
+    private func scheduleStateSave() {
+        stateStore.scheduleSave(AppStateFile(
+            version: AppStateFile.currentVersion,
+            projects: projects,
+            sessions: sessions.filter { !$0.isDraft },
+            selectedSessionId: selectedSessionId
+        ))
+    }
+
+    /// Synchronously persist everything in-flight. Call from
+    /// `applicationWillTerminate` so debounced writes can't be lost on quit.
+    func flushAll() {
+        profileStore.flush(ProfileStoreFile(
+            version: ProfileStoreFile.currentVersion,
+            providers: providers,
+            models: models,
+            profiles: profiles
+        ))
+        stateStore.flush(AppStateFile(
+            version: AppStateFile.currentVersion,
+            projects: projects,
+            sessions: sessions.filter { !$0.isDraft },
+            selectedSessionId: selectedSessionId
+        ))
+    }
+
+    // MARK: - Session helpers
 
     var selectedSession: Session? {
         get { sessions.first { $0.id == selectedSessionId } }
@@ -31,126 +236,291 @@ final class AppStore {
     }
 
     func sessions(in projectId: UUID) -> [Session] {
-        sessions.filter { $0.projectId == projectId }
+        sessions.filter { $0.projectId == projectId && !$0.isDraft }
     }
 
     func toggleCollapsed(_ projectId: UUID) {
         guard let i = projects.firstIndex(where: { $0.id == projectId }) else { return }
         projects[i].collapsed.toggle()
+        scheduleStateSave()
     }
-}
 
-extension AppStore {
-    static func demo() -> AppStore {
-        let p1 = Project(id: UUID(), name: "helm", location: .local(path: "~/workspace/helm"))
-        let p2 = Project(id: UUID(), name: "ccm",  location: .local(path: "~/workspace/ccm"))
-        let p3 = Project(id: UUID(), name: "prod-api",
-                         location: .ssh(host: "prod-1", path: "/srv/api", status: .connecting),
-                         collapsed: true)
+    /// Display string for a session's current binding (e.g.
+    /// "Claude Sonnet 4.6 · es2-relay"). Falls back gracefully if the
+    /// profile / model has been deleted.
+    func sessionHeadline(_ session: Session) -> String {
+        guard let p = profile(session.profileId) else { return "—" }
+        guard let m = model(p.primaryModelId) else { return p.name }
+        return m.label + " · " + p.name
+    }
 
-        let s1 = Session(
+    // MARK: - Project / Session creation
+
+    /// Opens a folder picker. Adds the chosen directory as a local project.
+    /// Returns the new project id, or nil if the user cancelled.
+    @discardableResult
+    func addLocalProjectViaPicker() -> UUID? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Project"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        let name = url.lastPathComponent
+        let project = Project(id: UUID(), name: name, location: .local(path: url.path))
+        projects.append(project)
+        scheduleStateSave()
+        return project.id
+    }
+
+    /// Creates a new session in the given project, defaulting to the first
+    /// available profile (preferring Claude). Returns nil if no profiles exist.
+    @discardableResult
+    func newSession(in projectId: UUID,
+                    vendor: Vendor? = nil,
+                    profileId: UUID? = nil) -> UUID? {
+        let pickedProfile: Profile? = {
+            if let id = profileId, let p = profile(id) { return p }
+            if let v = vendor, let p = profiles(for: v).first { return p }
+            return profiles(for: .claude).first ?? profiles.first
+        }()
+        guard let profile = pickedProfile else { return nil }
+        let session = Session(
             id: UUID(),
-            projectId: p1.id,
-            title: "Wire up ACP adapter for claude -p",
-            vendor: .claude,
-            model: "Opus 4.7",
-            profileName: "super-relay",
-            approvalMode: .ask,
-            lastUpdate: "2m",
-            messages: MockMessages.demoConversation()
+            projectId: projectId,
+            title: "New chat",
+            profileId: profile.id,
+            lastUpdate: "now",
+            isDraft: true
         )
-        let s2 = Session(
-            id: UUID(), projectId: p1.id, title: "Sketch session index schema",
-            vendor: .codex, model: "gpt-5", profileName: "default", lastUpdate: "34m"
-        )
-        let s3 = Session(
-            id: UUID(), projectId: p1.id, title: "Rename Helm → Bosun?",
-            vendor: .claude, model: "Sonnet 4.6", profileName: "direct", lastUpdate: "2h"
-        )
-        let s4 = Session(
-            id: UUID(), projectId: p2.id, title: "Investigate compaction window",
-            vendor: .codex, model: "gpt-5", profileName: "default", lastUpdate: "1d"
-        )
-        let s5 = Session(
-            id: UUID(), projectId: p3.id, title: "Debug 502 spike",
-            vendor: .claude, model: "Opus 4.7", profileName: "remote-default", lastUpdate: "3h"
-        )
-
-        return AppStore(
-            projects: [p1, p2, p3],
-            sessions: [s1, s2, s3, s4, s5],
-            selectedSessionId: s1.id
-        )
+        sessions.append(session)
+        selectedSessionId = session.id  // didSet schedules state save + history load
+        return session.id
     }
-}
 
-enum MockMessages {
-    static func demoConversation() -> [Message] {
+    /// Switch the current session to a different profile (same vendor).
+    /// Cross-vendor switches start a new session instead — call newSession.
+    func setProfile(_ profile: Profile, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].profileId == profile.id ||
+              self.profile(sessions[idx].profileId)?.vendor == profile.vendor else { return }
+        sessions[idx].profileId = profile.id
+        scheduleStateSave()
+    }
+
+    /// Pull the vendor's session log from disk into this session's `messages`
+    /// if we haven't already. Idempotent — safe to call repeatedly. Failures
+    /// are logged but never thrown to the UI; an empty session just stays
+    /// empty.
+    func ensureHistoryLoaded(for sessionId: UUID) async {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[sIdx].messages.isEmpty,
+              let profile = profile(sessions[sIdx].profileId),
+              let project = projects.first(where: { $0.id == sessions[sIdx].projectId }),
+              let store = sessionStores[profile.vendor]
+        else { return }
+        // Use the vendor session id if we have one; otherwise our session.id
+        // doubles as the vendor id for Claude (we passed it via --session-id).
+        let vendorId = sessions[sIdx].vendorSessionId
+            ?? sessions[sIdx].id.uuidString.lowercased()
+        do {
+            let messages = try await store.history(sessionId: vendorId, project: project)
+            guard let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+                  sessions[stillIdx].messages.isEmpty else { return }
+            sessions[stillIdx].messages = messages
+        } catch {
+            NSLog("[helm.history] load failed for %@: %@",
+                  vendorId, error.localizedDescription)
+        }
+    }
+
+    // MARK: - Agent invocation
+
+    private var currentAdapter: AgentAdapter?
+    private var streamTask: Task<Void, Never>?
+    /// Maps vendor tool_use ids → our ToolCall.id for the active assistant
+    /// message so input fragments and tool_results can land on the right call.
+    private var toolMap: [String: UUID] = [:]
+
+    func send(_ prompt: String) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isStreaming else { return }
+        guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
+        // Promote a draft to a real session — first send is what makes the
+        // sidebar row appear.
+        if sessions[sIdx].isDraft {
+            sessions[sIdx].isDraft = false
+        }
+        let session = sessions[sIdx]
+        guard let project = projects.first(where: { $0.id == session.projectId }) else {
+            appendError(to: sIdx, "Session has no project (id=\(session.projectId))."); return
+        }
+        guard let profile = profile(session.profileId) else {
+            appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return
+        }
+
+        let runConfig: RunConfig
+        do {
+            runConfig = try RunConfigResolver.resolve(profile: profile,
+                                                     providers: providers,
+                                                     models: models)
+        } catch {
+            appendError(to: sIdx, error.localizedDescription)
+            return
+        }
+
         let userMsg = Message(
-            id: UUID(),
-            role: .user, who: "deng", meta: "2 min ago",
-            parts: [
-                .text("""
-                Set up an ACP adapter that wraps `claude -p`. Should accept `session/new`, `session/prompt`, stream tool calls as `session/update`. Use stdio transport.
-                """)
-            ]
+            id: UUID(), role: .user, who: "you", meta: nil,
+            parts: [.text(trimmed)]
         )
-
-        let bashCall = ToolCall(
+        let assistantMsg = Message(
             id: UUID(),
-            name: "Bash",
-            arg: "ls -la ~/workspace/helm && cat ~/workspace/helm/package.json 2>/dev/null",
-            status: .ok(exit: 0),
-            meta: "0.4s",
-            body: """
-            total 16
-            drwxr-xr-x  6 deng staff   192 May 20 15:42 .
-            drwxr-xr-x 18 deng staff   576 May 20 15:42 ..
-            drwxr-xr-x  3 deng staff    96 May 20 15:40 design/
-            drwxr-xr-x  2 deng staff    64 May 20 15:40 docs/
-            -rw-r--r--  1 deng staff   492 May 20 15:40 README.md
-            (no package.json)
-            """
+            role: .assistant(meta: "thinking…"),
+            who: runConfig.headlineModel,
+            meta: "thinking…",
+            parts: []
         )
+        sessions[sIdx].messages.append(userMsg)
+        sessions[sIdx].messages.append(assistantMsg)
+        let assistantId = assistantMsg.id
 
-        let diff = Diff(
-            id: UUID(),
-            path: "adapters/claude-acp/src/index.ts",
-            plus: 34, minus: 0,
-            lines: [
-                .init(lineNo: "+1", kind: .add, text: "import { createServer } from \"@agentclientprotocol/sdk/stdio\";"),
-                .init(lineNo: "+2", kind: .add, text: "import { spawn } from \"node:child_process\";"),
-                .init(lineNo: "+3", kind: .add, text: "import { randomUUID } from \"node:crypto\";"),
-                .init(lineNo: "4",  kind: .context, text: ""),
-                .init(lineNo: "+5", kind: .add, text: "const sessions = new Map<string, { cwd: string }>();"),
-                .init(lineNo: "+6", kind: .add, text: ""),
-                .init(lineNo: "+7", kind: .add, text: "const server = createServer({"),
-                .init(lineNo: "+8", kind: .add, text: "  initialize: async () => ({"),
-                .init(lineNo: "+9", kind: .add, text: "    protocolVersion: 1,"),
-            ]
-        )
+        isStreaming = true
+        toolMap = [:]
 
-        let assistant = Message(
-            id: UUID(),
-            role: .assistant(meta: "thought for 4s"),
-            who: "Claude · Opus 4.7", meta: "thought for 4s",
-            parts: [
-                .text("I'll scaffold a TypeScript package that implements the ACP server over stdio and shells out to `claude -p --output-format stream-json`. Let me first look at what's in `workspace/helm`."),
-                .toolCall(bashCall),
-                .text("No existing TS scaffold. I'll create one under `adapters/claude-acp`. Here's the plan: pnpm workspace, add `@agentclientprotocol/sdk`, spawn `claude -p` per `session/prompt`, map events."),
-                .diff(diff),
-                .text("Continuing with `session/prompt` handler…")
-            ]
-        )
+        let adapter: AgentAdapter
+        switch profile.vendor {
+        case .claude: adapter = ClaudeLocalAdapter()
+        case .codex:
+            appendError(to: sIdx, "Codex adapter not implemented yet.")
+            isStreaming = false
+            return
+        }
+        currentAdapter = adapter
 
-        return [userMsg, assistant]
+        let sessionId = session.id
+        do {
+            let stream = try adapter.start(prompt: trimmed, session: session, run: runConfig, project: project)
+            streamTask = Task { [weak self] in
+                do {
+                    for try await event in stream {
+                        self?.handle(event, sessionId: sessionId, assistantId: assistantId)
+                    }
+                } catch {
+                    self?.handle(.error(error.localizedDescription),
+                                 sessionId: sessionId, assistantId: assistantId)
+                }
+                self?.finishStreaming()
+            }
+        } catch {
+            appendError(to: sIdx, "Failed to start agent: \(error.localizedDescription)")
+            isStreaming = false
+        }
     }
 
-    static func demoApproval() -> Approval {
-        Approval(
+    func cancelStreaming() {
+        currentAdapter?.cancel()
+    }
+
+    private func finishStreaming() {
+        isStreaming = false
+        currentAdapter = nil
+        streamTask = nil
+        toolMap = [:]
+    }
+
+    private func handle(_ event: AgentEvent, sessionId: UUID, assistantId: UUID) {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        switch event {
+        case .sessionId(let id):
+            if sessions[sIdx].vendorSessionId != id {
+                sessions[sIdx].vendorSessionId = id
+                scheduleStateSave()
+            }
+
+        case .assistantTextDelta(let chunk):
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                msg.meta = "streaming…"
+                if case .text(let existing) = msg.parts.last {
+                    msg.parts[msg.parts.count - 1] = .text(existing + chunk)
+                } else {
+                    msg.parts.append(.text(chunk))
+                }
+            }
+
+        case .toolCallStart(let vendorId, let name, let input):
+            let call = ToolCall(id: UUID(), name: name, arg: input,
+                                status: .running, meta: nil, body: nil)
+            toolMap[vendorId] = call.id
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                msg.parts.append(.toolCall(call))
+            }
+
+        case .toolInputDelta(let vendorId, let fragment):
+            guard let callId = toolMap[vendorId] else { return }
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                guard let pIdx = msg.parts.firstIndex(where: {
+                    if case .toolCall(let t) = $0 { return t.id == callId } else { return false }
+                }), case .toolCall(var call) = msg.parts[pIdx] else { return }
+                call.arg += fragment
+                msg.parts[pIdx] = .toolCall(call)
+            }
+
+        case .toolResult(let vendorId, let output, let isError):
+            guard let callId = toolMap[vendorId] else { return }
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                guard let pIdx = msg.parts.firstIndex(where: {
+                    if case .toolCall(let t) = $0 { return t.id == callId } else { return false }
+                }), case .toolCall(var call) = msg.parts[pIdx] else { return }
+                call.body = output
+                call.status = isError ? .error(exit: 1) : .ok(exit: 0)
+                msg.parts[pIdx] = .toolCall(call)
+            }
+
+        case .messageStop:
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                if msg.meta == "streaming…" || msg.meta == "thinking…" {
+                    msg.meta = nil
+                }
+            }
+
+        case .finalResult(let text, let isError):
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                msg.role = .assistant(meta: isError ? "error" : "done")
+                msg.meta = isError ? "error" : nil
+                if !text.isEmpty {
+                    if msg.parts.isEmpty {
+                        msg.parts.append(.text(text))
+                    } else if isError {
+                        msg.parts.append(.text("⚠️ " + text))
+                    }
+                } else if isError, msg.parts.isEmpty {
+                    msg.parts.append(.text("⚠️ Agent reported an error but produced no output. Check Console.app for `helm.claude` logs."))
+                }
+            }
+
+        case .error(let detail):
+            mutateAssistant(at: sIdx, id: assistantId) { msg in
+                msg.meta = "error"
+                msg.parts.append(.text("⚠️ " + detail))
+            }
+        }
+    }
+
+    private func mutateAssistant(at sIdx: Int, id: UUID, _ mutate: (inout Message) -> Void) {
+        guard let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == id }) else { return }
+        var msg = sessions[sIdx].messages[mIdx]
+        mutate(&msg)
+        sessions[sIdx].messages[mIdx] = msg
+    }
+
+    private func appendError(to sIdx: Int, _ text: String) {
+        let errMsg = Message(
             id: UUID(),
-            command: "rm -rf node_modules && pnpm install",
-            cwd: "~/workspace/helm/adapters/claude-acp"
+            role: .assistant(meta: "error"),
+            who: "Helm",
+            meta: "error",
+            parts: [.text("⚠️ " + text)]
         )
+        sessions[sIdx].messages.append(errMsg)
     }
 }

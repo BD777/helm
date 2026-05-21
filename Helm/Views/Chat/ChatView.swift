@@ -13,9 +13,3 @@ struct ChatView: View {
         .background(Color.helmChatBg)
     }
 }
-
-#Preview {
-    ChatView()
-        .environment(AppStore.demo())
-        .frame(width: 900, height: 700)
-}

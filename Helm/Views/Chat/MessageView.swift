@@ -9,19 +9,10 @@ struct MessageListView: View {
                 if let s = store.selectedSession {
                     ForEach(s.messages) { msg in
                         MessageView(message: msg)
-                            .frame(maxWidth: DS.messageMaxWidth)
+                            .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.horizontal, 24)
-                            .padding(.bottom, 22)
-                    }
-                    if store.pendingApproval {
-                        VStack {
-                            ApprovalCard(approval: MockMessages.demoApproval())
-                        }
-                        .frame(maxWidth: DS.messageMaxWidth)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 22)
+                            .padding(.bottom, 18)
                     }
                 }
             }
@@ -37,10 +28,22 @@ struct MessageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             head
-            ForEach(message.parts) { part in
-                partView(part)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(message.parts.enumerated()), id: \.offset) { _, part in
+                    partView(part)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, isUser ? 12 : 0)
+            .padding(.vertical, isUser ? 8 : 0)
+            .background(
+                isUser
+                ? RoundedRectangle(cornerRadius: DS.cornerRadius)
+                    .fill(Color.accentColor.opacity(0.08))
+                : nil
+            )
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var head: some View {
@@ -53,6 +56,7 @@ struct MessageView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
             }
+            Spacer(minLength: 0)
         }
     }
 
@@ -69,12 +73,6 @@ struct MessageView: View {
                 .padding(.top, 2)
         case .toolCall(let t):
             ToolCallCard(call: t)
-                .padding(.vertical, 4)
-        case .diff(let d):
-            DiffCard(diff: d)
-                .padding(.vertical, 4)
-        case .approval(let a):
-            ApprovalCard(approval: a)
                 .padding(.vertical, 4)
         }
     }
