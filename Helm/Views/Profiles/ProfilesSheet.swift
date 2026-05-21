@@ -98,7 +98,6 @@ struct ProfilesSheet: View {
                                 } else {
                                     ForEach(ms) { m in
                                         modelRow(m)
-                                            .onTapGesture { selection = .model(m.id) }
                                     }
                                 }
                             }
@@ -123,7 +122,6 @@ struct ProfilesSheet: View {
                     } else {
                         ForEach(store.profiles) { p in
                             profileRow(p)
-                                .onTapGesture { selection = .profile(p.id) }
                         }
                     }
                 }
@@ -161,17 +159,32 @@ struct ProfilesSheet: View {
                     .frame(width: 12, height: 12)
             }
             .buttonStyle(.plain)
+            .help(isExpanded ? "Collapse \(p.name)" : "Expand \(p.name)")
+            .accessibilityLabel(isExpanded ? "Collapse \(p.name)" : "Expand \(p.name)")
 
-            VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(p.name).font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
-                Text(p.baseURL.isEmpty ? "no base URL" : p.baseURL)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+            Button {
+                selection = .provider(p.id)
+            } label: {
+                HStack(spacing: 6) {
+                    VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(p.name).font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                        Text(p.baseURL.isEmpty ? "no base URL" : p.baseURL)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(p.name) provider")
+                .accessibilityValue("\(p.vendor.displayName), \(p.baseURL.isEmpty ? "no base URL" : p.baseURL)")
+                .accessibilityHint("Edit provider")
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
+
             Button {
                 expanded.insert(p.id)
                 addingForProvider = p
@@ -193,67 +206,85 @@ struct ProfilesSheet: View {
         )
         .padding(.horizontal, 6)
         .contentShape(Rectangle())
-        .onTapGesture { selection = .provider(p.id) }
     }
 
     private func modelRow(_ m: Model) -> some View {
         let isActive = selection == .model(m.id)
-        return HStack(spacing: 8) {
-            Image(systemName: "cube.fill")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .frame(width: 14, height: 14)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(m.label)
-                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
-                    .lineLimit(1)
-                if !m.alias.isEmpty {
-                    Text(m.providerModelId)
-                        .font(DS.monoFontSmall)
-                        .foregroundStyle(.tertiary)
+        return Button {
+            selection = .model(m.id)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "cube.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 14, height: 14)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(m.label)
+                        .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                    if !m.alias.isEmpty {
+                        Text(m.providerModelId)
+                            .font(DS.monoFontSmall)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(.leading, 32)
+            .padding(.trailing, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(isActive ? Color.helmSelected : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(m.label)
+            .accessibilityValue(m.providerModelId)
+            .accessibilityHint("Edit model")
         }
-        .padding(.leading, 32)
-        .padding(.trailing, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                .fill(isActive ? Color.helmSelected : Color.clear)
-        )
+        .buttonStyle(.plain)
         .padding(.horizontal, 6)
-        .contentShape(Rectangle())
     }
 
     private func profileRow(_ p: Profile) -> some View {
         let isActive = selection == .profile(p.id)
-        return HStack(spacing: 8) {
-            VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(p.name)
-                    .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
-                if let m = store.model(p.primaryModelId) {
-                    Text(m.label)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                } else {
-                    Text("missing model").font(.system(size: 10.5)).foregroundStyle(.red)
+        let modelLabel = store.model(p.primaryModelId)?.label ?? "missing model"
+        return Button {
+            selection = .profile(p.id)
+        } label: {
+            HStack(spacing: 8) {
+                VendorBadge(vendor: p.vendor).frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(p.name)
+                        .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                    if let m = store.model(p.primaryModelId) {
+                        Text(m.label)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    } else {
+                        Text("missing model").font(.system(size: 10.5)).foregroundStyle(.red)
+                    }
                 }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(isActive ? Color.helmSelected : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(p.name) profile")
+            .accessibilityValue("\(p.vendor.displayName), \(modelLabel)")
+            .accessibilityHint("Edit profile")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                .fill(isActive ? Color.helmSelected : Color.clear)
-        )
+        .buttonStyle(.plain)
         .padding(.horizontal, 6)
-        .contentShape(Rectangle())
     }
 
     private func empty(_ text: String) -> some View {
