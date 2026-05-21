@@ -122,22 +122,30 @@ private struct ProjectSection: View {
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: project.collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 10)
-            Text(project.name.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.secondary)
-            locationLabel
-            Spacer()
+        Button {
+            store.toggleCollapsed(project.id)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: project.collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                Text(project.name.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.secondary)
+                locationLabel
+                Spacer()
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(project.name)
+            .accessibilityValue(project.collapsed ? "collapsed" : "expanded")
+            .accessibilityHint(project.collapsed ? "Expand project" : "Collapse project")
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .contentShape(Rectangle())
-        .onTapGesture { store.toggleCollapsed(project.id) }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
