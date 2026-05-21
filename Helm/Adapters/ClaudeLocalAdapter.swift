@@ -9,6 +9,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     private let lock = NSLock()
 
     func start(prompt: String,
+               attachments: [ImageAttachment],
                session: Session,
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error> {
@@ -42,9 +43,11 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
 
         var env = ProcessInfo.processInfo.environment
         // GUI apps inherit a stripped PATH — add the usual command locations
-        // so a bare `claude` resolves and so child tools work.
-        let extras = ["/opt/homebrew/bin", "/usr/local/bin",
-                      "\(NSHomeDirectory())/.local/bin"]
+        // so a bare `claude` resolves and so child tools work. ~/.local/bin
+        // (new native installer) goes first so it wins over older brew npm
+        // installs at /opt/homebrew/bin.
+        let extras = ["\(NSHomeDirectory())/.local/bin",
+                      "/opt/homebrew/bin", "/usr/local/bin"]
         let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [existing]).joined(separator: ":")
         for (k, v) in run.env { env[k] = v }
@@ -120,12 +123,32 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             }
 
             // Send the user's prompt as a single stream-json record, then
-            // close stdin so the CLI knows the input is done.
+            // close stdin so the CLI knows the input is done. Image
+            // attachments become base64 image content blocks alongside the
+            // text — the Anthropic API's only on-disk option (URL sources
+            // require HTTP, no file://). This base64 ends up in Claude's own
+            // session JSONL on disk; Helm uses its own image manifest for
+            // history rehydration so we don't pay that cost twice.
+            var content: [[String: Any]] = [["type": "text", "text": prompt]]
+            for att in attachments {
+                guard let bytes = try? Data(contentsOf: att.fileURL) else {
+                    continuation.yield(.error("failed to read attachment: \(att.fileURL.lastPathComponent)"))
+                    continue
+                }
+                content.append([
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": att.mediaType,
+                        "data": bytes.base64EncodedString(),
+                    ],
+                ])
+            }
             let record: [String: Any] = [
                 "type": "user",
                 "message": [
                     "role": "user",
-                    "content": [["type": "text", "text": prompt]],
+                    "content": content,
                 ],
             ]
             do {
@@ -153,8 +176,8 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         if candidate.contains("/") {
             return (candidate as NSString).expandingTildeInPath
         }
-        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
-                    "\(NSHomeDirectory())/.local/bin"] {
+        for dir in ["\(NSHomeDirectory())/.local/bin",
+                    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
             let full = "\(dir)/\(candidate)"
             if FileManager.default.isExecutableFile(atPath: full) { return full }
         }

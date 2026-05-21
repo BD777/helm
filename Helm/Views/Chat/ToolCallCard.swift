@@ -1,87 +1,85 @@
 import SwiftUI
 
+/// Inline rendering of a tool invocation. Mirrors the Codex CLI app's quiet
+/// style: a single muted-gray line per call (`▶ Bash xcodebuild ...`) that
+/// expands to reveal the captured stdout/stderr below. No card, no border —
+/// the row sits in the message flow alongside text so a turn that intersperses
+/// thought + commands reads as one paragraph instead of a stack of boxes.
 struct ToolCallCard: View {
     let call: ToolCall
     @State private var collapsed: Bool = true
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 6) {
             header
-            if !collapsed, let body = call.body {
-                Divider()
+            if !collapsed, let bodyText = call.body, !bodyText.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    Text(body)
+                    Text(bodyText)
                         .font(DS.monoFontSmall)
                         .foregroundStyle(.secondary)
-                        .padding(10)
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 240)
+                // Indent under the icon so the body visually attaches to
+                // the row above it.
+                .padding(.leading, 22)
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadius)
-                .fill(Color.helmCard)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.cornerRadius)
-                        .stroke(Color.helmBorder, lineWidth: 1)
-                )
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 10)
+            leadingIcon
+                .frame(width: 14, alignment: .center)
             Text(call.name)
-                .font(.system(size: 12, weight: .semibold))
-            Text(call.arg)
-                .font(DS.monoFontSmall)
+                .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(.secondary)
+            Text(argDisplay)
+                .font(DS.monoFontSmall)
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if let m = call.meta {
-                Text(m)
-                    .font(.system(size: 11))
+            Spacer(minLength: 0)
+            if hasBody {
+                Image(systemName: collapsed ? "chevron.down" : "chevron.up")
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            statusBadge
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
         .contentShape(Rectangle())
-        .onTapGesture { collapsed.toggle() }
+        .onTapGesture {
+            guard hasBody else { return }
+            collapsed.toggle()
+        }
+    }
+
+    /// One-line preview of the call's args. Newlines collapse to spaces so
+    /// the row stays single-line; the full payload is in the expanded body.
+    private var argDisplay: String {
+        call.arg.replacingOccurrences(of: "\n", with: " ")
     }
 
     @ViewBuilder
-    private var statusBadge: some View {
+    private var leadingIcon: some View {
         switch call.status {
-        case .ok(let exit):
-            Text("exit \(exit)")
-                .badgeStyle(bg: .green.opacity(0.18), fg: .green)
-        case .error(let exit):
-            Text("exit \(exit)")
-                .badgeStyle(bg: .red.opacity(0.18), fg: .red)
+        case .ok:
+            Image(systemName: "terminal")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        case .error:
+            Image(systemName: "terminal")
+                .font(.system(size: 11))
+                .foregroundStyle(.red.opacity(0.75))
         case .running:
-            HStack(spacing: 4) {
-                ProgressView().controlSize(.mini)
-                Text("running")
-            }
-            .badgeStyle(bg: .orange.opacity(0.18), fg: .orange)
+            ProgressView()
+                .controlSize(.mini)
         }
     }
-}
 
-private extension View {
-    func badgeStyle(bg: Color, fg: Color) -> some View {
-        self
-            .font(.system(size: 10.5))
-            .foregroundStyle(fg)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(RoundedRectangle(cornerRadius: 4).fill(bg))
+    private var hasBody: Bool {
+        if let b = call.body { return !b.isEmpty }
+        return false
     }
 }

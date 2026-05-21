@@ -11,6 +11,7 @@ struct HelmApp: App {
             ContentView()
                 .environment(store)
                 .frame(minWidth: 880, minHeight: 560)
+                .toolbarBackground(.hidden, for: .windowToolbar)
                 .onAppear {
                     // Hand the live store to the AppKit delegate so
                     // applicationWillTerminate can synchronously flush both

@@ -160,10 +160,54 @@ struct Project: Identifiable, Hashable, Codable {
     var collapsed: Bool = false
 }
 
-enum ApprovalMode: String, CaseIterable, Hashable {
-    case readOnly = "Read-only"
-    case ask = "Ask"
-    case auto = "Auto"
+/// Claude's `--permission-mode`. One axis covers both "what can be touched"
+/// and "when to ask" — Claude doesn't separate them. Mirrored 1:1 to the CLI
+/// flag's own values.
+enum ClaudePermissionMode: String, CaseIterable, Hashable, Codable {
+    case plan
+    case defaultMode = "default"
+    case acceptEdits
+    case bypassPermissions
+
+    var displayName: String {
+        switch self {
+        case .plan:              return "Plan"
+        case .defaultMode:       return "Default"
+        case .acceptEdits:       return "Accept edits"
+        case .bypassPermissions: return "Bypass"
+        }
+    }
+}
+
+/// Codex's `approval_policy`. The CLI also accepts `untrusted` and a
+/// deprecated `on-failure`; we hide both — `on-request` and `never` are the
+/// two Codex itself recommends.
+enum CodexApprovalMode: String, CaseIterable, Hashable, Codable {
+    case onRequest = "on-request"
+    case never
+
+    var displayName: String {
+        switch self {
+        case .onRequest: return "On request"
+        case .never:     return "Never"
+        }
+    }
+}
+
+/// Claude's `--effort` flag. Five levels — `max` is unique to Claude; Codex's
+/// `model_reasoning_effort` tops out at `xhigh`.
+enum ClaudeEffort: String, CaseIterable, Hashable, Codable {
+    case low, medium, high, xhigh, max
+
+    var displayName: String {
+        switch self {
+        case .low:    return "Low"
+        case .medium: return "Medium"
+        case .high:   return "High"
+        case .xhigh:  return "Xhigh"
+        case .max:    return "Max"
+        }
+    }
 }
 
 struct Session: Identifiable, Hashable, Codable {
@@ -172,9 +216,24 @@ struct Session: Identifiable, Hashable, Codable {
     var title: String
     /// Profile bound to this session. UI resolves it via AppStore.
     var profileId: UUID
-    var approvalMode: ApprovalMode = .ask
+    /// Claude's single-axis permission knob. Used only when the session's
+    /// profile vendor is Claude — left at default otherwise.
+    var claudePermissionMode: ClaudePermissionMode = .defaultMode
+    /// Codex sandbox scope. Reuses `Profile.SandboxMode` since the values are
+    /// the same set; profile-level field stays `Optional` (its nil = "no
+    /// override"), session-level always carries a concrete value.
+    var codexSandboxMode: Profile.SandboxMode = .workspace
+    /// Codex approval policy. Used only for Codex sessions.
+    var codexApprovalMode: CodexApprovalMode = .onRequest
+    /// Claude reasoning effort (`--effort`). Used only for Claude sessions.
+    var claudeEffort: ClaudeEffort = .medium
+    /// Codex reasoning effort (`model_reasoning_effort`). Reuses
+    /// `Profile.ReasoningEffort` since the values are the same set.
+    var codexEffort: Profile.ReasoningEffort = .medium
     var lastUpdate: String
-    var messages: [Message] = []
+    /// Ordered transcript: real dialog turns (`.message`) interleaved with
+    /// runtime events (`.event` — compact summaries, etc). See [[TranscriptItem]].
+    var transcript: [TranscriptItem] = []
     /// Vendor-issued session id (e.g. Claude CLI `--session-id`). nil until
     /// the agent emits its init event; used to resume across restarts.
     var vendorSessionId: String? = nil
@@ -183,25 +242,36 @@ struct Session: Identifiable, Hashable, Codable {
     /// accidental click doesn't litter persistent state with empty rows.
     var isDraft: Bool = false
 
-    // Persistence: messages live in the vendor's own session log
-    // (~/.claude/projects/...), approvalMode is runtime UI state, and
-    // isDraft is transient by design — all three are skipped from Codable.
-    // See [[helm-storage]] for the layering.
+    // Persistence: transcript items live in the vendor's own session log
+    // (~/.claude/projects/...) and isDraft is transient by design — both are
+    // skipped from Codable. The three vendor-native chip fields persist so
+    // the user's picks survive restart. See [[helm-storage]] for layering.
     private enum CodingKeys: String, CodingKey {
-        case id, projectId, title, profileId, lastUpdate, vendorSessionId
+        case id, projectId, title, profileId, lastUpdate, vendorSessionId,
+             claudePermissionMode, codexSandboxMode, codexApprovalMode,
+             claudeEffort, codexEffort
     }
 
     init(id: UUID, projectId: UUID, title: String, profileId: UUID,
-         approvalMode: ApprovalMode = .ask, lastUpdate: String,
-         messages: [Message] = [], vendorSessionId: String? = nil,
+         claudePermissionMode: ClaudePermissionMode = .defaultMode,
+         codexSandboxMode: Profile.SandboxMode = .workspace,
+         codexApprovalMode: CodexApprovalMode = .onRequest,
+         claudeEffort: ClaudeEffort = .medium,
+         codexEffort: Profile.ReasoningEffort = .medium,
+         lastUpdate: String,
+         transcript: [TranscriptItem] = [], vendorSessionId: String? = nil,
          isDraft: Bool = false) {
         self.id = id
         self.projectId = projectId
         self.title = title
         self.profileId = profileId
-        self.approvalMode = approvalMode
+        self.claudePermissionMode = claudePermissionMode
+        self.codexSandboxMode = codexSandboxMode
+        self.codexApprovalMode = codexApprovalMode
+        self.claudeEffort = claudeEffort
+        self.codexEffort = codexEffort
         self.lastUpdate = lastUpdate
-        self.messages = messages
+        self.transcript = transcript
         self.vendorSessionId = vendorSessionId
         self.isDraft = isDraft
     }
@@ -214,8 +284,12 @@ struct Session: Identifiable, Hashable, Codable {
         self.profileId = try c.decode(UUID.self, forKey: .profileId)
         self.lastUpdate = try c.decode(String.self, forKey: .lastUpdate)
         self.vendorSessionId = try c.decodeIfPresent(String.self, forKey: .vendorSessionId)
-        self.approvalMode = .ask
-        self.messages = []
+        self.claudePermissionMode = try c.decodeIfPresent(ClaudePermissionMode.self, forKey: .claudePermissionMode) ?? .defaultMode
+        self.codexSandboxMode = try c.decodeIfPresent(Profile.SandboxMode.self, forKey: .codexSandboxMode) ?? .workspace
+        self.codexApprovalMode = try c.decodeIfPresent(CodexApprovalMode.self, forKey: .codexApprovalMode) ?? .onRequest
+        self.claudeEffort = try c.decodeIfPresent(ClaudeEffort.self, forKey: .claudeEffort) ?? .medium
+        self.codexEffort = try c.decodeIfPresent(Profile.ReasoningEffort.self, forKey: .codexEffort) ?? .medium
+        self.transcript = []
         self.isDraft = false
     }
 
@@ -227,6 +301,11 @@ struct Session: Identifiable, Hashable, Codable {
         try c.encode(profileId, forKey: .profileId)
         try c.encode(lastUpdate, forKey: .lastUpdate)
         try c.encodeIfPresent(vendorSessionId, forKey: .vendorSessionId)
+        try c.encode(claudePermissionMode, forKey: .claudePermissionMode)
+        try c.encode(codexSandboxMode, forKey: .codexSandboxMode)
+        try c.encode(codexApprovalMode, forKey: .codexApprovalMode)
+        try c.encode(claudeEffort, forKey: .claudeEffort)
+        try c.encode(codexEffort, forKey: .codexEffort)
     }
 }
 
@@ -239,15 +318,79 @@ struct Message: Identifiable, Hashable {
     var parts: [Part]
 }
 
+/// One item in a session's ordered transcript. Either a real dialog turn
+/// (`.message`) or a runtime event (`.event` — compact summary, model
+/// switch, etc). Events have no sender or parts; they render as inline
+/// markers, not chat bubbles. Modeled as a sum at the top so adding a new
+/// event kind forces every renderer/transformer to opt in.
+enum TranscriptItem: Identifiable, Hashable {
+    case message(Message)
+    case event(SessionEvent)
+
+    var id: UUID {
+        switch self {
+        case .message(let m): return m.id
+        case .event(let e):   return e.id
+        }
+    }
+
+    /// Convenience for code paths that need the dialog turn (sidebar
+    /// preview, ordinal counters, streaming mutators). Events return nil.
+    var message: Message? {
+        if case .message(let m) = self { return m }
+        return nil
+    }
+}
+
+/// A non-dialog runtime event written into the transcript by the agent.
+/// Today only `.compactSummary` exists (Claude's auto-compact summary);
+/// future kinds (`.modelSwitch`, `.permissionChange`) slot in here.
+enum SessionEvent: Identifiable, Hashable {
+    /// Claude wrote a context-compaction summary. The model treats it as a
+    /// user-role message internally, but to the human it's just "we hit the
+    /// limit and the prior conversation was summarized." `summary` is the
+    /// raw text Claude generated — useful if the user wants to inspect it.
+    case compactSummary(id: UUID, summary: String)
+
+    var id: UUID {
+        switch self {
+        case .compactSummary(let id, _): return id
+        }
+    }
+}
+
 enum Part: Hashable, Identifiable {
     case text(String)
     case toolCall(ToolCall)
+    /// Local file URL for an image attached to a user message. We store the
+    /// path (not bytes) so state.json / RAM stay small; the file lives under
+    /// `AppPaths.imagesDir(for:)`.
+    case image(URL)
 
     var id: String {
         switch self {
         case .text(let s):     return "t:" + String(s.hashValue)
         case .toolCall(let t): return "c:" + t.id.uuidString
+        case .image(let u):    return "i:" + u.lastPathComponent
         }
+    }
+}
+
+/// Composer-side, in-flight reference to a pasted image. Points at an
+/// already-on-disk file so Send doesn't have to re-encode bytes.
+/// `contentHash` is the hex MD5 of the PNG payload — used for dedupe so
+/// pasting the same image twice doesn't add a second thumbnail.
+struct ImageAttachment: Identifiable, Hashable {
+    let id: UUID
+    let fileURL: URL
+    let mediaType: String   // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    let contentHash: String
+
+    init(id: UUID = UUID(), fileURL: URL, mediaType: String, contentHash: String) {
+        self.id = id
+        self.fileURL = fileURL
+        self.mediaType = mediaType
+        self.contentHash = contentHash
     }
 }
 

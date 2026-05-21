@@ -32,6 +32,12 @@ final class AppStore {
     var isStreaming: Bool = false
     var showProfilesSheet: Bool = false
 
+    /// Bumped each time the user sends a message. The chat list watches this
+    /// to force a scroll-to-bottom after Send, regardless of where the user
+    /// was previously parked. Distinct from the geometry-based stick-to-
+    /// bottom: pressing Send is an explicit "show me what just landed" intent.
+    var sendTick: Int = 0
+
     /// Wall-clock time of the most recent successful write to profiles.json
     /// / state.json. Editors read these to render a "Saved · HH:mm:ss" hint
     /// so the auto-save isn't invisible.
@@ -285,11 +291,21 @@ final class AppStore {
             return profiles(for: .claude).first ?? profiles.first
         }()
         guard let profile = pickedProfile else { return nil }
+        // Codex sessions seed sandbox + effort from the profile's defaults if
+        // any; the other fields stay at vendor-native defaults and are simply
+        // ignored when the session's vendor doesn't use them.
+        let sandbox = profile.sandboxMode ?? .workspace
+        let codexEffort = profile.reasoningEffort ?? .medium
         let session = Session(
             id: UUID(),
             projectId: projectId,
             title: "New chat",
             profileId: profile.id,
+            claudePermissionMode: .defaultMode,
+            codexSandboxMode: sandbox,
+            codexApprovalMode: .onRequest,
+            claudeEffort: .medium,
+            codexEffort: codexEffort,
             lastUpdate: "now",
             isDraft: true
         )
@@ -308,13 +324,54 @@ final class AppStore {
         scheduleStateSave()
     }
 
-    /// Pull the vendor's session log from disk into this session's `messages`
+    /// Update the session's Claude permission mode. No-op for non-Claude
+    /// sessions (the field is still stored, just unused at spawn time).
+    func setClaudePermission(_ mode: ClaudePermissionMode, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].claudePermissionMode != mode else { return }
+        sessions[idx].claudePermissionMode = mode
+        scheduleStateSave()
+    }
+
+    /// Update the session's Codex sandbox scope.
+    func setCodexSandbox(_ mode: Profile.SandboxMode, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].codexSandboxMode != mode else { return }
+        sessions[idx].codexSandboxMode = mode
+        scheduleStateSave()
+    }
+
+    /// Update the session's Codex approval policy.
+    func setCodexApproval(_ mode: CodexApprovalMode, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].codexApprovalMode != mode else { return }
+        sessions[idx].codexApprovalMode = mode
+        scheduleStateSave()
+    }
+
+    /// Update the session's Claude reasoning effort.
+    func setClaudeEffort(_ effort: ClaudeEffort, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].claudeEffort != effort else { return }
+        sessions[idx].claudeEffort = effort
+        scheduleStateSave()
+    }
+
+    /// Update the session's Codex reasoning effort.
+    func setCodexEffort(_ effort: Profile.ReasoningEffort, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard sessions[idx].codexEffort != effort else { return }
+        sessions[idx].codexEffort = effort
+        scheduleStateSave()
+    }
+
+    /// Pull the vendor's session log from disk into this session's transcript
     /// if we haven't already. Idempotent — safe to call repeatedly. Failures
     /// are logged but never thrown to the UI; an empty session just stays
     /// empty.
     func ensureHistoryLoaded(for sessionId: UUID) async {
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-              sessions[sIdx].messages.isEmpty,
+              sessions[sIdx].transcript.isEmpty,
               let profile = profile(sessions[sIdx].profileId),
               let project = projects.first(where: { $0.id == sessions[sIdx].projectId }),
               let store = sessionStores[profile.vendor]
@@ -324,10 +381,10 @@ final class AppStore {
         let vendorId = sessions[sIdx].vendorSessionId
             ?? sessions[sIdx].id.uuidString.lowercased()
         do {
-            let messages = try await store.history(sessionId: vendorId, project: project)
+            let items = try await store.history(sessionId: vendorId, project: project)
             guard let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-                  sessions[stillIdx].messages.isEmpty else { return }
-            sessions[stillIdx].messages = messages
+                  sessions[stillIdx].transcript.isEmpty else { return }
+            sessions[stillIdx].transcript = items
         } catch {
             NSLog("[helm.history] load failed for %@: %@",
                   vendorId, error.localizedDescription)
@@ -342,9 +399,9 @@ final class AppStore {
     /// message so input fragments and tool_results can land on the right call.
     private var toolMap: [String: UUID] = [:]
 
-    func send(_ prompt: String) {
+    func send(_ prompt: String, attachments: [ImageAttachment] = []) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isStreaming else { return }
+        guard !isStreaming, !trimmed.isEmpty || !attachments.isEmpty else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
         // Promote a draft to a real session — first send is what makes the
         // sidebar row appear.
@@ -362,6 +419,7 @@ final class AppStore {
         let runConfig: RunConfig
         do {
             runConfig = try RunConfigResolver.resolve(profile: profile,
+                                                     session: session,
                                                      providers: providers,
                                                      models: models)
         } catch {
@@ -369,9 +427,12 @@ final class AppStore {
             return
         }
 
+        var userParts: [Part] = []
+        if !trimmed.isEmpty { userParts.append(.text(trimmed)) }
+        for att in attachments { userParts.append(.image(att.fileURL)) }
         let userMsg = Message(
             id: UUID(), role: .user, who: "you", meta: nil,
-            parts: [.text(trimmed)]
+            parts: userParts
         )
         let assistantMsg = Message(
             id: UUID(),
@@ -380,9 +441,23 @@ final class AppStore {
             meta: "thinking…",
             parts: []
         )
-        sessions[sIdx].messages.append(userMsg)
-        sessions[sIdx].messages.append(assistantMsg)
+        sessions[sIdx].transcript.append(.message(userMsg))
+        sessions[sIdx].transcript.append(.message(assistantMsg))
         let assistantId = assistantMsg.id
+        sendTick &+= 1
+
+        // Append a manifest entry indexed by the user-message ordinal so we
+        // can rehydrate thumbnails after restart without paying base64 cost.
+        if !attachments.isEmpty {
+            let userOrdinal = sessions[sIdx].transcript
+                .dropLast() // exclude the assistant placeholder we just added
+                .compactMap { $0.message }
+                .filter { if case .user = $0.role { return true } else { return false } }
+                .count - 1
+            ImageManifestStore.append(sessionId: session.id,
+                                      userMessageOrdinal: userOrdinal,
+                                      filenames: attachments.map { $0.fileURL.lastPathComponent })
+        }
 
         isStreaming = true
         toolMap = [:]
@@ -399,7 +474,7 @@ final class AppStore {
 
         let sessionId = session.id
         do {
-            let stream = try adapter.start(prompt: trimmed, session: session, run: runConfig, project: project)
+            let stream = try adapter.start(prompt: trimmed, attachments: attachments, session: session, run: runConfig, project: project)
             streamTask = Task { [weak self] in
                 do {
                     for try await event in stream {
@@ -507,10 +582,11 @@ final class AppStore {
     }
 
     private func mutateAssistant(at sIdx: Int, id: UUID, _ mutate: (inout Message) -> Void) {
-        guard let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == id }) else { return }
-        var msg = sessions[sIdx].messages[mIdx]
+        guard let mIdx = sessions[sIdx].transcript.firstIndex(where: {
+            $0.message?.id == id
+        }), case .message(var msg) = sessions[sIdx].transcript[mIdx] else { return }
         mutate(&msg)
-        sessions[sIdx].messages[mIdx] = msg
+        sessions[sIdx].transcript[mIdx] = .message(msg)
     }
 
     private func appendError(to sIdx: Int, _ text: String) {
@@ -521,6 +597,6 @@ final class AppStore {
             meta: "error",
             parts: [.text("⚠️ " + text)]
         )
-        sessions[sIdx].messages.append(errMsg)
+        sessions[sIdx].transcript.append(.message(errMsg))
     }
 }

@@ -33,6 +33,7 @@ enum ResolverError: LocalizedError {
 /// Vendor-aware resolver. Pure function over (Profile, Provider, Model index).
 enum RunConfigResolver {
     static func resolve(profile: Profile,
+                        session: Session,
                         providers: [Provider],
                         models: [Model]) throws -> RunConfig {
         guard let provider = providers.first(where: { $0.id == profile.providerId }) else {
@@ -47,10 +48,10 @@ enum RunConfigResolver {
 
         switch profile.vendor {
         case .claude:
-            return resolveClaude(profile: profile, provider: provider,
+            return resolveClaude(profile: profile, session: session, provider: provider,
                                  primary: primary, models: models)
         case .codex:
-            return resolveCodex(profile: profile, provider: provider,
+            return resolveCodex(profile: profile, session: session, provider: provider,
                                 primary: primary, models: models)
         }
     }
@@ -58,6 +59,7 @@ enum RunConfigResolver {
     // MARK: - Claude
 
     private static func resolveClaude(profile: Profile,
+                                      session: Session,
                                       provider: Provider,
                                       primary: Model,
                                       models: [Model]) -> RunConfig {
@@ -93,6 +95,9 @@ enum RunConfigResolver {
         // CLI args: --model is also passed for clarity; CLI honors env first
         // but the explicit flag makes the chosen model visible in `ps`.
         var args = ["--model", primary.providerModelId]
+        args.append(contentsOf: ["--permission-mode",
+                                 session.claudePermissionMode.rawValue])
+        args.append(contentsOf: ["--effort", session.claudeEffort.rawValue])
         if let root = profile.configRoot, !root.isEmpty {
             args.append(contentsOf: ["--setting-sources", "user,project,local"])
         }
@@ -110,6 +115,7 @@ enum RunConfigResolver {
     // MARK: - Codex
 
     private static func resolveCodex(profile: Profile,
+                                     session: Session,
                                      provider: Provider,
                                      primary: Model,
                                      models: [Model]) -> RunConfig {
@@ -141,15 +147,12 @@ enum RunConfigResolver {
                 }
             }
             args.append(contentsOf: ["-c", "model=\"\(primary.providerModelId)\""])
-            if let r = profile.reasoningEffort {
-                args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(r.rawValue)\""])
-            }
+            args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(session.codexEffort.rawValue)\""])
             if let s = profile.serviceTier {
                 args.append(contentsOf: ["-c", "service_tier=\"\(s.rawValue)\""])
             }
-            if let sb = profile.sandboxMode {
-                args.append(contentsOf: ["-c", "sandbox_mode=\"\(sb.rawValue)\""])
-            }
+            args.append(contentsOf: ["-c", "sandbox_mode=\"\(session.codexSandboxMode.rawValue)\""])
+            args.append(contentsOf: ["-c", "approval_policy=\"\(session.codexApprovalMode.rawValue)\""])
         }
 
         if !provider.authToken.isEmpty {

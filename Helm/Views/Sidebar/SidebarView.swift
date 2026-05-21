@@ -23,7 +23,6 @@ struct SidebarView: View {
                 .padding(.bottom, 12)
             }
         }
-        .background(Color.helmSidebarBg)
         .sheet(isPresented: $store.showProfilesSheet) {
             ProfilesSheet()
                 .environment(store)

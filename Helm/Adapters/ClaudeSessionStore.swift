@@ -51,12 +51,40 @@ final class ClaudeSessionStore: AgentSessionStore {
         return refs.sorted { $0.lastUpdate > $1.lastUpdate }
     }
 
-    func history(sessionId: String, project: Project) async throws -> [Message] {
+    func history(sessionId: String, project: Project) async throws -> [TranscriptItem] {
         let url = bucketURL(for: project)
             .appendingPathComponent("\(sessionId).jsonl", isDirectory: false)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         let data = try Data(contentsOf: url)
-        return ClaudeSessionLogParser().parse(data)
+        var items = ClaudeSessionLogParser().parse(data)
+        // Layer in pasted-image thumbnails from Helm's own per-session
+        // manifest. We do this here (not in the parser) so the parser stays
+        // pure / vendor-agnostic and so we don't have to decode the base64
+        // image blocks back out of Claude's session JSONL.
+        if let helmId = UUID(uuidString: sessionId) {
+            applyImageManifest(into: &items, sessionId: helmId)
+        }
+        return items
+    }
+
+    private func applyImageManifest(into items: inout [TranscriptItem], sessionId: UUID) {
+        let manifest = ImageManifestStore.load(sessionId: sessionId)
+        guard !manifest.entries.isEmpty else { return }
+        let dir = AppPaths.imagesDir(for: sessionId)
+        let entriesByOrdinal = Dictionary(uniqueKeysWithValues:
+            manifest.entries.map { ($0.userMessageOrdinal, $0.imagePaths) })
+
+        var ordinal = 0
+        for idx in items.indices {
+            guard case .message(var msg) = items[idx], case .user = msg.role else { continue }
+            if let names = entriesByOrdinal[ordinal] {
+                for name in names {
+                    msg.parts.append(.image(dir.appendingPathComponent(name)))
+                }
+                items[idx] = .message(msg)
+            }
+            ordinal += 1
+        }
     }
 
     // MARK: -
@@ -64,7 +92,10 @@ final class ClaudeSessionStore: AgentSessionStore {
     private struct ScanResult { var count: Int; var preview: String }
 
     /// Single-pass over the file: count user/assistant lines, capture first
-    /// user-text content for preview.
+    /// real user-text content for preview. Compact-summary entries (which
+    /// Claude writes as `type: "user"` with `isCompactSummary: true`) are
+    /// excluded from both — otherwise the sidebar would count summary as a
+    /// turn and grab its first line as the preview.
     private func quickScan(at url: URL) -> ScanResult {
         guard let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .utf8) else {
@@ -76,6 +107,8 @@ final class ClaudeSessionStore: AgentSessionStore {
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
             let type = obj["type"] as? String ?? ""
+            if obj["isCompactSummary"] as? Bool == true { continue }
+            if obj["isVisibleInTranscriptOnly"] as? Bool == true { continue }
             if type == "user" || type == "assistant" { count += 1 }
             if preview.isEmpty, type == "user",
                let msg = obj["message"] as? [String: Any],
@@ -88,20 +121,20 @@ final class ClaudeSessionStore: AgentSessionStore {
     }
 }
 
-/// Parses Claude's session log jsonl into our Message model. Only `user` and
-/// `assistant` entries become messages; `tool_result` blocks (which arrive
-/// inside `user` entries echoed by the runtime) are stitched onto the
-/// originating assistant ToolCall part.
+/// Parses Claude's session log jsonl into our TranscriptItem model. Dialog
+/// turns become `.message`; runtime events (compact summaries) become
+/// `.event`. `tool_result` blocks (which arrive inside `user` entries echoed
+/// by the runtime) are stitched onto the originating assistant ToolCall part.
 struct ClaudeSessionLogParser {
 
-    func parse(_ data: Data) -> [Message] {
+    func parse(_ data: Data) -> [TranscriptItem] {
         guard let text = String(data: data, encoding: .utf8) else { return [] }
 
-        var messages: [Message] = []
-        // tool_use_id (from vendor) → (index of owning assistant Message,
+        var items: [TranscriptItem] = []
+        // tool_use_id (from vendor) → (index of owning assistant TranscriptItem,
         // ToolCall.id we generated). Lets us mutate the ToolCall part when a
         // matching tool_result comes in later.
-        var toolIndex: [String: (msgIdx: Int, callId: UUID)] = [:]
+        var toolIndex: [String: (itemIdx: Int, callId: UUID)] = [:]
 
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = raw.data(using: .utf8),
@@ -109,15 +142,31 @@ struct ClaudeSessionLogParser {
             let type = obj["type"] as? String ?? ""
             if obj["isSidechain"] as? Bool == true { continue }
 
+            // Compact-summary entries arrive as type:"user" but are not user
+            // input — they're Claude's own summary of the prior conversation
+            // injected to seed the next context window. Render as an event.
+            if obj["isCompactSummary"] as? Bool == true {
+                if let msg = obj["message"] as? [String: Any],
+                   let summary = Self.extractFirstText(msg["content"]),
+                   !summary.isEmpty {
+                    items.append(.event(.compactSummary(id: UUID(), summary: summary)))
+                }
+                continue
+            }
+            // Other transcript-only entries (system reminders, etc) are
+            // context for the model, not chat content. Skip until we have
+            // a concrete event kind for each.
+            if obj["isVisibleInTranscriptOnly"] as? Bool == true { continue }
+
             switch type {
             case "user":
                 guard let msg = obj["message"] as? [String: Any],
                       (msg["role"] as? String) == "user" else { continue }
                 let content = msg["content"]
                 if let s = content as? String, !s.isEmpty {
-                    messages.append(Message(
+                    items.append(.message(Message(
                         id: UUID(), role: .user, who: "you", meta: nil,
-                        parts: [.text(s)]))
+                        parts: [.text(s)])))
                 } else if let blocks = content as? [[String: Any]] {
                     var textParts: [String] = []
                     for block in blocks {
@@ -128,14 +177,14 @@ struct ClaudeSessionLogParser {
                                 textParts.append(t)
                             }
                         case "tool_result":
-                            applyToolResult(block, into: &messages, toolIndex: toolIndex)
+                            applyToolResult(block, into: &items, toolIndex: toolIndex)
                         default: break
                         }
                     }
                     if !textParts.isEmpty {
-                        messages.append(Message(
+                        items.append(.message(Message(
                             id: UUID(), role: .user, who: "you", meta: nil,
-                            parts: [.text(textParts.joined())]))
+                            parts: [.text(textParts.joined())])))
                     }
                 }
 
@@ -143,7 +192,7 @@ struct ClaudeSessionLogParser {
                 guard let msg = obj["message"] as? [String: Any],
                       let blocks = msg["content"] as? [[String: Any]] else { continue }
                 var parts: [Part] = []
-                let willBeIndex = messages.count
+                let willBeIndex = items.count
                 var pendingToolMappings: [(useId: String, callId: UUID)] = []
                 for block in blocks {
                     let btype = block["type"] as? String
@@ -167,9 +216,9 @@ struct ClaudeSessionLogParser {
                     }
                 }
                 guard !parts.isEmpty else { continue }
-                messages.append(Message(
+                items.append(.message(Message(
                     id: UUID(), role: .assistant(meta: "done"),
-                    who: "claude", meta: nil, parts: parts))
+                    who: "claude", meta: nil, parts: parts)))
                 for m in pendingToolMappings {
                     toolIndex[m.useId] = (willBeIndex, m.callId)
                 }
@@ -178,25 +227,25 @@ struct ClaudeSessionLogParser {
                 continue
             }
         }
-        return messages
+        return items
     }
 
     private func applyToolResult(_ block: [String: Any],
-                                 into messages: inout [Message],
-                                 toolIndex: [String: (msgIdx: Int, callId: UUID)]) {
+                                 into items: inout [TranscriptItem],
+                                 toolIndex: [String: (itemIdx: Int, callId: UUID)]) {
         let useId = block["tool_use_id"] as? String ?? ""
         guard let mapping = toolIndex[useId],
-              mapping.msgIdx < messages.count else { return }
+              mapping.itemIdx < items.count,
+              case .message(var msg) = items[mapping.itemIdx] else { return }
         let isError = block["is_error"] as? Bool ?? false
         let output = Self.extractFirstText(block["content"]) ?? ""
-        var msg = messages[mapping.msgIdx]
         guard let pIdx = msg.parts.firstIndex(where: {
             if case .toolCall(let t) = $0 { return t.id == mapping.callId } else { return false }
         }), case .toolCall(var call) = msg.parts[pIdx] else { return }
         call.body = output
         call.status = isError ? .error(exit: 1) : .ok(exit: 0)
         msg.parts[pIdx] = .toolCall(call)
-        messages[mapping.msgIdx] = msg
+        items[mapping.itemIdx] = .message(msg)
     }
 
     /// Extracts text out of either a bare string or an array of `{type, text}`

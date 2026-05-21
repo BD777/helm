@@ -25,7 +25,8 @@ protocol AgentSessionStore: AnyObject, Sendable {
     /// Sorted newest-first.
     func sessions(for project: Project) async throws -> [VendorSessionRef]
 
-    /// Parse a single session's persistent log into our `Message` model.
-    /// Returns an empty array if the file is missing.
-    func history(sessionId: String, project: Project) async throws -> [Message]
+    /// Parse a single session's persistent log into our transcript model
+    /// (messages + runtime events, in order). Returns an empty array if the
+    /// file is missing.
+    func history(sessionId: String, project: Project) async throws -> [TranscriptItem]
 }

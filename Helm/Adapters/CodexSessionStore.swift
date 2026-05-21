@@ -31,9 +31,9 @@ final class CodexSessionStore: AgentSessionStore {
         return []
     }
 
-    func history(sessionId: String, project: Project) async throws -> [Message] {
+    func history(sessionId: String, project: Project) async throws -> [TranscriptItem] {
         // TODO: locate the session file under ~/.codex/sessions/<yyyy>/<mm>/<dd>/
-        // and translate its event log into our Message[] model.
+        // and translate its event log into our TranscriptItem model.
         return []
     }
 }

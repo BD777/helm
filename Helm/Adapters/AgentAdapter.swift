@@ -40,6 +40,7 @@ protocol AgentAdapter: AnyObject {
     /// Spawn the agent and stream events back. The returned stream finishes
     /// when the agent exits; throwing tears the conversation down.
     func start(prompt: String,
+               attachments: [ImageAttachment],
                session: Session,
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error>
