@@ -4,13 +4,7 @@ import SwiftUI
 struct MessageListView: View {
     @Environment(AppStore.self) private var store
 
-    /// Programmatic scroll handle. We bind it so we can both *drive*
-    /// scrolls (`scrollTo(edge:)`) and *read* whether the user has taken
-    /// over via `isPositionedByUser` — the latter only flips on real
-    /// scroll-wheel / trackpad gestures, not on our own programmatic
-    /// scrolls, which is exactly what we need to avoid the feedback loop
-    /// the geometry-based heuristic used to fall into.
-    @State private var scrollPos = ScrollPosition(idType: Never.self, edge: .bottom)
+    @StateObject private var autoScroll = ChatAutoScrollController()
 
     var body: some View {
         ScrollView {
@@ -24,35 +18,28 @@ struct MessageListView: View {
                 }
             }
             .padding(.vertical, 24)
+            .background(
+                ScrollViewResolver { scrollView in
+                    autoScroll.attach(scrollView)
+                }
+            )
         }
         .background(Color.helmChatBg)
-        // Initial appearance lands at the bottom. We don't ask SwiftUI to
-        // anchor sizeChanges to .bottom because that fires on every
-        // layout pass (window resize, sidebar collapse) too — we drive
-        // streaming follow ourselves below where we can gate on user intent.
+        // Initial appearance lands at the bottom. Streaming follow is driven
+        // from AppKit's real scroll geometry below so it can resume when the
+        // user manually returns close to the bottom.
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .scrollPosition($scrollPos, anchor: .bottom)
+        .onAppear {
+            autoScroll.forceScrollToBottom(animated: false)
+        }
         .onChange(of: streamTick) { _, _ in
-            // Streaming token arrived (or a new message appended). Follow
-            // the bottom *only* if the user hasn't manually scrolled up.
-            // No `withAnimation` here — each token is a tiny scroll and
-            // overlapping eased animations would fight each other and
-            // visibly stutter.
-            guard !scrollPos.isPositionedByUser else { return }
-            scrollPos.scrollTo(edge: .bottom)
+            autoScroll.followIfNeeded()
         }
         .onChange(of: store.sendTick) { _, _ in
-            // "I just hit send" — snap to bottom regardless of where the
-            // user was parked, and the next streamTick will resume the
-            // follow because isPositionedByUser is reset by scrollTo.
-            withAnimation(.easeOut(duration: 0.22)) {
-                scrollPos.scrollTo(edge: .bottom)
-            }
+            autoScroll.forceScrollToBottom(animated: true)
         }
         .onChange(of: store.selectedSessionId) { _, _ in
-            withAnimation(.easeOut(duration: 0.22)) {
-                scrollPos.scrollTo(edge: .bottom)
-            }
+            autoScroll.forceScrollToBottom(animated: true)
         }
     }
 
@@ -86,17 +73,234 @@ struct MessageListView: View {
 
     /// Combined "did the rendered transcript grow?" signal.
     /// - transcript.count covers new-message appends.
-    /// - the last message's tail-text length covers the streaming case
-    ///   where row count is steady but the assistant bubble grows
-    ///   character-by-character.
+    /// - the last message's visible-part signature covers streaming text,
+    ///   tool input deltas, and tool result bodies while row count is steady.
     private var streamTick: String {
         guard let s = store.selectedSession else { return "" }
         let lastMsg = s.transcript.reversed().lazy.compactMap { $0.message }.first
-        let lastTextLen = lastMsg?.parts.reversed().compactMap { p -> Int? in
-            if case .text(let t) = p { return t.count }
-            return nil
-        }.first ?? 0
-        return "\(s.transcript.count):\(lastTextLen)"
+        let lastPartSignature = lastMsg?.parts.map { part -> String in
+            switch part {
+            case .text(let text):
+                return "t\(text.count)"
+            case .toolCall(let call):
+                return "c\(call.id.uuidString):\(call.arg.count):\(call.body?.count ?? 0):\(call.status)"
+            case .image(let url):
+                return "i\(url.lastPathComponent)"
+            }
+        }.joined(separator: "|") ?? ""
+        return "\(s.id.uuidString):\(s.transcript.count):\(lastPartSignature)"
+    }
+}
+
+@MainActor
+private final class ChatAutoScrollController: ObservableObject {
+    private weak var scrollView: NSScrollView?
+    private weak var observedDocumentView: NSView?
+    private var scrollObservers: [NSObjectProtocol] = []
+    private var documentObserver: NSObjectProtocol?
+    private var followsBottom = true
+    private var isProgrammaticScroll = false
+    private var scheduledScrollID = 0
+
+    private let bottomTolerance: CGFloat = 96
+    private let animatedDuration: TimeInterval = 0.18
+
+    deinit {
+        let center = NotificationCenter.default
+        for observer in scrollObservers {
+            center.removeObserver(observer)
+        }
+        if let documentObserver {
+            center.removeObserver(documentObserver)
+        }
+    }
+
+    func attach(_ scrollView: NSScrollView) {
+        if self.scrollView !== scrollView {
+            removeScrollObservers()
+            self.scrollView = scrollView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+
+            let center = NotificationCenter.default
+            scrollObservers.append(center.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.visibleBoundsDidChange()
+                }
+            })
+            followsBottom = true
+        }
+
+        observeDocumentView(scrollView.documentView)
+        if followsBottom {
+            scheduleScrollToBottom(animated: false)
+        }
+    }
+
+    func followIfNeeded() {
+        guard followsBottom else { return }
+        scheduleScrollToBottom(animated: false)
+    }
+
+    func forceScrollToBottom(animated: Bool) {
+        followsBottom = true
+        scheduleScrollToBottom(animated: animated)
+    }
+
+    private func visibleBoundsDidChange() {
+        guard !isProgrammaticScroll, let scrollView else { return }
+        followsBottom = distanceFromBottom(in: scrollView) <= bottomTolerance
+    }
+
+    private func documentFrameDidChange() {
+        guard followsBottom else { return }
+        scheduleScrollToBottom(animated: false)
+    }
+
+    private func observeDocumentView(_ documentView: NSView?) {
+        guard observedDocumentView !== documentView else { return }
+
+        let center = NotificationCenter.default
+        if let documentObserver {
+            center.removeObserver(documentObserver)
+            self.documentObserver = nil
+        }
+
+        observedDocumentView = documentView
+        guard let documentView else { return }
+        documentView.postsFrameChangedNotifications = true
+        documentObserver = center.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: documentView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.documentFrameDidChange()
+            }
+        }
+    }
+
+    private func removeScrollObservers() {
+        let center = NotificationCenter.default
+        for observer in scrollObservers {
+            center.removeObserver(observer)
+        }
+        scrollObservers = []
+    }
+
+    private func scheduleScrollToBottom(animated: Bool) {
+        scheduledScrollID += 1
+        let scrollID = scheduledScrollID
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.scheduledScrollID == scrollID else { return }
+                self.scrollToBottom(animated: animated)
+            }
+        }
+    }
+
+    private func scrollToBottom(animated: Bool) {
+        guard let scrollView, let documentView = scrollView.documentView else { return }
+
+        scrollView.layoutSubtreeIfNeeded()
+        documentView.layoutSubtreeIfNeeded()
+
+        let clipView = scrollView.contentView
+        let targetY = bottomOriginY(documentView: documentView,
+                                    visibleHeight: clipView.bounds.height)
+        let requestedBounds = NSRect(
+            x: clipView.bounds.origin.x,
+            y: targetY,
+            width: clipView.bounds.width,
+            height: clipView.bounds.height
+        )
+        let targetOrigin = clipView.constrainBoundsRect(requestedBounds).origin
+        guard abs(clipView.bounds.origin.y - targetOrigin.y) > 0.5 else {
+            followsBottom = true
+            return
+        }
+
+        isProgrammaticScroll = true
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = animatedDuration
+                context.allowsImplicitAnimation = true
+                clipView.animator().setBoundsOrigin(targetOrigin)
+            } completionHandler: { [weak self, weak scrollView, weak clipView] in
+                MainActor.assumeIsolated {
+                    if let scrollView, let clipView {
+                        scrollView.reflectScrolledClipView(clipView)
+                    }
+                    self?.finishProgrammaticScroll()
+                }
+            }
+        } else {
+            clipView.scroll(to: targetOrigin)
+            scrollView.reflectScrolledClipView(clipView)
+            finishProgrammaticScroll()
+        }
+    }
+
+    private func finishProgrammaticScroll() {
+        followsBottom = true
+        isProgrammaticScroll = false
+    }
+
+    private func distanceFromBottom(in scrollView: NSScrollView) -> CGFloat {
+        guard let documentView = scrollView.documentView else { return 0 }
+        let visibleRect = scrollView.documentVisibleRect
+        let documentBounds = documentView.bounds
+
+        if documentView.isFlipped {
+            return max(0, documentBounds.maxY - visibleRect.maxY)
+        } else {
+            return max(0, visibleRect.minY - documentBounds.minY)
+        }
+    }
+
+    private func bottomOriginY(documentView: NSView, visibleHeight: CGFloat) -> CGFloat {
+        let documentBounds = documentView.bounds
+        if documentView.isFlipped {
+            return max(documentBounds.minY, documentBounds.maxY - visibleHeight)
+        } else {
+            return documentBounds.minY
+        }
+    }
+}
+
+private struct ScrollViewResolver: NSViewRepresentable {
+    var onResolve: @MainActor (NSScrollView) -> Void
+
+    func makeNSView(context: Context) -> ResolverView {
+        let view = ResolverView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateNSView(_ nsView: ResolverView, context: Context) {
+        nsView.onResolve = onResolve
+        nsView.resolveSoon()
+    }
+
+    final class ResolverView: NSView {
+        var onResolve: (@MainActor (NSScrollView) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            resolveSoon()
+        }
+
+        func resolveSoon() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let scrollView = self.enclosingScrollView else { return }
+                Task { @MainActor in
+                    self.onResolve?(scrollView)
+                }
+            }
+        }
     }
 }
 
