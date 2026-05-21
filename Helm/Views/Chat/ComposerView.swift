@@ -66,13 +66,38 @@ struct ComposerView: View {
         )
     }
 
+    private var hasComposerContent: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var isStreamingInAnotherSession: Bool {
+        store.isStreaming && !store.selectedSessionIsStreaming
+    }
+
+    private var canSubmit: Bool {
+        if store.selectedSessionIsStreaming { return true }
+        if isStreamingInAnotherSession { return false }
+        return hasComposerContent
+    }
+
+    private var submitButtonTitle: String {
+        if store.selectedSessionIsStreaming { return "Stop" }
+        if isStreamingInAnotherSession { return "Busy" }
+        return "Send"
+    }
+
+    private var submitButtonColor: Color {
+        if store.selectedSessionIsStreaming { return .red }
+        if isStreamingInAnotherSession { return .secondary.opacity(0.45) }
+        return .accentColor
+    }
+
     private func sendIfPossible() {
-        if store.isStreaming {
+        if store.selectedSessionIsStreaming {
             store.cancelStreaming()
             return
         }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && attachments.isEmpty {
+        if store.isStreaming || !hasComposerContent {
             return
         }
         let toSend = text
@@ -175,20 +200,21 @@ struct ComposerView: View {
             Button {
                 sendIfPossible()
             } label: {
-                Text(store.isStreaming ? "Stop" : "Send")
+                Text(submitButtonTitle)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(
-                        Capsule().fill(store.isStreaming ? Color.red : Color.accentColor)
+                        Capsule().fill(submitButtonColor)
                     )
             }
             .buttonStyle(.plain)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!store.isStreaming
-                      && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      && attachments.isEmpty)
+            .disabled(!canSubmit)
+            .help(isStreamingInAnotherSession
+                  ? "Another conversation is running"
+                  : "Send message")
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
