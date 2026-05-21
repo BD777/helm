@@ -227,7 +227,32 @@ struct ClaudeSessionLogParser {
                 continue
             }
         }
+        markUnfinishedToolCalls(in: &items)
         return items
+    }
+
+    /// A session log loaded from disk is never an active Helm stream. If a
+    /// tool_use has no matching tool_result by the end of the file, the
+    /// previous process was interrupted or stopped; render that as stopped
+    /// instead of leaving a stale spinner after relaunch.
+    private func markUnfinishedToolCalls(in items: inout [TranscriptItem]) {
+        for idx in items.indices {
+            guard case .message(var msg) = items[idx] else { continue }
+            var didStopTool = false
+            msg.parts = msg.parts.map { part in
+                guard case .toolCall(var call) = part else { return part }
+                if case .running = call.status {
+                    call.status = .stopped
+                    didStopTool = true
+                }
+                return .toolCall(call)
+            }
+            if didStopTool {
+                msg.role = .assistant(meta: "stopped")
+                msg.meta = "stopped"
+                items[idx] = .message(msg)
+            }
+        }
     }
 
     private func applyToolResult(_ block: [String: Any],
@@ -237,15 +262,30 @@ struct ClaudeSessionLogParser {
         guard let mapping = toolIndex[useId],
               mapping.itemIdx < items.count,
               case .message(var msg) = items[mapping.itemIdx] else { return }
-        let isError = block["is_error"] as? Bool ?? false
         let output = Self.extractFirstText(block["content"]) ?? ""
         guard let pIdx = msg.parts.firstIndex(where: {
             if case .toolCall(let t) = $0 { return t.id == mapping.callId } else { return false }
         }), case .toolCall(var call) = msg.parts[pIdx] else { return }
         call.body = output
-        call.status = isError ? .error(exit: 1) : .ok(exit: 0)
+        if Self.isStoppedToolOutput(output) {
+            call.status = .stopped
+            msg.role = .assistant(meta: "stopped")
+            msg.meta = "stopped"
+        } else {
+            let isError = block["is_error"] as? Bool ?? false
+            call.status = isError ? .error(exit: 1) : .ok(exit: 0)
+        }
         msg.parts[pIdx] = .toolCall(call)
         items[mapping.itemIdx] = .message(msg)
+    }
+
+    private static func isStoppedToolOutput(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("<status>killed</status>")
+            || lower.contains("\"status\":\"killed\"")
+            || lower.contains("was stopped")
+            || lower.contains("exit_code>137")
+            || lower.contains("\"exitcode\":137")
     }
 
     /// Extracts text out of either a bare string or an array of `{type, text}`
