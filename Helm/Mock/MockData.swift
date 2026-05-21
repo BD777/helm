@@ -408,6 +408,11 @@ final class AppStore {
         if sessions[sIdx].isDraft {
             sessions[sIdx].isDraft = false
         }
+        if sessions[sIdx].transcript.isEmpty {
+            sessions[sIdx].title = Self.title(for: trimmed,
+                                              attachments: attachments)
+        }
+        sessions[sIdx].lastUpdate = "now"
         let session = sessions[sIdx]
         guard let project = projects.first(where: { $0.id == session.projectId }) else {
             appendError(to: sIdx, "Session has no project (id=\(session.projectId))."); return
@@ -598,5 +603,25 @@ final class AppStore {
             parts: [.text("⚠️ " + text)]
         )
         sessions[sIdx].transcript.append(.message(errMsg))
+    }
+
+    private static func title(for prompt: String,
+                              attachments: [ImageAttachment],
+                              maxLength: Int = 52) -> String {
+        let normalized = prompt
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+
+        let base: String
+        if normalized.isEmpty {
+            base = attachments.count == 1
+                ? "Image"
+                : "\(attachments.count) images"
+        } else {
+            base = normalized
+        }
+
+        guard base.count > maxLength else { return base }
+        return String(base.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 }
