@@ -12,6 +12,7 @@ struct ProviderEditor: View {
     @State private var newEnvKey = ""
     @State private var newEnvValue = ""
     @State private var showPasteSheet = false
+    @State private var confirmDelete = false
 
     var body: some View {
         ScrollView {
@@ -36,6 +37,12 @@ struct ProviderEditor: View {
                 applyParsed(parsed)
             }
         }
+        .alert("Delete provider?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will also delete the provider's models and profiles that depend on them.")
+        }
     }
 
     private var header: some View {
@@ -49,7 +56,9 @@ struct ProviderEditor: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(role: .destructive, action: onDelete) {
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
                 Label("Delete", systemImage: "trash")
             }
             .controlSize(.small)

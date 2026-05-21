@@ -7,6 +7,7 @@ struct ProfileEditor: View {
     var onDelete: () -> Void
 
     @Environment(AppStore.self) private var store
+    @State private var confirmDelete = false
 
     var body: some View {
         ScrollView {
@@ -27,6 +28,12 @@ struct ProfileEditor: View {
             .padding(20)
         }
         .background(Color.helmChatBg)
+        .alert("Delete profile?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This profile will be removed from the sidebar and future conversations.")
+        }
     }
 
     private var header: some View {
@@ -40,7 +47,9 @@ struct ProfileEditor: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(role: .destructive, action: onDelete) {
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
                 Label("Delete", systemImage: "trash")
             }
             .controlSize(.small)

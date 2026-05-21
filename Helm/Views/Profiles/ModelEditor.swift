@@ -9,6 +9,7 @@ struct ModelEditor: View {
     var onDelete: () -> Void
 
     @Environment(AppStore.self) private var store
+    @State private var confirmDelete = false
 
     var body: some View {
         ScrollView {
@@ -21,6 +22,12 @@ struct ModelEditor: View {
             .padding(20)
         }
         .background(Color.helmChatBg)
+        .alert("Delete model?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will also delete profiles that depend on this model.")
+        }
     }
 
     private var header: some View {
@@ -37,7 +44,9 @@ struct ModelEditor: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(role: .destructive, action: onDelete) {
+            Button(role: .destructive) {
+                confirmDelete = true
+            } label: {
                 Label("Delete", systemImage: "trash")
             }
             .controlSize(.small)
