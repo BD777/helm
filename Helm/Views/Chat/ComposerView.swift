@@ -7,6 +7,8 @@ struct ComposerView: View {
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
+    @State private var draftSessionId: UUID?
+    @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
 
     var body: some View {
@@ -20,7 +22,14 @@ struct ComposerView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(Color.helmChatBg)
-        .onAppear { installPasteMonitor() }
+        .onAppear {
+            loadDraft(for: store.selectedSessionId)
+            installPasteMonitor()
+        }
+        .onChange(of: store.selectedSessionId) { _, newSessionId in
+            saveCurrentDraft()
+            loadDraft(for: newSessionId)
+        }
         .onDisappear { removePasteMonitor() }
     }
 
@@ -70,6 +79,9 @@ struct ComposerView: View {
         let toSendAttachments = attachments
         text = ""
         attachments = []
+        if let sessionId = draftSessionId {
+            drafts[sessionId] = nil
+        }
         store.send(toSend, attachments: toSendAttachments)
     }
 
@@ -387,4 +399,31 @@ struct ComposerView: View {
         attachments.removeAll { $0.id == att.id }
         try? FileManager.default.removeItem(at: att.fileURL)
     }
+
+    private func saveCurrentDraft() {
+        guard let sessionId = draftSessionId else { return }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty {
+            drafts[sessionId] = nil
+        } else {
+            drafts[sessionId] = ComposerDraft(text: text,
+                                              attachments: attachments)
+        }
+    }
+
+    private func loadDraft(for sessionId: UUID?) {
+        draftSessionId = sessionId
+        guard let sessionId, let draft = drafts[sessionId] else {
+            text = ""
+            attachments = []
+            return
+        }
+        text = draft.text
+        attachments = draft.attachments
+    }
+}
+
+private struct ComposerDraft {
+    var text: String
+    var attachments: [ImageAttachment]
 }
