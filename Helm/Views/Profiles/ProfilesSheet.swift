@@ -84,6 +84,8 @@ struct ProfilesSheet: View {
                             } label: { Image(systemName: "plus") }
                                 .menuStyle(.borderlessButton)
                                 .fixedSize()
+                                .help("Add provider")
+                                .accessibilityLabel("Add provider")
                         )
                     )
                     if store.providers.isEmpty {
@@ -115,6 +117,8 @@ struct ProfilesSheet: View {
                             } label: { Image(systemName: "plus") }
                                 .menuStyle(.borderlessButton)
                                 .fixedSize()
+                                .help("Add profile")
+                                .accessibilityLabel("Add profile")
                         )
                     )
                     if store.profiles.isEmpty {
