@@ -7,10 +7,12 @@ struct MessageListView: View {
     @StateObject private var autoScroll = ChatAutoScrollController()
 
     var body: some View {
+        let items = displayItems
+
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(displayItems) { item in
-                    displayRow(item)
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    displayRow(item, isLatest: index == items.count - 1)
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 24)
@@ -53,7 +55,7 @@ struct MessageListView: View {
     }
 
     @ViewBuilder
-    private func displayRow(_ item: DisplayItem) -> some View {
+    private func displayRow(_ item: DisplayItem, isLatest: Bool) -> some View {
         switch item {
         case .userMessage(let msg):
             MessageView(message: msg)
@@ -62,7 +64,12 @@ struct MessageListView: View {
         case .assistantTurn(let thinking, let answer):
             VStack(alignment: .leading, spacing: 10) {
                 if !thinking.isEmpty {
-                    ThinkingBlock(messages: thinking, isRunning: answer == nil)
+                    ThinkingBlock(
+                        messages: thinking,
+                        isRunning: answer == nil
+                            && isLatest
+                            && store.selectedSessionIsStreaming
+                    )
                 }
                 if let answer {
                     MessageView(message: answer)
@@ -448,7 +455,20 @@ private struct ThinkingBlock: View {
 
     private var label: String {
         if isRunning { return "处理中…" }
+        if isStopped {
+            return stepCount > 0 ? "已停止 · \(stepCount) 步" : "已停止"
+        }
         return stepCount > 0 ? "已处理 · \(stepCount) 步" : "已处理"
+    }
+
+    private var isStopped: Bool {
+        messages.contains { message in
+            if message.meta == "stopped" { return true }
+            if case .assistant(let meta) = message.role {
+                return meta == "stopped"
+            }
+            return false
+        }
     }
 
     private var header: some View {

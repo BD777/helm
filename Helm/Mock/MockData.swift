@@ -30,6 +30,9 @@ final class AppStore {
         }
     }
     var isStreaming: Bool = false
+    var selectedSessionIsStreaming: Bool {
+        isStreaming && activeSessionId == selectedSessionId
+    }
     var showProfilesSheet: Bool = false
 
     /// Bumped each time the user sends a message. The chat list watches this
@@ -395,6 +398,9 @@ final class AppStore {
 
     private var currentAdapter: AgentAdapter?
     private var streamTask: Task<Void, Never>?
+    private var activeRunId: UUID?
+    private var activeSessionId: UUID?
+    private var activeAssistantId: UUID?
     /// Maps vendor tool_use ids → our ToolCall.id for the active assistant
     /// message so input fragments and tool_results can land on the right call.
     private var toolMap: [String: UUID] = [:]
@@ -448,6 +454,7 @@ final class AppStore {
         )
         sessions[sIdx].transcript.append(.message(userMsg))
         sessions[sIdx].transcript.append(.message(assistantMsg))
+        let sessionId = session.id
         let assistantId = assistantMsg.id
         sendTick &+= 1
 
@@ -465,6 +472,10 @@ final class AppStore {
         }
 
         isStreaming = true
+        let runId = UUID()
+        activeRunId = runId
+        activeSessionId = sessionId
+        activeAssistantId = assistantId
         toolMap = [:]
 
         let adapter: AgentAdapter
@@ -472,43 +483,61 @@ final class AppStore {
         case .claude: adapter = ClaudeLocalAdapter()
         case .codex:
             appendError(to: sIdx, "Codex adapter not implemented yet.")
-            isStreaming = false
+            finishStreaming(runId: runId)
             return
         }
         currentAdapter = adapter
 
-        let sessionId = session.id
         do {
             let stream = try adapter.start(prompt: trimmed, attachments: attachments, session: session, run: runConfig, project: project)
             streamTask = Task { [weak self] in
                 do {
                     for try await event in stream {
-                        self?.handle(event, sessionId: sessionId, assistantId: assistantId)
+                        guard !Task.isCancelled else { break }
+                        self?.handle(event, runId: runId,
+                                     sessionId: sessionId,
+                                     assistantId: assistantId)
                     }
                 } catch {
                     self?.handle(.error(error.localizedDescription),
+                                 runId: runId,
                                  sessionId: sessionId, assistantId: assistantId)
                 }
-                self?.finishStreaming()
+                self?.finishStreaming(runId: runId)
             }
         } catch {
             appendError(to: sIdx, "Failed to start agent: \(error.localizedDescription)")
-            isStreaming = false
+            finishStreaming(runId: runId)
         }
     }
 
     func cancelStreaming() {
-        currentAdapter?.cancel()
+        guard isStreaming else { return }
+        let adapter = currentAdapter
+        let task = streamTask
+        if let sessionId = activeSessionId,
+           let assistantId = activeAssistantId {
+            markRunStopped(sessionId: sessionId, assistantId: assistantId)
+        }
+        finishStreaming()
+        task?.cancel()
+        adapter?.cancel()
     }
 
-    private func finishStreaming() {
+    private func finishStreaming(runId: UUID? = nil) {
+        if let runId, activeRunId != runId { return }
         isStreaming = false
         currentAdapter = nil
         streamTask = nil
+        activeRunId = nil
+        activeSessionId = nil
+        activeAssistantId = nil
         toolMap = [:]
     }
 
-    private func handle(_ event: AgentEvent, sessionId: UUID, assistantId: UUID) {
+    private func handle(_ event: AgentEvent, runId: UUID,
+                        sessionId: UUID, assistantId: UUID) {
+        guard activeRunId == runId else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         switch event {
         case .sessionId(let id):
@@ -592,6 +621,44 @@ final class AppStore {
         }), case .message(var msg) = sessions[sIdx].transcript[mIdx] else { return }
         mutate(&msg)
         sessions[sIdx].transcript[mIdx] = .message(msg)
+    }
+
+    private func markRunStopped(sessionId: UUID, assistantId: UUID) {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+              let mIdx = sessions[sIdx].transcript.firstIndex(where: {
+                  $0.message?.id == assistantId
+              }),
+              case .message(var msg) = sessions[sIdx].transcript[mIdx]
+        else { return }
+
+        msg.role = .assistant(meta: "stopped")
+        msg.meta = "stopped"
+        let hasToolCall = msg.parts.contains { part in
+            if case .toolCall = part { return true }
+            return false
+        }
+        if hasToolCall {
+            msg.parts = msg.parts.map { part in
+                guard case .toolCall(var call) = part else { return part }
+                if case .running = call.status {
+                    call.status = .stopped
+                }
+                return .toolCall(call)
+            }
+            sessions[sIdx].transcript[mIdx] = .message(msg)
+            sessions[sIdx].transcript.append(.message(Message(
+                id: UUID(),
+                role: .assistant(meta: "stopped"),
+                who: msg.who,
+                meta: "stopped",
+                parts: [.text("Stopped.")]
+            )))
+        } else {
+            if msg.parts.isEmpty {
+                msg.parts.append(.text("Stopped."))
+            }
+            sessions[sIdx].transcript[mIdx] = .message(msg)
+        }
     }
 
     private func appendError(to sIdx: Int, _ text: String) {

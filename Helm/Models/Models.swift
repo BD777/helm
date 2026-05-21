@@ -406,5 +406,6 @@ struct ToolCall: Hashable, Identifiable {
         case ok(exit: Int)
         case error(exit: Int)
         case running
+        case stopped
     }
 }

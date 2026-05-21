@@ -75,6 +75,10 @@ struct ToolCallCard: View {
         case .running:
             ProgressView()
                 .controlSize(.mini)
+        case .stopped:
+            Image(systemName: "stop.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
         }
     }
 
