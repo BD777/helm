@@ -11,7 +11,7 @@ struct MessageListView: View {
         let items = displayItems
 
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     displayRow(item, isLatest: index == items.count - 1)
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
@@ -27,6 +27,7 @@ struct MessageListView: View {
                 }
             )
         }
+        .id(store.selectedSessionId)
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -76,6 +77,7 @@ struct MessageListView: View {
             autoScroll.forceScrollToBottom(animated: true)
         }
         .onChange(of: store.selectedSessionId) { _, _ in
+            autoScroll.prepareForSessionChange()
             autoScroll.forceScrollToBottom(animated: true)
         }
     }
@@ -169,8 +171,10 @@ private final class ChatAutoScrollController: ObservableObject {
     private var isProgrammaticScroll = false
     private var isLiveUserScroll = false
     private var scheduledScrollID = 0
+    private var userScrollResumeID = 0
 
-    private let bottomTolerance: CGFloat = 140
+    private let jumpButtonTolerance: CGFloat = 96
+    private let followResumeTolerance: CGFloat = 18
     private let animatedDuration: TimeInterval = 0.18
     private let maxScrollPasses = 6
 
@@ -207,7 +211,8 @@ private final class ChatAutoScrollController: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLiveUserScroll = true
-                    self?.updateFollowPreference()
+                    self?.suspendBottomFollow()
+                    self?.refreshJumpButton()
                 }
             })
             scrollObservers.append(center.addObserver(
@@ -217,7 +222,7 @@ private final class ChatAutoScrollController: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLiveUserScroll = true
-                    self?.updateFollowPreference()
+                    self?.userDidScroll()
                 }
             })
             scrollObservers.append(center.addObserver(
@@ -226,8 +231,8 @@ private final class ChatAutoScrollController: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.updateFollowPreference()
                     self?.isLiveUserScroll = false
+                    self?.updateFollowPreference(resumeTolerance: self?.followResumeTolerance ?? 0)
                 }
             })
             followsBottom = true
@@ -245,6 +250,12 @@ private final class ChatAutoScrollController: ObservableObject {
         scheduleScrollToBottom(animated: false, force: false)
     }
 
+    func prepareForSessionChange() {
+        scheduledScrollID += 1
+        followsBottom = true
+        showJumpToBottom = false
+    }
+
     func forceScrollToBottom(animated: Bool) {
         followsBottom = true
         scheduleScrollToBottom(animated: animated, force: true)
@@ -253,8 +264,8 @@ private final class ChatAutoScrollController: ObservableObject {
     private func visibleBoundsDidChange() {
         guard !isProgrammaticScroll, let scrollView else { return }
         if isLiveUserScroll || currentEventLooksLikeUserScroll {
-            updateFollowPreference()
-        } else if distanceFromBottom(in: scrollView) <= bottomTolerance {
+            userDidScroll()
+        } else if distanceFromBottom(in: scrollView) <= followResumeTolerance {
             followsBottom = true
             showJumpToBottom = false
         }
@@ -262,14 +273,41 @@ private final class ChatAutoScrollController: ObservableObject {
 
     private func documentFrameDidChange() {
         refreshJumpButton()
-        guard followsBottom else { return }
+        guard followsBottom, !isLiveUserScroll else { return }
         scheduleScrollToBottom(animated: false, force: false)
     }
 
-    private func updateFollowPreference() {
+    private func suspendBottomFollow() {
+        scheduledScrollID += 1
+        followsBottom = false
+    }
+
+    private func userDidScroll() {
+        suspendBottomFollow()
+        refreshJumpButton()
+        scheduleUserScrollResumeCheck()
+    }
+
+    private func scheduleUserScrollResumeCheck() {
+        userScrollResumeID += 1
+        let resumeID = userScrollResumeID
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.userScrollResumeID == resumeID,
+                      !self.isLiveUserScroll,
+                      !self.isProgrammaticScroll
+                else { return }
+                self.updateFollowPreference(resumeTolerance: self.followResumeTolerance)
+            }
+        }
+    }
+
+    private func updateFollowPreference(resumeTolerance: CGFloat) {
         guard let scrollView else { return }
-        followsBottom = distanceFromBottom(in: scrollView) <= bottomTolerance
-        showJumpToBottom = !followsBottom
+        let distance = distanceFromBottom(in: scrollView)
+        followsBottom = distance <= resumeTolerance
+        showJumpToBottom = distance > jumpButtonTolerance
     }
 
     private func refreshJumpButton() {
@@ -277,7 +315,7 @@ private final class ChatAutoScrollController: ObservableObject {
             showJumpToBottom = false
             return
         }
-        showJumpToBottom = distanceFromBottom(in: scrollView) > bottomTolerance
+        showJumpToBottom = distanceFromBottom(in: scrollView) > jumpButtonTolerance
     }
 
     private func observeDocumentView(_ documentView: NSView?) {

@@ -83,17 +83,22 @@ struct SidebarView: View {
 
     private var settingsBar: some View {
         ZStack(alignment: .top) {
-            LinearGradient(
-                colors: [
-                    Color.helmSidebarBg.opacity(0),
-                    Color.helmSidebarBg.opacity(0.72),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 18)
-            .offset(y: -18)
-            .allowsHitTesting(false)
+            Rectangle()
+                .fill(.regularMaterial)
+                .frame(height: 86)
+                .mask(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .black.opacity(0.9), location: 0.38),
+                            .init(color: .black, location: 1),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .offset(y: -30)
+                .allowsHitTesting(false)
 
             Button {
                 store.showProfilesSheet = true
@@ -120,12 +125,6 @@ struct SidebarView: View {
             .padding(.vertical, 7)
             .onHover { settingsHovered = $0 }
             .help("Profiles & vendor settings")
-        }
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.helmBorder)
-                .frame(height: 0.5)
         }
     }
 }

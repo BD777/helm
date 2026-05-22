@@ -8,14 +8,30 @@ struct ContentView: View {
             if proxy.size.width < DS.sidebarAutoHideWidth {
                 detailPane
             } else {
-                HSplitView {
+                HStack(spacing: 0) {
                     SidebarView()
                         .frame(width: DS.sidebarWidth)
-                    detailPane
-                        .frame(minWidth: 0, maxWidth: .infinity)
+                    mainSurface
                 }
+                .background(Color.helmSidebarBg)
             }
         }
+    }
+
+    private var mainSurface: some View {
+        detailPane
+            .clipShape(RoundedRectangle(cornerRadius: DS.cornerRadiusLarge,
+                                        style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusLarge,
+                                 style: .continuous)
+                    .stroke(Color.helmBorder, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.06), radius: 12, x: 0, y: 4)
+            .padding(.leading, 6)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .frame(minWidth: 0, maxWidth: .infinity)
     }
 
     private var detailPane: some View {

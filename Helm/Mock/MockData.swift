@@ -507,12 +507,23 @@ final class AppStore {
     /// empty.
     func ensureHistoryLoaded(for sessionId: UUID) async {
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-              sessions[sIdx].transcript.isEmpty,
               let profile = profile(sessions[sIdx].profileId),
               let project = projects.first(where: { $0.id == sessions[sIdx].projectId }),
               let store = sessionStores[profile.vendor]
         else { return }
         guard !loadingHistorySessionIds.contains(sessionId) else { return }
+
+        if sessions[sIdx].transcript.isEmpty {
+            let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+            if !snapshot.isEmpty {
+                sessions[sIdx].transcript = snapshot
+                NSLog("[helm.history] restored %ld snapshot items for %@",
+                      snapshot.count, sessionId.uuidString)
+            }
+        } else {
+            return
+        }
+
         loadingHistorySessionIds.insert(sessionId)
         defer { loadingHistorySessionIds.remove(sessionId) }
         // Use the vendor session id if we have one; otherwise our session.id
@@ -522,25 +533,18 @@ final class AppStore {
         NSLog("[helm.history] loading %@ for %@", vendorId, sessionId.uuidString)
         do {
             let items = try await Task.detached(priority: .userInitiated) {
-                let vendorItems = try await store.history(sessionId: vendorId, project: project)
-                if !vendorItems.isEmpty { return vendorItems }
-                return TranscriptSnapshotStore.load(sessionId: sessionId)
+                try await store.history(sessionId: vendorId, project: project)
             }.value
+            guard !items.isEmpty else { return }
             guard let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-                  sessions[stillIdx].transcript.isEmpty else { return }
+                  !isSessionStreaming(sessionId) else { return }
+            let currentCount = sessions[stillIdx].transcript.count
+            guard currentCount == 0 || items.count >= currentCount else { return }
             sessions[stillIdx].transcript = items
+            persistTranscriptSnapshot(for: sessionId)
             NSLog("[helm.history] loaded %ld items for %@",
                   items.count, vendorId)
         } catch {
-            let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
-            if !snapshot.isEmpty,
-               let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-               sessions[stillIdx].transcript.isEmpty {
-                sessions[stillIdx].transcript = snapshot
-                NSLog("[helm.history] loaded %ld snapshot items for %@",
-                      snapshot.count, vendorId)
-                return
-            }
             NSLog("[helm.history] load failed for %@: %@",
                   vendorId, error.localizedDescription)
         }
