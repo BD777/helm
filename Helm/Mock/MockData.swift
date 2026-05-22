@@ -35,6 +35,7 @@ final class AppStore {
         return isSessionStreaming(selectedSessionId)
     }
     var showProfilesSheet: Bool = false
+    var showSSHProjectSheet: Bool = false
 
     /// Bumped each time the user sends a message. The chat list watches this
     /// to force a scroll-to-bottom after Send, regardless of where the user
@@ -121,6 +122,11 @@ final class AppStore {
         }
         if cleanSessions.count != stateFile.sessions.count {
             scheduleStateSave()
+        }
+        for project in self.projects where project.location.isSSH {
+            Task { @MainActor [weak self] in
+                await self?.probeSSHProject(project.id)
+            }
         }
     }
 
@@ -311,6 +317,46 @@ final class AppStore {
         projects.append(project)
         scheduleStateSave()
         return project.id
+    }
+
+    @discardableResult
+    func addSSHProject(host: String, path: String, name: String) -> UUID? {
+        let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !path.isEmpty else { return nil }
+
+        let project = Project(
+            id: UUID(),
+            name: name.isEmpty ? Self.defaultSSHProjectName(host: host, path: path) : name,
+            location: .ssh(host: host, path: path, status: .connecting)
+        )
+        projects.append(project)
+        scheduleStateSave()
+        Task { @MainActor [weak self] in
+            await self?.probeSSHProject(project.id)
+        }
+        return project.id
+    }
+
+    func probeSSHProject(_ projectId: UUID) async {
+        guard let idx = projects.firstIndex(where: { $0.id == projectId }),
+              case .ssh(let host, let path, _) = projects[idx].location
+        else { return }
+        projects[idx].location = projects[idx].location.withSSHStatus(.connecting)
+        let status = await SSHProbe.check(host: host, path: path)
+        guard let latestIdx = projects.firstIndex(where: { $0.id == projectId }) else { return }
+        projects[latestIdx].location = projects[latestIdx].location.withSSHStatus(status)
+    }
+
+    private static func defaultSSHProjectName(host: String, path: String) -> String {
+        let expandedTail = (path as NSString).lastPathComponent
+        guard !expandedTail.isEmpty,
+              expandedTail != ".",
+              expandedTail != "/",
+              expandedTail != "~"
+        else { return host }
+        return "\(host):\(expandedTail)"
     }
 
     /// Creates a new session in the given project, defaulting to the first
@@ -746,5 +792,43 @@ final class AppStore {
 
         guard base.count > maxLength else { return base }
         return String(base.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+    }
+}
+
+private enum SSHProbe {
+    static func check(host: String, path: String) async -> SSHStatus {
+        await Task.detached(priority: .utility) {
+            let command = "cd -- \(SSHRemote.shellPath(path)) && pwd >/dev/null"
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: command,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let output = Pipe()
+            proc.standardOutput = output
+            proc.standardError = output
+
+            do {
+                try proc.run()
+            } catch {
+                return .failed(reason: error.localizedDescription)
+            }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else {
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                let reason = raw
+                    .split(separator: "\n", omittingEmptySubsequences: true)
+                    .last
+                    .map(String.init)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return .failed(reason: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
+            }
+            return .connected
+        }.value
     }
 }

@@ -12,6 +12,7 @@ struct HelmApp: App {
                 .environment(store)
                 .frame(minWidth: 880, minHeight: 560)
                 .toolbarBackground(.hidden, for: .windowToolbar)
+                .background(WindowTitleHider())
                 .onAppear {
                     // Hand the live store to the AppKit delegate so
                     // applicationWillTerminate can synchronously flush both
@@ -22,6 +23,27 @@ struct HelmApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact)
         .defaultSize(width: 1180, height: 760)
+    }
+}
+
+private struct WindowTitleHider: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            hideTitle(for: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            hideTitle(for: view)
+        }
+    }
+
+    private func hideTitle(for view: NSView) {
+        guard let window = view.window else { return }
+        window.titleVisibility = .hidden
     }
 }
 

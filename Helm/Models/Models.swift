@@ -30,6 +30,11 @@ enum ProjectLocation: Hashable, Codable {
     case local(path: String)
     case ssh(host: String, path: String, status: SSHStatus)
 
+    var isSSH: Bool {
+        if case .ssh = self { return true }
+        return false
+    }
+
     var pathString: String {
         switch self {
         case .local(let p): return p
@@ -41,6 +46,15 @@ enum ProjectLocation: Hashable, Codable {
         switch self {
         case .local: return "local"
         case .ssh(let host, _, _): return "ssh \(host)"
+        }
+    }
+
+    func withSSHStatus(_ status: SSHStatus) -> ProjectLocation {
+        switch self {
+        case .local:
+            return self
+        case .ssh(let host, let path, _):
+            return .ssh(host: host, path: path, status: status)
         }
     }
 
@@ -77,7 +91,7 @@ enum ProjectLocation: Hashable, Codable {
     }
 }
 
-enum SSHStatus: Hashable {
+enum SSHStatus: Hashable, Sendable {
     case connected
     case connecting
     case failed(reason: String)

@@ -1,5 +1,67 @@
 import Foundation
 
+enum SSHRemote {
+    static let executable = "/usr/bin/ssh"
+    private static let pathPrefix = [
+        "$HOME/.local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ].joined(separator: ":")
+
+    static func arguments(host: String,
+                          remoteCommand: String,
+                          batchMode: Bool,
+                          connectTimeout: Int? = nil) -> [String] {
+        var args = ["-T"]
+        if batchMode {
+            args.append(contentsOf: ["-o", "BatchMode=yes"])
+        }
+        if let connectTimeout {
+            args.append(contentsOf: ["-o", "ConnectTimeout=\(connectTimeout)"])
+        }
+        args.append(host)
+        args.append(remoteCommand)
+        return args
+    }
+
+    static func commandLine(command: String,
+                            args: [String],
+                            env: [String: String],
+                            workingDirectory: String) -> String {
+        let cd = "cd -- \(shellPath(workingDirectory))"
+        let exportPath = "export PATH=\(pathPrefix):${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+        let executable = shellQuote(command)
+        let argv = ([executable] + args.map(shellQuote)).joined(separator: " ")
+        let envPairs = env
+            .sorted { $0.key < $1.key }
+            .map { shellQuote("\($0.key)=\($0.value)") }
+
+        let run = envPairs.isEmpty
+            ? argv
+            : "env \(envPairs.joined(separator: " ")) \(argv)"
+        return "\(cd) && \(exportPath) && \(run)"
+    }
+
+    static func shellPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "~" {
+            return "$HOME"
+        }
+        if trimmed.hasPrefix("~/") {
+            return "$HOME" + shellQuote(String(trimmed.dropFirst()))
+        }
+        return shellQuote(trimmed)
+    }
+
+    static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
 /// Events the UI cares about — vendor-agnostic. Concrete adapters translate
 /// their wire format into this stream.
 enum AgentEvent: Sendable {

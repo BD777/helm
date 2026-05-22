@@ -13,8 +13,6 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
                session: Session,
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error> {
-        let executable = try resolveCommand(run.command, vendorDefault: "claude")
-
         var args: [String] = [
             "--print",
             "--input-format", "stream-json",
@@ -35,12 +33,6 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         // Resolver-provided args (e.g. --model, --setting-sources).
         args.append(contentsOf: run.args)
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = args
-        proc.currentDirectoryURL = URL(fileURLWithPath:
-            (project.location.pathString as NSString).expandingTildeInPath)
-
         var env = ProcessInfo.processInfo.environment
         // GUI apps inherit a stripped PATH — add the usual command locations
         // so a bare `claude` resolves and so child tools work. ~/.local/bin
@@ -51,6 +43,32 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [existing]).joined(separator: ":")
         for (k, v) in run.env { env[k] = v }
+
+        let proc = Process()
+        switch project.location {
+        case .local(let path):
+            let executable = try resolveCommand(run.command, vendorDefault: "claude")
+            proc.executableURL = URL(fileURLWithPath: executable)
+            proc.arguments = args
+            proc.currentDirectoryURL = URL(fileURLWithPath:
+                (path as NSString).expandingTildeInPath)
+        case .ssh(let host, let path, _):
+            guard attachments.isEmpty else {
+                throw AdapterError.unsupportedRemoteAttachments("Claude")
+            }
+            let remote = SSHRemote.commandLine(
+                command: run.command.isEmpty ? "claude" : run.command,
+                args: args,
+                env: run.env,
+                workingDirectory: path
+            )
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: remote,
+                batchMode: true
+            )
+        }
         proc.environment = env
 
         let stdin = Pipe()
@@ -187,10 +205,14 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
 
 enum AdapterError: LocalizedError {
     case commandNotFound(String)
+    case unsupportedRemoteAttachments(String)
+
     var errorDescription: String? {
         switch self {
         case .commandNotFound(let c):
             return "Command not found on PATH: \(c). Set commandPath in the profile to an absolute path."
+        case .unsupportedRemoteAttachments(let vendor):
+            return "\(vendor) image attachments are not supported for SSH projects yet."
         }
     }
 }

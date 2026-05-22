@@ -12,8 +12,7 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
                session: Session,
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error> {
-        let executable = try resolveCommand(run.command, vendorDefault: "codex")
-        let projectPath = (project.location.pathString as NSString).expandingTildeInPath
+        let projectPath = project.location.pathString
 
         var args = run.args
         args.append("exec")
@@ -28,17 +27,38 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
         }
         args.append("-")
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = args
-        proc.currentDirectoryURL = URL(fileURLWithPath: projectPath)
-
         var env = ProcessInfo.processInfo.environment
         let extras = ["\(NSHomeDirectory())/.local/bin",
                       "/opt/homebrew/bin", "/usr/local/bin"]
         let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [existing]).joined(separator: ":")
         for (k, v) in run.env { env[k] = v }
+
+        let proc = Process()
+        switch project.location {
+        case .local:
+            let executable = try resolveCommand(run.command, vendorDefault: "codex")
+            let expandedPath = (projectPath as NSString).expandingTildeInPath
+            proc.executableURL = URL(fileURLWithPath: executable)
+            proc.arguments = args
+            proc.currentDirectoryURL = URL(fileURLWithPath: expandedPath)
+        case .ssh(let host, let path, _):
+            guard attachments.isEmpty else {
+                throw AdapterError.unsupportedRemoteAttachments("Codex")
+            }
+            let remote = SSHRemote.commandLine(
+                command: run.command.isEmpty ? "codex" : run.command,
+                args: args,
+                env: run.env,
+                workingDirectory: path
+            )
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: remote,
+                batchMode: true
+            )
+        }
         proc.environment = env
 
         let stdin = Pipe()

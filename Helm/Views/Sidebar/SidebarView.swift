@@ -3,11 +3,11 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
+    @State private var settingsHovered = false
 
     var body: some View {
         @Bindable var store = store
         return VStack(spacing: 0) {
-            toolbar
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     addProjectButton
@@ -20,28 +20,20 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .padding(.top, 4)
-                .padding(.bottom, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
             }
+            settingsBar
         }
+        .background(Color.helmSidebarBg)
         .sheet(isPresented: $store.showProfilesSheet) {
             ProfilesSheet()
                 .environment(store)
         }
-    }
-
-    private var toolbar: some View {
-        HStack(spacing: 6) {
-            Spacer()
-
-            Button {
-                store.showProfilesSheet = true
-            } label: { Image(systemName: "gearshape") }
-                .buttonStyle(.borderless)
-                .help("Profiles & vendor settings")
+        .sheet(isPresented: $store.showSSHProjectSheet) {
+            SSHProjectSheet()
+                .environment(store)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 44)
     }
 
     private var emptyState: some View {
@@ -49,7 +41,7 @@ struct SidebarView: View {
             Text("No projects yet")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("Add a folder to start a conversation in it.")
+            Text("Add a local or SSH project to start.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
         }
@@ -58,13 +50,22 @@ struct SidebarView: View {
     }
 
     private var addProjectButton: some View {
-        Button {
-            store.addLocalProjectViaPicker()
+        Menu {
+            Button {
+                store.addLocalProjectViaPicker()
+            } label: {
+                Label("Local folder", systemImage: "folder.badge.plus")
+            }
+            Button {
+                store.showSSHProjectSheet = true
+            } label: {
+                Label("SSH remote...", systemImage: "terminal")
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "plus")
                     .font(.system(size: 10, weight: .semibold))
-                Text("Add project (folder)")
+                Text("Add project")
                     .font(.system(size: 12))
                 Spacer()
             }
@@ -73,7 +74,56 @@ struct SidebarView: View {
             .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var settingsBar: some View {
+        ZStack(alignment: .top) {
+            LinearGradient(
+                colors: [
+                    Color.helmSidebarBg.opacity(0),
+                    Color.helmSidebarBg.opacity(0.72),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 18)
+            .offset(y: -18)
+            .allowsHitTesting(false)
+
+            Button {
+                store.showProfilesSheet = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("Settings")
+                        .font(.system(size: 12.5, weight: .medium))
+                    Spacer()
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .frame(height: 42)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .fill(settingsHovered ? Color.helmHover : Color.clear)
+                )
+                .contentShape(Rectangle())
+            }
             .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .onHover { settingsHovered = $0 }
+            .help("Profiles & vendor settings")
+        }
+        .background(.bar)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.helmBorder)
+                .frame(height: 0.5)
+        }
     }
 }
 
@@ -319,5 +369,119 @@ struct VendorBadge: View {
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white)
         }
+    }
+}
+
+private struct SSHProjectSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var host = ""
+    @State private var path = "~"
+    @State private var name = ""
+    @State private var knownHosts: [String] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("SSH project")
+                .font(.system(size: 18, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 10) {
+                if !knownHosts.isEmpty {
+                    Menu {
+                        ForEach(knownHosts, id: \.self) { host in
+                            Button(host) {
+                                self.host = host
+                                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    name = host
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Known hosts", systemImage: "server.rack")
+                    }
+                }
+
+                labeledField("Host", text: $host, prompt: "devbox")
+                labeledField("Remote path", text: $path, prompt: "~/workspace/repo")
+                labeledField("Name", text: $name, prompt: defaultName)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    if store.addSSHProject(host: host, path: path, name: name) != nil {
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canAdd)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .onAppear {
+            knownHosts = SSHConfigHosts.load()
+        }
+    }
+
+    private var canAdd: Bool {
+        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var defaultName: String {
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = (p as NSString).lastPathComponent
+        guard !h.isEmpty, !tail.isEmpty, tail != "~" else { return h.isEmpty ? "Project name" : h }
+        return "\(h):\(tail)"
+    }
+
+    private func labeledField(_ title: String,
+                              text: Binding<String>,
+                              prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(prompt, text: text)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+}
+
+private enum SSHConfigHosts {
+    static func load() -> [String] {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".ssh", isDirectory: true)
+            .appendingPathComponent("config", isDirectory: false)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+
+        var hosts: [String] = []
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let withoutComment = rawLine.split(separator: "#", maxSplits: 1).first ?? ""
+            let parts = withoutComment
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count >= 2,
+                  parts[0].lowercased() == "host"
+            else { continue }
+
+            for part in parts.dropFirst() {
+                let host = String(part)
+                if isConcreteHost(host) {
+                    hosts.append(host)
+                }
+            }
+        }
+        return Array(NSOrderedSet(array: hosts)) as? [String] ?? hosts
+    }
+
+    private static func isConcreteHost(_ host: String) -> Bool {
+        !host.contains("*") &&
+        !host.contains("?") &&
+        !host.contains("!") &&
+        !host.contains("[")
     }
 }

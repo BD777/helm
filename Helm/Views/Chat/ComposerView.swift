@@ -241,14 +241,13 @@ struct ComposerView: View {
 
     private func claudePermissionChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
-        let binding = Binding<ClaudePermissionMode>(
-            get: { session.claudePermissionMode },
-            set: { store.setClaudePermission($0, on: session.id) }
-        )
         return Menu {
-            Picker("Mode", selection: binding) {
-                ForEach(ClaudePermissionMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+            ForEach(ClaudePermissionMode.allCases, id: \.self) { mode in
+                Button {
+                    store.setClaudePermission(mode, on: session.id)
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == session.claudePermissionMode)
                 }
             }
         } label: {
@@ -263,14 +262,13 @@ struct ComposerView: View {
 
     private func codexSandboxChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
-        let binding = Binding<Profile.SandboxMode>(
-            get: { session.codexSandboxMode },
-            set: { store.setCodexSandbox($0, on: session.id) }
-        )
         return Menu {
-            Picker("Sandbox", selection: binding) {
-                ForEach(Profile.SandboxMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+            ForEach(Profile.SandboxMode.allCases, id: \.self) { mode in
+                Button {
+                    store.setCodexSandbox(mode, on: session.id)
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == session.codexSandboxMode)
                 }
             }
         } label: {
@@ -285,14 +283,13 @@ struct ComposerView: View {
 
     private func codexApprovalChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
-        let binding = Binding<CodexApprovalMode>(
-            get: { session.codexApprovalMode },
-            set: { store.setCodexApproval($0, on: session.id) }
-        )
         return Menu {
-            Picker("Approval", selection: binding) {
-                ForEach(CodexApprovalMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+            ForEach(CodexApprovalMode.allCases, id: \.self) { mode in
+                Button {
+                    store.setCodexApproval(mode, on: session.id)
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == session.codexApprovalMode)
                 }
             }
         } label: {
@@ -307,14 +304,13 @@ struct ComposerView: View {
 
     private func claudeEffortChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
-        let binding = Binding<ClaudeEffort>(
-            get: { session.claudeEffort },
-            set: { store.setClaudeEffort($0, on: session.id) }
-        )
         return Menu {
-            Picker("Effort", selection: binding) {
-                ForEach(ClaudeEffort.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+            ForEach(ClaudeEffort.allCases, id: \.self) { mode in
+                Button {
+                    store.setClaudeEffort(mode, on: session.id)
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == session.claudeEffort)
                 }
             }
         } label: {
@@ -329,14 +325,13 @@ struct ComposerView: View {
 
     private func codexEffortChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
-        let binding = Binding<Profile.ReasoningEffort>(
-            get: { session.codexEffort },
-            set: { store.setCodexEffort($0, on: session.id) }
-        )
         return Menu {
-            Picker("Effort", selection: binding) {
-                ForEach(Profile.ReasoningEffort.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+            ForEach(Profile.ReasoningEffort.allCases, id: \.self) { mode in
+                Button {
+                    store.setCodexEffort(mode, on: session.id)
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == session.codexEffort)
                 }
             }
         } label: {
@@ -354,6 +349,15 @@ struct ComposerView: View {
             Image(systemName: icon).font(.system(size: 11)).foregroundStyle(.secondary)
             Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
             Image(systemName: "chevron.down").font(.system(size: 8)).foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private func menuSelectionLabel(_ text: String, selected: Bool) -> some View {
+        if selected {
+            Label(text, systemImage: "checkmark")
+        } else {
+            Text(text)
         }
     }
 
