@@ -278,11 +278,11 @@ private struct QuickSwitcherView: View {
     private func open(_ entry: QuickSwitcherEntry) {
         store.selectedSessionId = entry.session.id
         close()
-        store.requestComposerFocus()
     }
 
     private func close() {
         store.hideQuickSwitcherPanel()
+        store.requestComposerFocus()
     }
 
     private func focusSearch() {

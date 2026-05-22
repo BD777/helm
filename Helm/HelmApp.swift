@@ -144,6 +144,7 @@ final class HelmCommandCenter {
         guard NSApp.isActive else { return false }
         if store?.showQuickSwitcher == true, command.keyCode == 53 {
             store?.hideQuickSwitcherPanel()
+            store?.requestComposerFocus()
             return true
         }
         guard command.hasCommand else { return false }
