@@ -6,7 +6,7 @@ struct ChatToolbar: View {
     var body: some View {
         let session = store.selectedSession
         let project = session.flatMap { store.project(for: $0.id) }
-        let path = project?.location.pathString ?? ""
+        let path = project.map(displayPath) ?? ""
 
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
@@ -26,5 +26,17 @@ struct ChatToolbar: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
+    }
+
+    private func displayPath(for project: Project) -> String {
+        switch project.location {
+        case .local(let path):
+            return path
+        case .ssh(let host, let path, let status):
+            let resolved = status.resolvedPath?.isEmpty == false
+                ? status.resolvedPath!
+                : path
+            return "\(host):\(resolved)"
+        }
     }
 }
