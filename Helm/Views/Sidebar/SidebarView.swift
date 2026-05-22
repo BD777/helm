@@ -657,6 +657,13 @@ private struct SSHProjectSheet: View {
     @State private var knownHosts: [String] = []
     @State private var testStatus: SSHStatus?
     @State private var isTestingConnection = false
+    @State private var directories: [String] = []
+    @State private var directoryError: String?
+    @State private var isLoadingDirectory = false
+    @State private var browseTask: Task<Void, Never>?
+    @State private var lastBrowsedHost = ""
+    @State private var lastBrowsedPath = ""
+    @State private var userEditedName = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -664,25 +671,10 @@ private struct SSHProjectSheet: View {
                 .font(.system(size: 18, weight: .semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                if !knownHosts.isEmpty {
-                    Menu {
-                        ForEach(knownHosts, id: \.self) { host in
-                            Button(host) {
-                                self.host = host
-                                resetTestStatus()
-                                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    name = host
-                                }
-                            }
-                        }
-                    } label: {
-                        Label("Known hosts", systemImage: "server.rack")
-                    }
-                }
-
-                labeledField("Host", text: $host, prompt: "devbox")
-                labeledField("Remote path", text: $path, prompt: "~/workspace/repo")
-                labeledField("Name", text: $name, prompt: defaultName)
+                hostPicker
+                remotePathField
+                directoryBrowser
+                nameField
                 connectionStatus
             }
 
@@ -704,15 +696,32 @@ private struct SSHProjectSheet: View {
             }
         }
         .padding(22)
-        .frame(width: 420)
+        .frame(width: 560)
         .onAppear {
             knownHosts = SSHConfigHosts.load()
+            if host.isEmpty, let first = knownHosts.first {
+                host = first
+                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    name = first
+                }
+            }
+            scheduleDirectoryBrowse(debounce: false)
+        }
+        .onDisappear {
+            browseTask?.cancel()
         }
         .onChange(of: host) { _, _ in
             resetTestStatus()
+            scheduleDirectoryBrowse()
         }
         .onChange(of: path) { _, _ in
             resetTestStatus()
+            syncDefaultNameIfNeeded()
+            scheduleDirectoryBrowse()
+        }
+        .onChange(of: name) { _, newValue in
+            userEditedName = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                newValue != defaultName
         }
     }
 
@@ -727,6 +736,191 @@ private struct SSHProjectSheet: View {
         let tail = (p as NSString).lastPathComponent
         guard !h.isEmpty, !tail.isEmpty, tail != "~" else { return h.isEmpty ? "Project name" : h }
         return "\(h):\(tail)"
+    }
+
+    private var nameField: some View {
+        labeledField("Name", text: $name, prompt: defaultName)
+    }
+
+    private var canBrowse: Bool {
+        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canGoToParentDirectory: Bool {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !p.isEmpty && p != "/" && p != "~"
+    }
+
+    private var hostPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Host")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Menu {
+                if knownHosts.isEmpty {
+                    Text("No hosts in ~/.ssh/config")
+                } else {
+                    ForEach(knownHosts, id: \.self) { host in
+                        Button(host) {
+                            selectHost(host)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(host.isEmpty ? "No known hosts" : host)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(host.isEmpty ? .tertiary : .primary)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                        .fill(Color.helmCard)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                                .stroke(Color.helmBorderStrong.opacity(0.55), lineWidth: 1)
+                        )
+                )
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(knownHosts.isEmpty)
+            .accessibilityLabel("Host")
+            .accessibilityValue(host.isEmpty ? "No known hosts" : host)
+        }
+    }
+
+    private var remotePathField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Remote path")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button {
+                    goToParentDirectory()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(canGoToParentDirectory ? .secondary : .tertiary)
+                .disabled(!canGoToParentDirectory)
+                .help("Parent directory")
+                .accessibilityLabel("Parent directory")
+
+                TextField("~/workspace/repo", text: $path)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        scheduleDirectoryBrowse(debounce: false, force: true)
+                    }
+
+                Button {
+                    scheduleDirectoryBrowse(debounce: false, force: true)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(!canBrowse || isLoadingDirectory)
+                .help("Refresh directories")
+                .accessibilityLabel("Refresh directories")
+            }
+        }
+    }
+
+    private var directoryBrowser: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                .fill(Color.helmCard.opacity(0.55))
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                        .stroke(Color.helmBorderStrong.opacity(0.55), lineWidth: 1)
+                )
+
+            directoryBrowserContent
+                .padding(8)
+        }
+        .frame(height: 210)
+    }
+
+    @ViewBuilder
+    private var directoryBrowserContent: some View {
+        if !canBrowse {
+            browserMessage(symbolName: "server.rack",
+                           text: "Choose a host to browse remote folders.",
+                           foreground: .secondary)
+        } else if isLoadingDirectory {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading directories...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let directoryError {
+            browserMessage(symbolName: "exclamationmark.triangle",
+                           text: directoryError,
+                           foreground: .red)
+        } else if directories.isEmpty {
+            browserMessage(symbolName: "folder",
+                           text: "No directories in this path.",
+                           foreground: .secondary)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(directories, id: \.self) { directory in
+                        Button {
+                            openDirectory(directory)
+                        } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 13, weight: .regular))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18)
+                                Text(directory)
+                                    .font(.system(size: 12.5))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 28)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func browserMessage(symbolName: String,
+                                text: String,
+                                foreground: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbolName)
+                .font(.system(size: 13, weight: .medium))
+            Text(text)
+                .font(.system(size: 12))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(foreground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -779,6 +973,102 @@ private struct SSHProjectSheet: View {
         if !isTestingConnection {
             testStatus = nil
         }
+    }
+
+    private func selectHost(_ host: String) {
+        self.host = host
+        resetTestStatus()
+        syncDefaultNameIfNeeded()
+    }
+
+    private func syncDefaultNameIfNeeded() {
+        if !userEditedName {
+            name = defaultName
+        }
+    }
+
+    private func scheduleDirectoryBrowse(debounce: Bool = true, force: Bool = false) {
+        browseTask?.cancel()
+
+        let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !path.isEmpty else {
+            directories = []
+            directoryError = nil
+            isLoadingDirectory = false
+            return
+        }
+
+        if !force, host == lastBrowsedHost, path == lastBrowsedPath {
+            return
+        }
+
+        isLoadingDirectory = true
+        directoryError = nil
+        browseTask = Task {
+            if debounce {
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                guard !Task.isCancelled else { return }
+            }
+
+            do {
+                let listing = try await SSHDirectoryBrowser.list(host: host, path: path)
+                guard !Task.isCancelled,
+                      self.host.trimmingCharacters(in: .whitespacesAndNewlines) == host,
+                      self.path.trimmingCharacters(in: .whitespacesAndNewlines) == path
+                else { return }
+
+                directories = listing.directories
+                directoryError = nil
+                isLoadingDirectory = false
+                if !listing.resolvedPath.isEmpty {
+                    lastBrowsedHost = host
+                    lastBrowsedPath = listing.resolvedPath
+                    if listing.resolvedPath != path {
+                        self.path = listing.resolvedPath
+                    }
+                } else {
+                    lastBrowsedHost = host
+                    lastBrowsedPath = path
+                }
+            } catch {
+                guard !Task.isCancelled,
+                      self.host.trimmingCharacters(in: .whitespacesAndNewlines) == host,
+                      self.path.trimmingCharacters(in: .whitespacesAndNewlines) == path
+                else { return }
+
+                directories = []
+                directoryError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                isLoadingDirectory = false
+            }
+        }
+    }
+
+    private func openDirectory(_ directory: String) {
+        let base = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty || base == "." {
+            path = directory
+        } else if base == "/" {
+            path = "/" + directory
+        } else if base.hasSuffix("/") {
+            path = base + directory
+        } else {
+            path = base + "/" + directory
+        }
+    }
+
+    private func goToParentDirectory() {
+        let current = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty, current != "/" else { return }
+
+        if current.hasPrefix("~/") {
+            let parent = (current as NSString).deletingLastPathComponent
+            path = parent.isEmpty || parent == "." ? "~" : parent
+            return
+        }
+
+        let parent = (current as NSString).deletingLastPathComponent
+        path = parent.isEmpty ? "/" : parent
     }
 
     private func testConnection() {

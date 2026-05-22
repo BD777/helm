@@ -62,6 +62,77 @@ enum SSHRemote {
     }
 }
 
+struct SSHDirectoryListing: Sendable {
+    let resolvedPath: String
+    let directories: [String]
+}
+
+struct SSHRemoteError: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
+enum SSHDirectoryBrowser {
+    static func list(host: String, path: String) async throws -> SSHDirectoryListing {
+        try await Task.detached(priority: .utility) {
+            let command = """
+            cd -- \(SSHRemote.shellPath(path)) && \
+            printf '__HELM_PWD__%s\\n' "$(pwd -P)" && \
+            find . -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sed 's#^\\./##' | LC_ALL=C sort -f | awk '!/^\\./ { print } /^\\./ { hidden[++n] = $0 } END { for (i = 1; i <= n; i++) print hidden[i] }' | head -n 200
+            """
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: command,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+
+            do {
+                try proc.run()
+            } catch {
+                throw SSHRemoteError(message: error.localizedDescription)
+            }
+            proc.waitUntilExit()
+
+            let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            guard proc.terminationStatus == 0 else {
+                let reason = lastNonEmptyLine(stderrText) ?? lastNonEmptyLine(stdoutText)
+                throw SSHRemoteError(message: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
+            }
+
+            let lines = stdoutText.split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard let markerIndex = lines.firstIndex(where: { $0.hasPrefix("__HELM_PWD__") }) else {
+                throw SSHRemoteError(message: "Remote directory listing returned no path.")
+            }
+
+            let resolvedPath = String(lines[markerIndex].dropFirst("__HELM_PWD__".count))
+            let directories = lines.dropFirst(markerIndex + 1)
+                .filter { !$0.isEmpty && $0 != "." }
+            return SSHDirectoryListing(resolvedPath: resolvedPath,
+                                       directories: Array(directories))
+        }.value
+    }
+
+    private static func lastNonEmptyLine(_ raw: String) -> String? {
+        raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// Events the UI cares about — vendor-agnostic. Concrete adapters translate
 /// their wire format into this stream.
 enum AgentEvent: Sendable {
