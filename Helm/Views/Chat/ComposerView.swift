@@ -33,11 +33,22 @@ struct ComposerView: View {
             loadDraft(for: newSessionId)
             requestComposerFocus()
         }
+        .onChange(of: pickerOpen) { _, isOpen in
+            if !isOpen {
+                requestComposerFocus()
+            }
+        }
         .onDisappear { removePasteMonitor() }
     }
 
     private func requestComposerFocus() {
         focusRequest += 1
+    }
+
+    private func refocusComposerAfterMenuSelection() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            requestComposerFocus()
+        }
     }
 
     private var inner: some View {
@@ -253,6 +264,7 @@ struct ComposerView: View {
             ForEach(ClaudePermissionMode.allCases, id: \.self) { mode in
                 Button {
                     store.setClaudePermission(mode, on: session.id)
+                    refocusComposerAfterMenuSelection()
                 } label: {
                     menuSelectionLabel(mode.displayName,
                                        selected: mode == session.claudePermissionMode)
@@ -274,6 +286,7 @@ struct ComposerView: View {
             ForEach(Profile.SandboxMode.allCases, id: \.self) { mode in
                 Button {
                     store.setCodexSandbox(mode, on: session.id)
+                    refocusComposerAfterMenuSelection()
                 } label: {
                     menuSelectionLabel(mode.displayName,
                                        selected: mode == session.codexSandboxMode)
@@ -295,6 +308,7 @@ struct ComposerView: View {
             ForEach(CodexApprovalMode.allCases, id: \.self) { mode in
                 Button {
                     store.setCodexApproval(mode, on: session.id)
+                    refocusComposerAfterMenuSelection()
                 } label: {
                     menuSelectionLabel(mode.displayName,
                                        selected: mode == session.codexApprovalMode)
@@ -316,6 +330,7 @@ struct ComposerView: View {
             ForEach(ClaudeEffort.allCases, id: \.self) { mode in
                 Button {
                     store.setClaudeEffort(mode, on: session.id)
+                    refocusComposerAfterMenuSelection()
                 } label: {
                     menuSelectionLabel(mode.displayName,
                                        selected: mode == session.claudeEffort)
@@ -337,6 +352,7 @@ struct ComposerView: View {
             ForEach(Profile.ReasoningEffort.allCases, id: \.self) { mode in
                 Button {
                     store.setCodexEffort(mode, on: session.id)
+                    refocusComposerAfterMenuSelection()
                 } label: {
                     menuSelectionLabel(mode.displayName,
                                        selected: mode == session.codexEffort)
