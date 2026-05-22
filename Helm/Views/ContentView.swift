@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -125,6 +126,7 @@ private struct QuickSwitcherView: View {
     @Environment(AppStore.self) private var store
     @State private var query = ""
     @State private var highlightedId: UUID?
+    @State private var keyMonitor: Any?
     @FocusState private var searchFocused: Bool
 
     private var entries: [QuickSwitcherEntry] {
@@ -175,10 +177,12 @@ private struct QuickSwitcherView: View {
         .onAppear {
             highlightedId = entries.first?.id
             focusSearch()
+            installKeyMonitor()
         }
         .onChange(of: query) { _, _ in
             highlightedId = entries.first?.id
         }
+        .onDisappear(perform: removeKeyMonitor)
         .onExitCommand(perform: close)
     }
 
@@ -287,6 +291,42 @@ private struct QuickSwitcherView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             searchFocused = true
+        }
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            handleKeyDown(event) ? nil : event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
+    }
+
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        let commandFlags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard commandFlags.isEmpty else { return false }
+
+        switch event.keyCode {
+        case 125:
+            moveHighlight(by: 1)
+            return true
+        case 126:
+            moveHighlight(by: -1)
+            return true
+        case 36, 76:
+            openHighlighted()
+            return true
+        case 53:
+            close()
+            return true
+        default:
+            return false
         }
     }
 
