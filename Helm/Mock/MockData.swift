@@ -228,6 +228,7 @@ final class AppStore {
     /// Synchronously persist everything in-flight. Call from
     /// `applicationWillTerminate` so debounced writes can't be lost on quit.
     func flushAll() {
+        persistTranscriptSnapshots()
         profileStore.flush(ProfileStoreFile(
             version: ProfileStoreFile.currentVersion,
             providers: providers,
@@ -299,6 +300,7 @@ final class AppStore {
         let projectId = sessions[idx].projectId
         let wasSelected = selectedSessionId == id
         sessions.remove(at: idx)
+        TranscriptSnapshotStore.delete(sessionId: id)
         if wasSelected {
             selectedSessionId = sessions.first {
                 $0.projectId == projectId && !$0.isDraft
@@ -517,7 +519,9 @@ final class AppStore {
         NSLog("[helm.history] loading %@ for %@", vendorId, sessionId.uuidString)
         do {
             let items = try await Task.detached(priority: .userInitiated) {
-                try await store.history(sessionId: vendorId, project: project)
+                let vendorItems = try await store.history(sessionId: vendorId, project: project)
+                if !vendorItems.isEmpty { return vendorItems }
+                return TranscriptSnapshotStore.load(sessionId: sessionId)
             }.value
             guard let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
                   sessions[stillIdx].transcript.isEmpty else { return }
@@ -525,6 +529,15 @@ final class AppStore {
             NSLog("[helm.history] loaded %ld items for %@",
                   items.count, vendorId)
         } catch {
+            let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+            if !snapshot.isEmpty,
+               let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+               sessions[stillIdx].transcript.isEmpty {
+                sessions[stillIdx].transcript = snapshot
+                NSLog("[helm.history] loaded %ld snapshot items for %@",
+                      snapshot.count, vendorId)
+                return
+            }
             NSLog("[helm.history] load failed for %@: %@",
                   vendorId, error.localizedDescription)
         }
@@ -659,6 +672,9 @@ final class AppStore {
 
     private func finishStreaming(runId: UUID? = nil) {
         if let runId, activeRunId != runId { return }
+        if let activeSessionId {
+            persistTranscriptSnapshot(for: activeSessionId)
+        }
         isStreaming = false
         currentAdapter = nil
         streamTask = nil
@@ -822,6 +838,21 @@ final class AppStore {
             parts: [.text("⚠️ " + text)]
         )
         sessions[sIdx].transcript.append(.message(errMsg))
+        persistTranscriptSnapshot(for: sessions[sIdx].id)
+    }
+
+    private func persistTranscriptSnapshot(for sessionId: UUID) {
+        guard let session = sessions.first(where: { $0.id == sessionId }),
+              !session.isDraft,
+              !session.transcript.isEmpty
+        else { return }
+        TranscriptSnapshotStore.save(sessionId: session.id, items: session.transcript)
+    }
+
+    private func persistTranscriptSnapshots() {
+        for session in sessions where !session.isDraft && !session.transcript.isEmpty {
+            TranscriptSnapshotStore.save(sessionId: session.id, items: session.transcript)
+        }
     }
 
     private static func title(for prompt: String,

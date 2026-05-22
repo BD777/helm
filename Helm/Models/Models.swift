@@ -357,9 +357,9 @@ struct Session: Identifiable, Hashable, Codable {
     }
 }
 
-struct Message: Identifiable, Hashable {
+struct Message: Identifiable, Hashable, Codable {
     let id: UUID
-    enum Role: Hashable { case user, assistant(meta: String) }
+    enum Role: Hashable, Codable { case user, assistant(meta: String) }
     var role: Role
     var who: String
     var meta: String?
@@ -371,7 +371,7 @@ struct Message: Identifiable, Hashable {
 /// switch, etc). Events have no sender or parts; they render as inline
 /// markers, not chat bubbles. Modeled as a sum at the top so adding a new
 /// event kind forces every renderer/transformer to opt in.
-enum TranscriptItem: Identifiable, Hashable {
+enum TranscriptItem: Identifiable, Hashable, Codable {
     case message(Message)
     case event(SessionEvent)
 
@@ -393,7 +393,7 @@ enum TranscriptItem: Identifiable, Hashable {
 /// A non-dialog runtime event written into the transcript by the agent.
 /// Today only `.compactSummary` exists (Claude's auto-compact summary);
 /// future kinds (`.modelSwitch`, `.permissionChange`) slot in here.
-enum SessionEvent: Identifiable, Hashable {
+enum SessionEvent: Identifiable, Hashable, Codable {
     /// Claude wrote a context-compaction summary. The model treats it as a
     /// user-role message internally, but to the human it's just "we hit the
     /// limit and the prior conversation was summarized." `summary` is the
@@ -407,7 +407,7 @@ enum SessionEvent: Identifiable, Hashable {
     }
 }
 
-enum Part: Hashable, Identifiable {
+enum Part: Hashable, Identifiable, Codable {
     case text(String)
     case toolCall(ToolCall)
     /// Local file URL for an image attached to a user message. We store the
@@ -442,7 +442,7 @@ struct ImageAttachment: Identifiable, Hashable {
     }
 }
 
-struct ToolCall: Hashable, Identifiable {
+struct ToolCall: Hashable, Identifiable, Codable {
     let id: UUID
     var name: String
     var arg: String
@@ -450,7 +450,7 @@ struct ToolCall: Hashable, Identifiable {
     var meta: String?
     var body: String?
 
-    enum Status: Hashable {
+    enum Status: Hashable, Codable {
         case ok(exit: Int)
         case error(exit: Int)
         case running

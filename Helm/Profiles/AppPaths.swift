@@ -29,4 +29,13 @@ enum AppPaths {
     static func imageManifestURL(for sessionId: UUID) -> URL {
         imagesDir(for: sessionId).appendingPathComponent("manifest.json")
     }
+
+    /// `<dataRoot>/transcripts/<sessionId>.json` — Helm-owned fallback
+    /// transcript snapshot, primarily for SSH sessions whose vendor logs live
+    /// on a remote machine.
+    static func transcriptSnapshotURL(for sessionId: UUID) -> URL {
+        let dir = appSupportDir().appendingPathComponent("transcripts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(sessionId.uuidString.lowercased()).json")
+    }
 }
