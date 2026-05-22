@@ -16,6 +16,16 @@ struct ContentView: View {
             .background(Color.helmSidebarBg)
             .animation(Self.sidebarAnimation, value: sidebarVisible)
             .animation(Self.sidebarAnimation, value: isCompact)
+            .overlay {
+                if let previewURL = store.imagePreviewURL {
+                    ImagePreviewOverlay(url: previewURL) {
+                        store.imagePreviewURL = nil
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                    .zIndex(20)
+                }
+            }
+            .animation(.easeOut(duration: 0.14), value: store.imagePreviewURL)
         }
     }
 

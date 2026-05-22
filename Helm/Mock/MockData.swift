@@ -41,6 +41,7 @@ final class AppStore {
     }
     var showProfilesSheet: Bool = false
     var showSSHProjectSheet: Bool = false
+    var imagePreviewURL: URL?
 
     /// Bumped each time the user sends a message. The chat list watches this
     /// to force a scroll-to-bottom after Send, regardless of where the user

@@ -742,15 +742,15 @@ private struct ThinkingBlock: View {
 }
 
 private struct ImagePartView: View {
+    @Environment(AppStore.self) private var store
     let url: URL
-    @State private var previewItem: ImagePreviewItem?
     @State private var isHovering = false
 
     var body: some View {
         if let img = NSImage(contentsOf: url) {
             let size = fittedDisplaySize(for: img)
             Button {
-                previewItem = ImagePreviewItem(url: url)
+                store.imagePreviewURL = url
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     Image(nsImage: img)
@@ -780,9 +780,6 @@ private struct ImagePartView: View {
                 withAnimation(.easeOut(duration: 0.12)) {
                     isHovering = hovering
                 }
-            }
-            .sheet(item: $previewItem) { item in
-                ImagePreviewSheet(url: item.url)
             }
             .help("Preview image")
             .accessibilityLabel("Preview image")
@@ -826,24 +823,47 @@ private struct ImagePartView: View {
     }
 }
 
-private struct ImagePreviewItem: Identifiable {
+struct ImagePreviewOverlay: View {
     let url: URL
-
-    var id: URL { url }
-}
-
-private struct ImagePreviewSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let url: URL
+    var onDismiss: () -> Void
 
     var body: some View {
+        GeometryReader { proxy in
+            let cardWidth = min(860, max(280, proxy.size.width - 96))
+            let cardHeight = min(620, max(260, proxy.size.height - 84))
+
+            ZStack {
+                Color.black.opacity(0.16)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onDismiss()
+                    }
+
+                previewCard(width: cardWidth, height: cardHeight)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private func previewCard(width: CGFloat, height: CGFloat) -> some View {
         VStack(spacing: 0) {
             header
             Divider()
             previewContent
         }
-        .frame(width: 860, height: 620)
+        .frame(width: width, height: height)
         .background(Color.helmChatBg)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 20, x: 0, y: 10)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture {}
     }
 
     private var header: some View {
@@ -856,7 +876,7 @@ private struct ImagePreviewSheet: View {
                 .truncationMode(.middle)
             Spacer(minLength: 12)
             Button {
-                dismiss()
+                onDismiss()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
@@ -882,34 +902,13 @@ private struct ImagePreviewSheet: View {
                     in: CGSize(width: max(1, proxy.size.width - 36),
                                height: max(1, proxy.size.height - 36))
                 )
-                let topHeight = max(0, floor((proxy.size.height - imageSize.height) / 2))
-                let bottomHeight = max(0, proxy.size.height - imageSize.height - topHeight)
-                let leftWidth = max(0, floor((proxy.size.width - imageSize.width) / 2))
-                let rightWidth = max(0, proxy.size.width - imageSize.width - leftWidth)
 
-                VStack(spacing: 0) {
-                    dismissArea
-                        .frame(height: topHeight)
-
-                    HStack(spacing: 0) {
-                        dismissArea
-                            .frame(width: leftWidth)
-
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: imageSize.width, height: imageSize.height)
-
-                        dismissArea
-                            .frame(width: rightWidth)
-                    }
-                    .frame(height: imageSize.height)
-
-                    dismissArea
-                        .frame(height: bottomHeight)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.helmChatBg)
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: imageSize.width, height: imageSize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.helmChatBg)
             }
         } else {
             ContentUnavailableView(
@@ -920,14 +919,6 @@ private struct ImagePreviewSheet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.helmChatBg)
         }
-    }
-
-    private var dismissArea: some View {
-        Color.helmChatBg
-            .contentShape(Rectangle())
-            .onTapGesture {
-                dismiss()
-            }
     }
 
     private func fittedPreviewSize(for image: NSImage, in maxSize: CGSize) -> CGSize {
