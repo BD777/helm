@@ -30,6 +30,30 @@ struct MessageListView: View {
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .background(Color.helmChatBg)
+        .overlay(alignment: .bottomTrailing) {
+            if autoScroll.showJumpToBottom {
+                Button {
+                    autoScroll.forceScrollToBottom(animated: true)
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(
+                            Circle()
+                                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Jump to latest")
+                .accessibilityLabel("Jump to latest")
+                .padding(.trailing, 28)
+                .padding(.bottom, 18)
+                .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: autoScroll.showJumpToBottom)
         // Initial appearance lands at the bottom. Streaming follow is driven
         // from AppKit's real scroll geometry below so it can resume when the
         // user manually returns close to the bottom.
@@ -104,6 +128,8 @@ struct MessageListView: View {
 
 @MainActor
 private final class ChatAutoScrollController: ObservableObject {
+    @Published private(set) var showJumpToBottom = false
+
     private weak var scrollView: NSScrollView?
     private weak var observedDocumentView: NSView?
     private var scrollObservers: [NSObjectProtocol] = []
@@ -176,6 +202,7 @@ private final class ChatAutoScrollController: ObservableObject {
         }
 
         observeDocumentView(scrollView.documentView)
+        refreshJumpButton()
         if followsBottom {
             scheduleScrollToBottom(animated: false, force: false)
         }
@@ -197,10 +224,12 @@ private final class ChatAutoScrollController: ObservableObject {
             updateFollowPreference()
         } else if distanceFromBottom(in: scrollView) <= bottomTolerance {
             followsBottom = true
+            showJumpToBottom = false
         }
     }
 
     private func documentFrameDidChange() {
+        refreshJumpButton()
         guard followsBottom else { return }
         scheduleScrollToBottom(animated: false, force: false)
     }
@@ -208,6 +237,15 @@ private final class ChatAutoScrollController: ObservableObject {
     private func updateFollowPreference() {
         guard let scrollView else { return }
         followsBottom = distanceFromBottom(in: scrollView) <= bottomTolerance
+        showJumpToBottom = !followsBottom
+    }
+
+    private func refreshJumpButton() {
+        guard let scrollView else {
+            showJumpToBottom = false
+            return
+        }
+        showJumpToBottom = distanceFromBottom(in: scrollView) > bottomTolerance
     }
 
     private func observeDocumentView(_ documentView: NSView?) {
@@ -287,6 +325,7 @@ private final class ChatAutoScrollController: ObservableObject {
         let targetOrigin = clipView.constrainBoundsRect(requestedBounds).origin
         guard abs(clipView.bounds.origin.y - targetOrigin.y) > 0.5 else {
             followsBottom = true
+            showJumpToBottom = false
             return
         }
 
@@ -313,6 +352,7 @@ private final class ChatAutoScrollController: ObservableObject {
 
     private func finishProgrammaticScroll() {
         followsBottom = true
+        showJumpToBottom = false
         isProgrammaticScroll = false
     }
 
