@@ -3,6 +3,8 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppStore.self) private var store
+    var onCollapseSidebar: (() -> Void)? = nil
+
     @State private var settingsHovered = false
 
     var body: some View {
@@ -10,7 +12,7 @@ struct SidebarView: View {
         return VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    addProjectButton
+                    sidebarHeader
                         .padding(.bottom, 2)
                     if store.projects.isEmpty {
                         emptyState
@@ -20,7 +22,7 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .padding(.top, 18)
+                .padding(.top, DS.sidebarHeaderTopPadding)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 24)
             }
@@ -35,6 +37,19 @@ struct SidebarView: View {
             SSHProjectSheet()
                 .environment(store)
         }
+    }
+
+    private var sidebarHeader: some View {
+        HStack(spacing: 4) {
+            addProjectButton
+            if let onCollapseSidebar {
+                SidebarChromeButton(symbolName: "sidebar.left",
+                                    accessibilityLabel: "Hide sidebar",
+                                    help: "Hide sidebar",
+                                    action: onCollapseSidebar)
+            }
+        }
+        .frame(height: 30)
     }
 
     private var emptyState: some View {
@@ -68,17 +83,17 @@ struct SidebarView: View {
                     .font(.system(size: 10, weight: .semibold))
                 Text("Add project")
                     .font(.system(size: 12))
-                Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundStyle(.secondary)
             .padding(.leading, 14)
             .padding(.trailing, 8)
-            .padding(.vertical, 6)
+            .frame(height: 30)
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var settingsBar: some View {

@@ -2,6 +2,8 @@ import SwiftUI
 
 enum DS {
     static let sidebarWidth: CGFloat = 280
+    static let sidebarCollapsedRailWidth: CGFloat = 44
+    static let sidebarHeaderTopPadding: CGFloat = 18
     static let messageMaxWidth: CGFloat = 760
     static let windowMinWidth: CGFloat = 560
     static let windowMinHeight: CGFloat = 520
