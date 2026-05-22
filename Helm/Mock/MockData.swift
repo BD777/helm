@@ -87,11 +87,14 @@ final class AppStore {
         // Caller-provided projects/sessions (previews / tests) win over disk.
         let stateFile = stateStore.load()
         self.projects = projects.isEmpty ? stateFile.projects : projects
-        // Drop sessions that were never sent (no vendor-issued id, no jsonl
-        // backing). These are leftovers from clicks that pre-date the draft
-        // pattern — keeping them just clutters the sidebar.
+        // Drop sessions that were never sent. Keep sessions with either a
+        // vendor-issued id or Helm's own transcript snapshot; a failed launch
+        // can still produce useful chat context before the vendor reports an id.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
-            .filter { $0.vendorSessionId != nil }
+            .filter {
+                $0.vendorSessionId != nil ||
+                TranscriptSnapshotStore.exists(sessionId: $0.id)
+            }
         self.sessions = cleanSessions
         let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
         self.selectedSessionId = cleanSessions.contains { $0.id == restoredSelection }

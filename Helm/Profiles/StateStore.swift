@@ -107,6 +107,10 @@ private struct TranscriptSnapshotFile: Codable {
 }
 
 enum TranscriptSnapshotStore {
+    static func exists(sessionId: UUID) -> Bool {
+        FileManager.default.fileExists(atPath: AppPaths.transcriptSnapshotURL(for: sessionId).path)
+    }
+
     static func load(sessionId: UUID) -> [TranscriptItem] {
         let url = AppPaths.transcriptSnapshotURL(for: sessionId)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
