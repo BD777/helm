@@ -976,7 +976,13 @@ private struct SSHProjectSheet: View {
     }
 
     private func selectHost(_ host: String) {
+        guard self.host != host else { return }
         self.host = host
+        path = "~"
+        directories = []
+        directoryError = nil
+        lastBrowsedHost = ""
+        lastBrowsedPath = ""
         resetTestStatus()
         syncDefaultNameIfNeeded()
     }
