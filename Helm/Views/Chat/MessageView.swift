@@ -662,7 +662,7 @@ private struct ThinkingBlock: View {
         if isStopped {
             return stepCount > 0 ? "已停止 · \(stepCount) 步" : "已停止"
         }
-        if hasToolError {
+        if hasTurnError {
             return stepCount > 0 ? "出错 · \(stepCount) 步" : "出错"
         }
         return stepCount > 0 ? "已处理 · \(stepCount) 步" : "已处理"
@@ -688,15 +688,13 @@ private struct ThinkingBlock: View {
         }
     }
 
-    private var hasToolError: Bool {
+    private var hasTurnError: Bool {
         messages.contains { message in
-            message.parts.contains { part in
-                if case .toolCall(let call) = part,
-                   case .error = call.status {
-                    return true
-                }
-                return false
+            if message.meta == "error" { return true }
+            if case .assistant(let meta) = message.role {
+                return meta == "error"
             }
+            return false
         }
     }
 
