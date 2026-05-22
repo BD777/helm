@@ -6,6 +6,7 @@ import SwiftUI
 struct ProfilesSheet: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("helmAppearance") private var appearanceRawValue = HelmAppearance.system.rawValue
     @State private var selection: Selection? = nil
     /// Set when the user clicks a provider's [+] — drives the AddModelsSheet
     /// presentation. Cleared on dismiss.
@@ -15,6 +16,7 @@ struct ProfilesSheet: View {
     @State private var expanded: Set<UUID> = []
 
     enum Selection: Hashable {
+        case appearance
         case provider(UUID)
         case model(UUID)
         case profile(UUID)
@@ -27,6 +29,8 @@ struct ProfilesSheet: View {
 
             Group {
                 switch selection {
+                case .appearance:
+                    AppearanceSettingsView(appearanceRawValue: $appearanceRawValue)
                 case .provider(let id):
                     if let binding = providerBinding(id) {
                         ProviderEditor(provider: binding,
@@ -75,6 +79,14 @@ struct ProfilesSheet: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
+                    section(title: "General")
+                    settingsRow(
+                        selection: .appearance,
+                        symbolName: HelmAppearance.normalized(appearanceRawValue).symbolName,
+                        title: "Appearance",
+                        subtitle: HelmAppearance.normalized(appearanceRawValue).title
+                    )
+
                     section(
                         title: "Providers",
                         addMenu: AnyView(
@@ -135,18 +147,59 @@ struct ProfilesSheet: View {
         .background(Color.helmSidebarBg)
     }
 
-    private func section(title: String, addMenu: AnyView) -> some View {
+    private func section(title: String, addMenu: AnyView? = nil) -> some View {
         HStack {
             Text(title.uppercased())
                 .font(.system(size: 10.5, weight: .semibold))
                 .tracking(0.5)
                 .foregroundStyle(.tertiary)
             Spacer()
-            addMenu
+            if let addMenu {
+                addMenu
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 4)
+    }
+
+    private func settingsRow(selection target: Selection,
+                             symbolName: String,
+                             title: String,
+                             subtitle: String) -> some View {
+        let isActive = selection == target
+        return Button {
+            selection = target
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(isActive ? Color.helmSelected : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityValue(subtitle)
+            .accessibilityHint("Open \(title.lowercased()) settings")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
     }
 
     private func providerRow(_ p: Provider) -> some View {
@@ -315,13 +368,83 @@ struct ProfilesSheet: View {
             Image(systemName: "person.crop.rectangle.stack")
                 .font(.system(size: 36, weight: .regular))
                 .foregroundStyle(.tertiary)
-            Text("Pick a provider, model, or profile — or create one with the + buttons.")
+            Text("Pick a setting, provider, model, or profile.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 320)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private struct AppearanceSettingsView: View {
+        @Binding var appearanceRawValue: String
+
+        private var appearanceBinding: Binding<String> {
+            Binding(
+                get: { HelmAppearance.normalized(appearanceRawValue).rawValue },
+                set: { appearanceRawValue = HelmAppearance.normalized($0).rawValue }
+            )
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                section("Theme") {
+                    Picker("", selection: appearanceBinding) {
+                        ForEach(HelmAppearance.allCases) { appearance in
+                            Label(appearance.title, systemImage: appearance.symbolName)
+                                .tag(appearance.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.helmChatBg)
+        }
+
+        private var header: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Appearance")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Theme")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+
+        private func section<Content: View>(_ title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                content()
+            }
+            .padding(14)
+            .frame(maxWidth: 420, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                    .fill(Color.helmCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                            .stroke(Color.helmBorder, lineWidth: 1)
+                    )
+            )
+        }
     }
 
     // MARK: - Bindings
@@ -412,8 +535,8 @@ struct ProfilesSheet: View {
     }
 
     private func syncSelection() {
-        if selection == nil, let p = store.providers.first {
-            selection = .provider(p.id)
+        if selection == nil {
+            selection = .appearance
         }
         if expanded.isEmpty {
             // Default-expand all providers on first open so models are visible.

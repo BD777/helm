@@ -14,6 +14,20 @@ struct HelmApp: App {
     }
 }
 
+private struct AppRootView: View {
+    @AppStorage("helmAppearance") private var appearanceRawValue = HelmAppearance.system.rawValue
+
+    private var appearance: HelmAppearance {
+        HelmAppearance.normalized(appearanceRawValue)
+    }
+
+    var body: some View {
+        ContentView()
+            .preferredColorScheme(appearance.colorScheme)
+            .animation(.easeOut(duration: 0.16), value: appearanceRawValue)
+    }
+}
+
 private struct WindowTitleHider: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -97,7 +111,7 @@ final class HelmAppDelegate: NSObject, NSApplicationDelegate {
         let store = store ?? AppStore()
         self.store = store
 
-        let root = ContentView()
+        let root = AppRootView()
             .environment(store)
             .frame(minWidth: DS.windowMinWidth, minHeight: DS.windowMinHeight)
             .toolbarBackground(.hidden, for: .windowToolbar)
