@@ -6,6 +6,12 @@ struct SidebarView: View {
     var onCollapseSidebar: (() -> Void)? = nil
 
     @State private var settingsHovered = false
+    @State private var draggingProjectId: UUID?
+    @State private var projectDropTargetId: UUID?
+    @State private var projectDropPlacement: ProjectDropPlacement = .after
+    @State private var projectHeaderFrames: [UUID: CGRect] = [:]
+    @State private var projectDragLocation: CGPoint?
+    @State private var projectDragAnchorYOffset: CGFloat = 0
 
     var body: some View {
         @Bindable var store = store
@@ -18,13 +24,31 @@ struct SidebarView: View {
                         emptyState
                     } else {
                         ForEach(store.projects) { project in
-                            ProjectSection(project: project)
+                            ProjectSection(
+                                project: project,
+                                isDragging: draggingProjectId == project.id,
+                                dropPlacement: projectDropTargetId == project.id ? projectDropPlacement : nil,
+                                onDragChanged: { value in
+                                    updateProjectDrag(project.id, value: value)
+                                },
+                                onDragEnded: { value in
+                                    updateProjectDrag(project.id, value: value)
+                                    finishProjectDrag()
+                                }
+                            )
                         }
                     }
                 }
                 .padding(.top, DS.sidebarHeaderTopPadding)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 24)
+                .onPreferenceChange(ProjectHeaderFramePreferenceKey.self) { frames in
+                    projectHeaderFrames = frames
+                }
+            }
+            .coordinateSpace(name: SidebarCoordinateSpace.projectList)
+            .overlay(alignment: .topLeading) {
+                projectDragPreview
             }
             settingsBar
         }
@@ -36,6 +60,77 @@ struct SidebarView: View {
         .sheet(isPresented: $store.showSSHProjectSheet) {
             SSHProjectSheet()
                 .environment(store)
+        }
+    }
+
+    private func updateProjectDrag(_ projectId: UUID, value: DragGesture.Value) {
+        if draggingProjectId != projectId {
+            projectDragAnchorYOffset = value.location.y - (projectHeaderFrames[projectId]?.midY ?? value.location.y)
+        }
+        draggingProjectId = projectId
+        projectDragLocation = value.location
+        updateProjectDropTarget(for: value.location.y)
+    }
+
+    private func updateProjectDropTarget(for locationY: CGFloat) {
+        guard let draggingProjectId else {
+            projectDropTargetId = nil
+            return
+        }
+
+        let targets = store.projects.compactMap { project -> (id: UUID, frame: CGRect)? in
+            guard project.id != draggingProjectId,
+                  let frame = projectHeaderFrames[project.id]
+            else { return nil }
+            return (project.id, frame)
+        }
+        guard !targets.isEmpty else {
+            projectDropTargetId = nil
+            return
+        }
+
+        if let target = targets.first(where: { locationY < $0.frame.midY }) {
+            projectDropTargetId = target.id
+            projectDropPlacement = .before
+        } else if let target = targets.last {
+            projectDropTargetId = target.id
+            projectDropPlacement = .after
+        }
+    }
+
+    private func finishProjectDrag() {
+        defer {
+            draggingProjectId = nil
+            projectDropTargetId = nil
+            projectDragLocation = nil
+            projectDragAnchorYOffset = 0
+        }
+        guard let sourceId = draggingProjectId,
+              let targetId = projectDropTargetId,
+              sourceId != targetId
+        else { return }
+
+        withAnimation(.easeOut(duration: 0.16)) {
+            store.moveProject(sourceId,
+                              around: targetId,
+                              after: projectDropPlacement == .after)
+        }
+    }
+
+    @ViewBuilder
+    private var projectDragPreview: some View {
+        if let draggingProjectId,
+           let projectDragLocation,
+           let project = store.projects.first(where: { $0.id == draggingProjectId }) {
+            ProjectDragPreview(project: project)
+                .frame(width: DS.sidebarWidth - 16)
+                .position(
+                    x: DS.sidebarWidth / 2,
+                    y: projectDragLocation.y - projectDragAnchorYOffset
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .allowsHitTesting(false)
+                .zIndex(10)
         }
     }
 
@@ -128,6 +223,11 @@ struct SidebarView: View {
 private struct ProjectSection: View {
     @Environment(AppStore.self) private var store
     let project: Project
+    let isDragging: Bool
+    let dropPlacement: ProjectDropPlacement?
+    var onDragChanged: (DragGesture.Value) -> Void
+    var onDragEnded: (DragGesture.Value) -> Void
+
     @State private var hoveredSessionId: UUID?
     @State private var pendingDelete: Session?
     @State private var pendingRename: Session?
@@ -180,6 +280,25 @@ private struct ProjectSection: View {
                 }
             }
         }
+        .opacity(isDragging ? 0.28 : 1)
+        .scaleEffect(isDragging ? 0.985 : 1, anchor: .center)
+        .background(alignment: .top) {
+            if isDragging {
+                ProjectDragPlaceholder()
+                    .padding(.horizontal, 6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.86), value: isDragging)
+        .overlay(alignment: dropPlacement == .before ? .top : .bottom) {
+            if let dropPlacement {
+                ProjectDropIndicator()
+                    .padding(.horizontal, 14)
+                    .offset(y: dropPlacement == .before ? -2 : 2)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+        .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.84), value: dropPlacement)
         .alert("Delete session?", isPresented: deleteBinding) {
             Button("Delete", role: .destructive) {
                 if let pendingDelete {
@@ -255,6 +374,16 @@ private struct ProjectSection: View {
         .padding(.vertical, 4)
         .padding(.leading, 14)
         .padding(.trailing, 8)
+        .contentShape(Rectangle())
+        .background(ProjectHeaderFrameReader(projectId: project.id))
+        .simultaneousGesture(projectDragGesture)
+    }
+
+    private var projectDragGesture: some Gesture {
+        DragGesture(minimumDistance: 4,
+                    coordinateSpace: .named(SidebarCoordinateSpace.projectList))
+            .onChanged(onDragChanged)
+            .onEnded(onDragEnded)
     }
 
     @ViewBuilder
@@ -331,6 +460,125 @@ private struct ProjectSection: View {
             .foregroundStyle(.tertiary)
             .help(status.helpText)
         }
+    }
+}
+
+private enum ProjectDropPlacement {
+    case before
+    case after
+}
+
+private struct ProjectDropIndicator: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Color.accentColor.opacity(0.78))
+                .frame(width: 5, height: 5)
+            Capsule()
+                .fill(Color.accentColor.opacity(0.70))
+                .frame(height: 2)
+        }
+            .shadow(color: Color.accentColor.opacity(0.12), radius: 3, x: 0, y: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct ProjectDragPlaceholder: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color.primary.opacity(0.035))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.helmBorderStrong.opacity(0.45), lineWidth: 0.5)
+            )
+            .frame(height: 28)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+private struct ProjectDragPreview: View {
+    let project: Project
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: project.collapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+            Text(project.name.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            locationChip
+            Spacer(minLength: 0)
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .frame(height: 30)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.helmBorderStrong.opacity(0.72), lineWidth: 0.5)
+        )
+        .opacity(0.86)
+        .shadow(color: Color.primary.opacity(0.10), radius: 9, x: 0, y: 5)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var locationChip: some View {
+        switch project.location {
+        case .local:
+            HStack(spacing: 3) {
+                Image(systemName: "folder")
+                    .font(.system(size: 9))
+                Text("local")
+                    .font(.system(size: 10))
+            }
+                .foregroundStyle(.tertiary)
+        case .ssh(let host, _, let status):
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(status.color)
+                    .frame(width: 6, height: 6)
+                Text(host)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+private enum SidebarCoordinateSpace {
+    static let projectList = "sidebarProjectList"
+}
+
+private struct ProjectHeaderFrameReader: View {
+    let projectId: UUID
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: ProjectHeaderFramePreferenceKey.self,
+                value: [projectId: proxy.frame(in: .named(SidebarCoordinateSpace.projectList))]
+            )
+        }
+    }
+}
+
+private struct ProjectHeaderFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 

@@ -322,6 +322,26 @@ final class AppStore {
         scheduleStateSave()
     }
 
+    func moveProject(_ sourceId: UUID, around targetId: UUID, after: Bool) {
+        guard sourceId != targetId,
+              let sourceIndex = projects.firstIndex(where: { $0.id == sourceId })
+        else { return }
+
+        let previousOrder = projects.map(\.id)
+        let moving = projects.remove(at: sourceIndex)
+        guard let targetIndex = projects.firstIndex(where: { $0.id == targetId }) else {
+            projects.insert(moving, at: sourceIndex)
+            return
+        }
+
+        let insertionIndex = min(projects.count, targetIndex + (after ? 1 : 0))
+        projects.insert(moving, at: insertionIndex)
+
+        if projects.map(\.id) != previousOrder {
+            scheduleStateSave()
+        }
+    }
+
     /// Display string for a session's current binding (e.g.
     /// "Claude Sonnet 4.6 · es2-relay"). Falls back gracefully if the
     /// profile / model has been deleted.
