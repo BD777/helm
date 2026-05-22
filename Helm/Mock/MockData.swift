@@ -253,6 +253,32 @@ final class AppStore {
         sessions.filter { $0.projectId == projectId && !$0.isDraft }
     }
 
+    func renameSession(_ id: UUID, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = sessions.firstIndex(where: { $0.id == id })
+        else { return }
+        sessions[idx].title = trimmed
+        sessions[idx].lastUpdate = "now"
+        scheduleStateSave()
+    }
+
+    func deleteSession(_ id: UUID) {
+        guard !isSessionStreaming(id),
+              let idx = sessions.firstIndex(where: { $0.id == id })
+        else { return }
+        let projectId = sessions[idx].projectId
+        let wasSelected = selectedSessionId == id
+        sessions.remove(at: idx)
+        if wasSelected {
+            selectedSessionId = sessions.first {
+                $0.projectId == projectId && !$0.isDraft
+            }?.id
+        } else {
+            scheduleStateSave()
+        }
+    }
+
     func toggleCollapsed(_ projectId: UUID) {
         guard let i = projects.firstIndex(where: { $0.id == projectId }) else { return }
         projects[i].collapsed.toggle()

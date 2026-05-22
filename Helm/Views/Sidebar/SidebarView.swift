@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SidebarView: View {
@@ -9,6 +10,8 @@ struct SidebarView: View {
             toolbar
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    addProjectButton
+                        .padding(.bottom, 2)
                     if store.projects.isEmpty {
                         emptyState
                     } else {
@@ -16,8 +19,6 @@ struct SidebarView: View {
                             ProjectSection(project: project)
                         }
                     }
-                    addProjectButton
-                        .padding(.top, 4)
                 }
                 .padding(.top, 4)
                 .padding(.bottom, 12)
@@ -31,19 +32,6 @@ struct SidebarView: View {
 
     private var toolbar: some View {
         HStack(spacing: 6) {
-            Button {
-                newChat()
-            } label: {
-                Label("New", systemImage: "square.and.pencil")
-                    .labelStyle(.titleAndIcon)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(store.projects.isEmpty)
-            .keyboardShortcut("n", modifiers: .command)
-            .help("New conversation (⌘N)")
-
             Spacer()
 
             Button {
@@ -85,24 +73,17 @@ struct SidebarView: View {
             .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-    }
-
-    /// New chat in the active session's project, or in the first project if
-    /// nothing is selected. If no profile exists yet (so newSession would
-    /// silently no-op), route the user to the profiles sheet instead.
-    private func newChat() {
-        let projectId = store.selectedSession?.projectId ?? store.projects.first?.id
-        guard let projectId else { return }
-        if store.newSession(in: projectId) == nil {
-            store.showProfilesSheet = true
-        }
+            .buttonStyle(.plain)
     }
 }
 
 private struct ProjectSection: View {
     @Environment(AppStore.self) private var store
     let project: Project
+    @State private var hoveredSessionId: UUID?
+    @State private var pendingDelete: Session?
+    @State private var pendingRename: Session?
+    @State private var renameTitle = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -112,40 +93,135 @@ private struct ProjectSection: View {
                     Button {
                         store.selectedSessionId = s.id
                     } label: {
-                        SessionRow(session: s, isActive: s.id == store.selectedSessionId)
+                        SessionRow(
+                            session: s,
+                            isActive: s.id == store.selectedSessionId,
+                            isHovered: hoveredSessionId == s.id
+                        )
                     }
                     .buttonStyle(.plain)
+                    .onHover { hovering in
+                        hoveredSessionId = hovering ? s.id : (hoveredSessionId == s.id ? nil : hoveredSessionId)
+                    }
+                    .contextMenu {
+                        Button {
+                            beginRename(s)
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button {
+                            copySessionId(s)
+                        } label: {
+                            Label("Copy ID", systemImage: "doc.on.doc")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            pendingDelete = s
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .disabled(store.isSessionStreaming(s.id))
+                    }
                 }
-                newChatRow
             }
+        }
+        .alert("Delete session?", isPresented: deleteBinding) {
+            Button("Delete", role: .destructive) {
+                if let pendingDelete {
+                    store.deleteSession(pendingDelete.id)
+                }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text("This removes the conversation from Helm's sidebar. Vendor history files are left untouched.")
+        }
+        .alert("Rename session", isPresented: renameBinding) {
+            TextField("Session title", text: $renameTitle)
+            Button("Rename") {
+                if let pendingRename {
+                    store.renameSession(pendingRename.id, title: renameTitle)
+                }
+                pendingRename = nil
+            }
+            .disabled(renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Cancel", role: .cancel) {
+                pendingRename = nil
+            }
+        } message: {
+            Text("Choose a short title for this session.")
         }
     }
 
     private var header: some View {
-        Button {
-            store.toggleCollapsed(project.id)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: project.collapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 10)
-                Text(project.name.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(.secondary)
-                locationLabel
-                Spacer()
+        HStack(spacing: 4) {
+            Button {
+                store.toggleCollapsed(project.id)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: project.collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Text(project.name.uppercased())
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(0.5)
+                        .foregroundStyle(.secondary)
+                    locationLabel
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(project.name)
+                .accessibilityValue(project.collapsed ? "collapsed" : "expanded")
+                .accessibilityHint(project.collapsed ? "Expand project" : "Collapse project")
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 8)
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(project.name)
-            .accessibilityValue(project.collapsed ? "collapsed" : "expanded")
-            .accessibilityHint(project.collapsed ? "Expand project" : "Collapse project")
+            .buttonStyle(.plain)
+
+            Button {
+                if store.newSession(in: project.id) == nil {
+                    store.showProfilesSheet = true
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New chat in \(project.name)")
+            .accessibilityLabel("New chat in \(project.name)")
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+    }
+
+    private var deleteBinding: Binding<Bool> {
+        Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )
+    }
+
+    private var renameBinding: Binding<Bool> {
+        Binding(
+            get: { pendingRename != nil },
+            set: { if !$0 { pendingRename = nil } }
+        )
+    }
+
+    private func beginRename(_ session: Session) {
+        renameTitle = session.title
+        pendingRename = session
+    }
+
+    private func copySessionId(_ session: Session) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(session.id.uuidString.lowercased(), forType: .string)
     }
 
     @ViewBuilder
@@ -175,26 +251,9 @@ private struct ProjectSection: View {
     private func sshHelp(_ s: SSHStatus) -> String {
         switch s {
         case .connected: return "Connected"
-        case .connecting: return "Connecting…"
+        case .connecting: return "Connecting..."
         case .failed(let r): return "Failed: \(r)"
         }
-    }
-
-    private var newChatRow: some View {
-        Button {
-            if store.newSession(in: project.id) == nil {
-                store.showProfilesSheet = true
-            }
-        } label: {
-            Text("+ New chat in \(project.name)")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.tertiary)
-                .padding(.vertical, 4)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -202,11 +261,10 @@ private struct SessionRow: View {
     @Environment(AppStore.self) private var store
     let session: Session
     let isActive: Bool
+    let isHovered: Bool
 
     var body: some View {
         let profile = store.profile(session.profileId)
-        let model = profile.flatMap { store.model($0.primaryModelId) }
-        let modelLabel = model?.label ?? "no model"
         let isRunning = store.isSessionStreaming(session.id)
         return HStack(spacing: 8) {
             if let profile {
@@ -217,50 +275,36 @@ private struct SessionRow: View {
                     .fill(Color.secondary.opacity(0.2))
                     .frame(width: 18, height: 18)
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.title)
-                    .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(modelLabel)
-                        .font(.system(size: 10.5))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("·")
-                        .font(.system(size: 10.5))
-                        .fixedSize()
-                    if isRunning {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .scaleEffect(0.55)
-                            .frame(width: 10, height: 10)
-                        Text("running")
-                            .font(.system(size: 10.5))
-                            .fixedSize()
-                    } else {
-                        Text(session.lastUpdate)
-                            .font(.system(size: 10.5))
-                            .fixedSize()
-                    }
-                }
-                .foregroundStyle(isRunning ? .secondary : .tertiary)
+            Text(session.title)
+                .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(.primary)
                 .lineLimit(1)
-            }
             Spacer(minLength: 0)
+            if isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.55)
+                    .frame(width: 12, height: 12)
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                .fill(isActive ? Color.helmSelected : Color.clear)
+                .fill(background)
         )
         .contentShape(Rectangle())
         .help(isRunning ? "Conversation is running" : session.title)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(session.title)
-        .accessibilityValue("\(modelLabel), \(isRunning ? "running" : session.lastUpdate)")
+        .accessibilityValue(isRunning ? "running" : "")
         .accessibilityHint(isRunning ? "Conversation is running" : "Open conversation")
+    }
+
+    private var background: Color {
+        if isActive { return Color.helmSelected }
+        if isHovered { return Color.helmHover }
+        return Color.clear
     }
 }
 
