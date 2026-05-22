@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MessageListView: View {
     @Environment(AppStore.self) private var store
+    var onTranscriptTap: () -> Void = {}
 
     @StateObject private var autoScroll = ChatAutoScrollController()
 
@@ -26,6 +27,8 @@ struct MessageListView: View {
                 }
             )
         }
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .background(Color.helmChatBg)
         // Initial appearance lands at the bottom. Streaming follow is driven
         // from AppKit's real scroll geometry below so it can resume when the

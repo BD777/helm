@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ComposerView: View {
     @Environment(AppStore.self) private var store
+    var externalFocusRequest: Int = 0
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
@@ -37,6 +38,9 @@ struct ComposerView: View {
             if !isOpen {
                 requestComposerFocus()
             }
+        }
+        .onChange(of: externalFocusRequest) { _, _ in
+            requestComposerFocus()
         }
         .onDisappear { removePasteMonitor() }
     }
