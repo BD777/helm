@@ -163,9 +163,16 @@ private struct ProjectSection: View {
                             Label("Rename", systemImage: "pencil")
                         }
                         Button {
-                            copySessionId(s)
+                            copyToPasteboard(s.id.uuidString.lowercased())
                         } label: {
-                            Label("Copy ID", systemImage: "doc.on.doc")
+                            Label("Copy Helm ID", systemImage: "doc.on.doc")
+                        }
+                        if let vendorSessionId = s.vendorSessionId {
+                            Button {
+                                copyToPasteboard(vendorSessionId)
+                            } label: {
+                                Label("Copy Vendor ID", systemImage: "terminal")
+                            }
                         }
                         Divider()
                         Button(role: .destructive) {
@@ -294,10 +301,10 @@ private struct ProjectSection: View {
         pendingRename = session
     }
 
-    private func copySessionId(_ session: Session) {
+    private func copyToPasteboard(_ value: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(session.id.uuidString.lowercased(), forType: .string)
+        pasteboard.setString(value, forType: .string)
     }
 
     @ViewBuilder
