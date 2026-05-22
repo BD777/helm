@@ -13,6 +13,7 @@ struct ChatView: View {
             }
             ComposerView(externalFocusRequest: composerFocusRequest)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.helmChatBg)
     }
 

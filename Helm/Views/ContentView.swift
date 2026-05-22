@@ -8,11 +8,15 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 240, ideal: DS.sidebarWidth, max: 360)
         } detail: {
-            if store.selectedSession != nil {
-                ChatView()
-            } else {
-                EmptyChatView()
+            Group {
+                if store.selectedSession != nil {
+                    ChatView()
+                } else {
+                    EmptyChatView()
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.helmChatBg)
         }
         .navigationSplitViewStyle(.balanced)
     }

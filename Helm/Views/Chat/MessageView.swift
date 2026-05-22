@@ -29,6 +29,7 @@ struct MessageListView: View {
         }
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.helmChatBg)
         .overlay {
             if showHistoryLoading {
