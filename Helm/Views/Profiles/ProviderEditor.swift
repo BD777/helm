@@ -125,8 +125,8 @@ struct ProviderEditor: View {
                 Text("requires_openai_auth")
                     .font(.system(size: 12.5))
             }
-            field("HTTP headers (extra)",
-                  hint: "Sent as `http_headers.extra = \"{...}\"`. Useful for relay session pinning.") {
+            field("HTTP headers",
+                  hint: "Sent as `http_headers = { ... }`. Useful for relay session pinning.") {
                 headerTable
                 HStack(spacing: 6) {
                     TextField("KEY", text: $newHeaderKey)

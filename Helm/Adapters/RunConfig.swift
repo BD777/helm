@@ -140,12 +140,10 @@ enum RunConfigResolver {
             args.append(contentsOf: ["-c", "model_providers.\(providerKey).wire_api=\"\(provider.wireAPI.rawValue)\""])
             args.append(contentsOf: ["-c", "model_providers.\(providerKey).requires_openai_auth=\(provider.requiresOpenAIAuth)"])
             if !provider.httpHeaders.isEmpty {
-                let header = (try? JSONSerialization.data(withJSONObject: provider.httpHeaders))
-                    .flatMap { String(data: $0, encoding: .utf8) }
-                if let header {
-                    let escaped = header.replacingOccurrences(of: "\"", with: "\\\"")
-                    args.append(contentsOf: ["-c", "model_providers.\(providerKey).http_headers={ extra = \"\(escaped)\" }"])
-                }
+                args.append(contentsOf: [
+                    "-c",
+                    "model_providers.\(providerKey).http_headers=\(tomlInlineStringMap(provider.httpHeaders))",
+                ])
             }
             args.append(contentsOf: ["-c", "model=\"\(primary.providerModelId)\""])
             args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(session.codexEffort.rawValue)\""])
@@ -190,5 +188,34 @@ enum RunConfigResolver {
             }
         }
         return out.isEmpty ? "helm" : out
+    }
+
+    private static func tomlInlineStringMap(_ values: [String: String]) -> String {
+        let pairs = values
+            .sorted { $0.key < $1.key }
+            .map { "\(tomlStringLiteral($0.key)) = \(tomlStringLiteral($0.value))" }
+        return "{ \(pairs.joined(separator: ", ")) }"
+    }
+
+    private static func tomlStringLiteral(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\":
+                out += "\\\\"
+            case "\"":
+                out += "\\\""
+            case "\n":
+                out += "\\n"
+            case "\r":
+                out += "\\r"
+            case "\t":
+                out += "\\t"
+            default:
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        out += "\""
+        return out
     }
 }

@@ -13,14 +13,17 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error> {
         let projectPath = project.location.pathString
+        let codexWorkingRoot: String = project.location.isSSH ? "." : projectPath
 
         var args = run.args
         args.append("exec")
         if let resume = session.vendorSessionId {
             args.append("resume")
-            args.append(contentsOf: ["--json", resume])
+            args.append(contentsOf: ["--json", "--skip-git-repo-check", resume])
         } else {
-            args.append(contentsOf: ["--json", "--color", "never", "--cd", projectPath])
+            args.append(contentsOf: ["--json", "--color", "never",
+                                     "--skip-git-repo-check",
+                                     "--cd", codexWorkingRoot])
         }
         for att in attachments {
             args.append(contentsOf: ["--image", att.fileURL.path])

@@ -35,9 +35,98 @@ final class CodexSessionStore: AgentSessionStore {
     }
 
     func history(sessionId: String, project: Project) async throws -> [TranscriptItem] {
+        if case .ssh(let host, _, _) = project.location {
+            return try await remoteHistory(sessionId: sessionId, host: host)
+        }
         guard let url = try sessionURL(for: sessionId) else { return [] }
         let data = try Data(contentsOf: url)
         return CodexSessionLogParser().parse(data)
+    }
+
+    private func remoteHistory(sessionId: String, host: String) async throws -> [TranscriptItem] {
+        let filenamePattern = SSHRemote.shellQuote("*\(sessionId)*.jsonl")
+        let metadataNeedle = SSHRemote.shellQuote("\"id\":\"\(sessionId)\"")
+        let command = """
+        root="$HOME/.codex/sessions"
+        if [ -d "$root" ]; then
+          file=$(find "$root" -type f -name \(filenamePattern) -print 2>/dev/null | sort | tail -n 1)
+          if [ -z "$file" ]; then
+            file=$(find "$root" -type f -name '*.jsonl' -print 2>/dev/null | while IFS= read -r candidate; do
+              if grep -F -m 1 \(metadataNeedle) "$candidate" >/dev/null 2>&1; then
+                printf '%s\\n' "$candidate"
+                break
+              fi
+            done)
+          fi
+          if [ -n "$file" ] && [ -f "$file" ]; then
+            cat -- "$file"
+          fi
+        fi
+        """
+        let data = try await sshOutput(host: host, remoteCommand: command)
+        guard !data.isEmpty else { return [] }
+        NSLog("[helm.codex.history] loaded remote log for %@", sessionId)
+        return CodexSessionLogParser().parse(data)
+    }
+
+    private func sshOutput(host: String, remoteCommand: String) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: remoteCommand,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+            let stdoutBuffer = PipeBuffer()
+            let stderrBuffer = PipeBuffer()
+            stdout.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                stdoutBuffer.append(chunk)
+            }
+            stderr.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                stderrBuffer.append(chunk)
+            }
+            defer {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
+            }
+
+            try proc.run()
+            proc.waitUntilExit()
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            let remainingOut = stdout.fileHandleForReading.readDataToEndOfFile()
+            let remainingErr = stderr.fileHandleForReading.readDataToEndOfFile()
+
+            stdoutBuffer.append(remainingOut)
+            stderrBuffer.append(remainingErr)
+            let data = stdoutBuffer.value()
+            let errData = stderrBuffer.value()
+            guard proc.terminationStatus == 0 else {
+                let reason = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw NSError(
+                    domain: "Helm.SSH",
+                    code: Int(proc.terminationStatus),
+                    userInfo: [
+                        NSLocalizedDescriptionKey: reason?.isEmpty == false
+                            ? reason!
+                            : "ssh exited \(proc.terminationStatus)"
+                    ]
+                )
+            }
+            return data
+        }.value
     }
 
     // MARK: - File lookup
@@ -140,6 +229,24 @@ final class CodexSessionStore: AgentSessionStore {
     private func jsonObject(_ line: String) -> [String: Any]? {
         guard let data = line.data(using: .utf8) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
+private final class PipeBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.lock()
+        storage.append(chunk)
+        lock.unlock()
+    }
+
+    func value() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 

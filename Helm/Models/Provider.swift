@@ -21,8 +21,8 @@ struct Provider: Identifiable, Hashable, Codable {
     /// Maps to Codex's `wire_api`. Defaults to .responses.
     var wireAPI: WireAPI
 
-    /// `[model_providers.X].http_headers.extra` — JSON object serialized as
-    /// a Swift dict. Empty = no extras.
+    /// `[model_providers.X].http_headers` — extra outbound HTTP headers for
+    /// Codex providers. Empty = no extras.
     var httpHeaders: [String: String]
 
     /// `requires_openai_auth` — whether Codex should attach the OpenAI auth
