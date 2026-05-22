@@ -743,18 +743,49 @@ private struct ThinkingBlock: View {
 
 private struct ImagePartView: View {
     let url: URL
+    @State private var previewItem: ImagePreviewItem?
+    @State private var isHovering = false
 
     var body: some View {
         if let img = NSImage(contentsOf: url) {
-            Image(nsImage: img)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: 240, maxHeight: 240, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-                )
+            let size = fittedDisplaySize(for: img)
+            Button {
+                previewItem = ImagePreviewItem(url: url)
+            } label: {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: size.width, height: size.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+                        )
+
+                    if isHovering {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, height: 24)
+                            .background(.regularMaterial, in: Circle())
+                            .padding(6)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    isHovering = hovering
+                }
+            }
+            .sheet(item: $previewItem) { item in
+                ImagePreviewSheet(url: item.url)
+            }
+            .help("Preview image")
+            .accessibilityLabel("Preview image")
         } else {
             HStack(spacing: 6) {
                 Image(systemName: "photo")
@@ -770,6 +801,154 @@ private struct ImagePartView: View {
                     .fill(Color.secondary.opacity(0.1))
             )
         }
+    }
+
+    private func fittedDisplaySize(for image: NSImage) -> CGSize {
+        let rawSize = bitmapSize(for: image)
+        guard rawSize.width > 0, rawSize.height > 0 else {
+            return CGSize(width: 240, height: 160)
+        }
+
+        let maxSize = CGSize(width: 420, height: 320)
+        let scale = min(maxSize.width / rawSize.width,
+                        maxSize.height / rawSize.height,
+                        1)
+
+        return CGSize(width: max(1, floor(rawSize.width * scale)),
+                      height: max(1, floor(rawSize.height * scale)))
+    }
+
+    private func bitmapSize(for image: NSImage) -> CGSize {
+        if let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first {
+            return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        }
+        return image.size
+    }
+}
+
+private struct ImagePreviewItem: Identifiable {
+    let url: URL
+
+    var id: URL { url }
+}
+
+private struct ImagePreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let url: URL
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            previewContent
+        }
+        .frame(width: 860, height: 620)
+        .background(Color.helmChatBg)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "photo")
+                .foregroundStyle(.tertiary)
+            Text(url.lastPathComponent)
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 12)
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close preview")
+            .accessibilityLabel("Close preview")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    @ViewBuilder
+    private var previewContent: some View {
+        if let image = NSImage(contentsOf: url) {
+            GeometryReader { proxy in
+                let imageSize = fittedPreviewSize(
+                    for: image,
+                    in: CGSize(width: max(1, proxy.size.width - 36),
+                               height: max(1, proxy.size.height - 36))
+                )
+                let topHeight = max(0, floor((proxy.size.height - imageSize.height) / 2))
+                let bottomHeight = max(0, proxy.size.height - imageSize.height - topHeight)
+                let leftWidth = max(0, floor((proxy.size.width - imageSize.width) / 2))
+                let rightWidth = max(0, proxy.size.width - imageSize.width - leftWidth)
+
+                VStack(spacing: 0) {
+                    dismissArea
+                        .frame(height: topHeight)
+
+                    HStack(spacing: 0) {
+                        dismissArea
+                            .frame(width: leftWidth)
+
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: imageSize.width, height: imageSize.height)
+
+                        dismissArea
+                            .frame(width: rightWidth)
+                    }
+                    .frame(height: imageSize.height)
+
+                    dismissArea
+                        .frame(height: bottomHeight)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.helmChatBg)
+            }
+        } else {
+            ContentUnavailableView(
+                "Image unavailable",
+                systemImage: "photo",
+                description: Text("The attached image could not be loaded.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.helmChatBg)
+        }
+    }
+
+    private var dismissArea: some View {
+        Color.helmChatBg
+            .contentShape(Rectangle())
+            .onTapGesture {
+                dismiss()
+            }
+    }
+
+    private func fittedPreviewSize(for image: NSImage, in maxSize: CGSize) -> CGSize {
+        let rawSize = bitmapSize(for: image)
+        guard rawSize.width > 0, rawSize.height > 0 else {
+            return CGSize(width: min(240, maxSize.width),
+                          height: min(160, maxSize.height))
+        }
+
+        let scale = min(maxSize.width / rawSize.width,
+                        maxSize.height / rawSize.height,
+                        1)
+        return CGSize(width: max(1, floor(rawSize.width * scale)),
+                      height: max(1, floor(rawSize.height * scale)))
+    }
+
+    private func bitmapSize(for image: NSImage) -> CGSize {
+        if let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first {
+            return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        }
+        return image.size
     }
 }
 
