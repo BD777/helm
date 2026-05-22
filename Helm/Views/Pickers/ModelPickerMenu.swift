@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Lists profiles compatible with the current session's vendor. Tapping a
-/// profile rebinds the session. Cross-vendor switches need a new session
-/// (added later via the sidebar).
+/// Lists profiles available to the current session. Draft sessions can still
+/// switch vendors; sent sessions are locked to their original vendor.
 struct ModelPickerMenu: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -11,17 +10,31 @@ struct ModelPickerMenu: View {
         VStack(alignment: .leading, spacing: 0) {
             if let session = store.selectedSession,
                let current = store.profile(session.profileId) {
-                let matching = store.profiles(for: current.vendor)
-                groupHeader("Profile · \(current.vendor.displayName)")
-                if matching.isEmpty {
+                let profiles = availableProfiles(for: session, current: current)
+                groupHeader(session.isDraft ? "Profile · New chat" : "Profile · \(current.vendor.displayName)")
+                if profiles.isEmpty {
                     emptyHint("No profiles. Open Profiles (gear icon) to add one.")
+                } else if session.isDraft {
+                    ForEach(Vendor.allCases, id: \.self) { vendor in
+                        let vendorProfiles = profiles.filter { $0.vendor == vendor }
+                        if !vendorProfiles.isEmpty {
+                            subgroupHeader(vendor.displayName)
+                            ForEach(vendorProfiles) { profile in
+                                profileRow(profile, isCurrent: profile.id == current.id) {
+                                    store.setProfile(profile, on: session.id)
+                                    dismiss()
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    ForEach(matching) { profile in
+                    ForEach(profiles) { profile in
                         profileRow(profile, isCurrent: profile.id == current.id) {
                             store.setProfile(profile, on: session.id)
                             dismiss()
                         }
                     }
+                    lockHint("Vendor is locked after the first message.")
                 }
                 divider
                 Button {
@@ -48,6 +61,13 @@ struct ModelPickerMenu: View {
         .padding(6)
     }
 
+    private func availableProfiles(for session: Session, current: Profile) -> [Profile] {
+        if session.isDraft {
+            return store.profiles
+        }
+        return store.profiles(for: current.vendor)
+    }
+
     private var divider: some View {
         Rectangle()
             .fill(Color.helmBorder)
@@ -63,6 +83,15 @@ struct ModelPickerMenu: View {
             .padding(.horizontal, 10)
             .padding(.top, 6)
             .padding(.bottom, 4)
+    }
+
+    private func subgroupHeader(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.top, 5)
+            .padding(.bottom, 2)
     }
 
     private func profileRow(_ profile: Profile, isCurrent: Bool, action: @escaping () -> Void) -> some View {
@@ -104,6 +133,16 @@ struct ModelPickerMenu: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func lockHint(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10.5))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

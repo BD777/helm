@@ -348,13 +348,22 @@ final class AppStore {
         return session.id
     }
 
-    /// Switch the current session to a different profile (same vendor).
-    /// Cross-vendor switches start a new session instead — call newSession.
+    /// Switch the current session to a different profile. Draft sessions can
+    /// still pick any vendor; once the first message is sent, vendor is locked
+    /// and only same-vendor profiles are allowed.
     func setProfile(_ profile: Profile, on sessionId: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        let currentVendor = self.profile(sessions[idx].profileId)?.vendor
+        let canCrossVendor = sessions[idx].isDraft
         guard sessions[idx].profileId == profile.id ||
-              self.profile(sessions[idx].profileId)?.vendor == profile.vendor else { return }
+              currentVendor == profile.vendor ||
+              canCrossVendor
+        else { return }
         sessions[idx].profileId = profile.id
+        if profile.vendor == .codex {
+            sessions[idx].codexSandboxMode = profile.sandboxMode ?? .workspace
+            sessions[idx].codexEffort = profile.reasoningEffort ?? .medium
+        }
         scheduleStateSave()
     }
 

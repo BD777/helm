@@ -47,7 +47,7 @@ struct ComposerView: View {
             }
             ComposerTextView(
                 text: $text,
-                placeholder: "Message Claude (⌘V to attach image · ⌘↵ to send)",
+                placeholder: composerPlaceholder,
                 minLines: 2,
                 maxLines: 11,
                 onSend: sendIfPossible
@@ -68,6 +68,13 @@ struct ComposerView: View {
 
     private var hasComposerContent: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var composerPlaceholder: String {
+        let vendor = store.selectedSession
+            .flatMap { store.profile($0.profileId) }?
+            .vendor.displayName ?? "agent"
+        return "Message \(vendor) (⌘V to attach image · ⌘↵ to send)"
     }
 
     private var isStreamingInAnotherSession: Bool {

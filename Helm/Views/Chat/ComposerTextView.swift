@@ -99,7 +99,13 @@ struct ComposerTextView: NSViewRepresentable {
 
 /// NSTextView with a placeholder string and ⌘+Return forwarding.
 final class PlaceholderTextView: NSTextView {
-    var placeholder: String = ""
+    var placeholder: String = "" {
+        didSet {
+            if oldValue != placeholder {
+                needsDisplay = true
+            }
+        }
+    }
     var onCommandReturn: () -> Void = {}
 
     override func draw(_ dirtyRect: NSRect) {
