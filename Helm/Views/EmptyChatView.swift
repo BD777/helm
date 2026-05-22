@@ -12,7 +12,7 @@ struct EmptyChatView: View {
                 .font(.system(size: 18, weight: .semibold))
             Text(store.projects.isEmpty
                  ? "Add a project folder, then start a conversation in it."
-                 : "Pick a session on the left, or start a new conversation.")
+                 : "Pick a session on the left, or start a new conversation in a project.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -24,11 +24,18 @@ struct EmptyChatView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 } else {
-                    Button("+ New chat") {
-                        if let pid = store.projects.first?.id,
-                           store.newSession(in: pid) == nil {
-                            store.showProfilesSheet = true
+                    Menu {
+                        ForEach(store.projects) { project in
+                            Button {
+                                if store.newSession(in: project.id) == nil {
+                                    store.showProfilesSheet = true
+                                }
+                            } label: {
+                                Label(project.name, systemImage: iconName(for: project))
+                            }
                         }
+                    } label: {
+                        Label("New chat", systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
                     Button("Add project") {
@@ -41,5 +48,14 @@ struct EmptyChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.helmChatBg)
+    }
+
+    private func iconName(for project: Project) -> String {
+        switch project.location {
+        case .local:
+            return "folder"
+        case .ssh:
+            return "terminal"
+        }
     }
 }
