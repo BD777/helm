@@ -541,12 +541,14 @@ private func groupTranscript(_ items: [TranscriptItem]) -> [DisplayItem] {
             if case .toolCall = part { return true }
             return false
         }
-        if lastHasTool {
+        if lastHasTool || isWorkingPlaceholder(last) {
             // Still in the tool-use phase: no formal answer yet, the
             // whole run stays as thinking.
-            out.append(.assistantTurn(thinking: pending, answer: nil))
+            out.append(.assistantTurn(thinking: pending.filter { message in
+                !isWorkingPlaceholder(message) || message.id == last.id
+            }, answer: nil))
         } else {
-            let thinking = Array(pending.dropLast())
+            let thinking = pending.dropLast().filter { !isWorkingPlaceholder($0) }
             out.append(.assistantTurn(thinking: thinking, answer: last))
         }
         pending = []
@@ -568,6 +570,17 @@ private func groupTranscript(_ items: [TranscriptItem]) -> [DisplayItem] {
     }
     flush()
     return out
+}
+
+private func isWorkingPlaceholder(_ message: Message) -> Bool {
+    guard message.parts.isEmpty else { return false }
+    if message.meta == "thinking…" || message.meta == "streaming…" {
+        return true
+    }
+    if case .assistant(let meta) = message.role {
+        return meta == "thinking…" || meta == "streaming…"
+    }
+    return false
 }
 
 struct MessageView: View {
@@ -655,6 +668,10 @@ private struct ThinkingBlock: View {
         return stepCount > 0 ? "已处理 · \(stepCount) 步" : "已处理"
     }
 
+    private var hasDetails: Bool {
+        messages.contains { !$0.parts.isEmpty }
+    }
+
     private var isStopped: Bool {
         messages.contains { message in
             if message.meta == "stopped" { return true }
@@ -683,28 +700,46 @@ private struct ThinkingBlock: View {
         }
     }
 
+    @ViewBuilder
     private var header: some View {
-        Button {
-            withAnimation(.easeOut(duration: 0.18)) {
-                userPreference = !collapsed
+        if hasDetails {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    userPreference = !collapsed
+                }
+            } label: {
+                headerContent(showChevron: true)
+                    .contentShape(Rectangle())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(label)
+                    .accessibilityValue(collapsed ? "collapsed" : "expanded")
+                    .accessibilityHint(collapsed ? "Show steps" : "Hide steps")
             }
-        } label: {
-            HStack(spacing: 6) {
-                Text(label)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.tertiary)
+            .buttonStyle(.plain)
+        } else {
+            headerContent(showChevron: false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+        }
+    }
+
+    private func headerContent(showChevron: Bool) -> some View {
+        HStack(spacing: 6) {
+            if isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.72)
+            }
+            Text(label)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.tertiary)
+            if showChevron {
                 Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
-                Spacer(minLength: 0)
             }
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(label)
-            .accessibilityValue(collapsed ? "collapsed" : "expanded")
-            .accessibilityHint(collapsed ? "Show steps" : "Hide steps")
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
     }
 }
 
