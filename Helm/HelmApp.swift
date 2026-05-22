@@ -3,26 +3,14 @@ import AppKit
 
 @main
 struct HelmApp: App {
-    @State private var store = AppStore()
     @NSApplicationDelegateAdaptor(HelmAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Window("Helm", id: "main") {
-            ContentView()
-                .environment(store)
-                .frame(minWidth: 880, minHeight: 560)
-                .toolbarBackground(.hidden, for: .windowToolbar)
-                .background(WindowTitleHider())
-                .onAppear {
-                    // Hand the live store to the AppKit delegate so
-                    // applicationWillTerminate can synchronously flush both
-                    // JSON files and we don't lose in-flight debounced writes.
-                    appDelegate.store = store
-                }
+        // Keep the AppKit delegate alive; it owns the explicit main window.
+        let _ = appDelegate
+        Settings {
+            EmptyView()
         }
-        .windowStyle(.titleBar)
-        .windowToolbarStyle(.unifiedCompact)
-        .defaultSize(width: 1180, height: 760)
     }
 }
 
@@ -43,7 +31,10 @@ private struct WindowTitleHider: NSViewRepresentable {
 
     private func hideTitle(for view: NSView) {
         guard let window = view.window else { return }
+        window.title = ""
+        window.subtitle = ""
         window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
     }
 }
 
@@ -52,14 +43,38 @@ private struct WindowTitleHider: NSViewRepresentable {
 /// the durable hook for "the app is about to exit" — we use it to flush
 /// debounced writes that would otherwise be killed by process exit.
 final class HelmAppDelegate: NSObject, NSApplicationDelegate {
-    weak var store: AppStore?
+    private var store: AppStore?
+    private var mainWindow: NSWindow?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.showMainWindow()
+            }
+        }
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainActor.assumeIsolated {
+            if flag {
+                mainWindow?.makeKeyAndOrderFront(nil)
+            } else {
+                showMainWindow()
+            }
+        }
+        return true
+    }
+
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -69,5 +84,42 @@ final class HelmAppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             store?.flushAll()
         }
+    }
+
+    @MainActor
+    private func showMainWindow() {
+        if let mainWindow {
+            mainWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let store = store ?? AppStore()
+        self.store = store
+
+        let root = ContentView()
+            .environment(store)
+            .frame(minWidth: 880, minHeight: 560)
+            .toolbarBackground(.hidden, for: .windowToolbar)
+            .background(WindowTitleHider())
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = ""
+        window.subtitle = ""
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbarStyle = .unifiedCompact
+        window.contentMinSize = NSSize(width: 880, height: 560)
+        window.contentViewController = NSHostingController(rootView: root)
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow = window
     }
 }

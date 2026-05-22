@@ -795,7 +795,7 @@ final class AppStore {
     }
 }
 
-private enum SSHProbe {
+enum SSHProbe {
     static func check(host: String, path: String) async -> SSHStatus {
         await Task.detached(priority: .utility) {
             let command = "cd -- \(SSHRemote.shellPath(path)) && pwd >/dev/null"

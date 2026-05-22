@@ -20,7 +20,8 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .padding(.top, 12)
+                .padding(.top, 18)
+                .padding(.horizontal, 8)
                 .padding(.bottom, 24)
             }
             settingsBar
@@ -70,7 +71,8 @@ struct SidebarView: View {
                 Spacer()
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
             .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
@@ -104,7 +106,8 @@ struct SidebarView: View {
                     Spacer()
                 }
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
+                .padding(.leading, 16)
+                .padding(.trailing, 12)
                 .frame(height: 42)
                 .background(
                     RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
@@ -246,7 +249,8 @@ private struct ProjectSection: View {
             .accessibilityLabel("New chat in \(project.name)")
         }
         .padding(.vertical, 4)
-        .padding(.horizontal, 8)
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
     }
 
     private var deleteBinding: Binding<Bool> {
@@ -337,7 +341,8 @@ private struct SessionRow: View {
                     .frame(width: 12, height: 12)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 18)
+        .padding(.trailing, 8)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
@@ -379,6 +384,8 @@ private struct SSHProjectSheet: View {
     @State private var path = "~"
     @State private var name = ""
     @State private var knownHosts: [String] = []
+    @State private var testStatus: SSHStatus?
+    @State private var isTestingConnection = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -391,6 +398,7 @@ private struct SSHProjectSheet: View {
                         ForEach(knownHosts, id: \.self) { host in
                             Button(host) {
                                 self.host = host
+                                resetTestStatus()
                                 if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                     name = host
                                 }
@@ -404,9 +412,14 @@ private struct SSHProjectSheet: View {
                 labeledField("Host", text: $host, prompt: "devbox")
                 labeledField("Remote path", text: $path, prompt: "~/workspace/repo")
                 labeledField("Name", text: $name, prompt: defaultName)
+                connectionStatus
             }
 
             HStack {
+                Button("Test") {
+                    testConnection()
+                }
+                .disabled(!canAdd || isTestingConnection)
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -416,13 +429,19 @@ private struct SSHProjectSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!canAdd)
+                .disabled(!canAdd || isTestingConnection)
             }
         }
         .padding(22)
         .frame(width: 420)
         .onAppear {
             knownHosts = SSHConfigHosts.load()
+        }
+        .onChange(of: host) { _, _ in
+            resetTestStatus()
+        }
+        .onChange(of: path) { _, _ in
+            resetTestStatus()
         }
     }
 
@@ -437,6 +456,78 @@ private struct SSHProjectSheet: View {
         let tail = (p as NSString).lastPathComponent
         guard !h.isEmpty, !tail.isEmpty, tail != "~" else { return h.isEmpty ? "Project name" : h }
         return "\(h):\(tail)"
+    }
+
+    @ViewBuilder
+    private var connectionStatus: some View {
+        if isTestingConnection {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Testing connection...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        } else if let testStatus {
+            HStack(alignment: .top, spacing: 8) {
+                Circle()
+                    .fill(testStatus.color)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 4)
+                Text(statusText(testStatus))
+                    .font(.system(size: 12))
+                    .foregroundStyle(statusForeground(testStatus))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func statusText(_ status: SSHStatus) -> String {
+        switch status {
+        case .connected:
+            return "Connected"
+        case .connecting:
+            return "Testing connection..."
+        case .failed(let reason):
+            return "Failed: \(reason)"
+        }
+    }
+
+    private func statusForeground(_ status: SSHStatus) -> Color {
+        switch status {
+        case .connected: return .secondary
+        case .connecting: return .secondary
+        case .failed: return .red
+        }
+    }
+
+    private func resetTestStatus() {
+        if !isTestingConnection {
+            testStatus = nil
+        }
+    }
+
+    private func testConnection() {
+        let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, !path.isEmpty else { return }
+        testStatus = nil
+        isTestingConnection = true
+
+        Task {
+            let status = await SSHProbe.check(host: host, path: path)
+            guard self.host.trimmingCharacters(in: .whitespacesAndNewlines) == host,
+                  self.path.trimmingCharacters(in: .whitespacesAndNewlines) == path
+            else {
+                isTestingConnection = false
+                return
+            }
+            testStatus = status
+            isTestingConnection = false
+        }
     }
 
     private func labeledField(_ title: String,
