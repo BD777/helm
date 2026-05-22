@@ -82,50 +82,31 @@ struct SidebarView: View {
     }
 
     private var settingsBar: some View {
-        ZStack(alignment: .top) {
-            Rectangle()
-                .fill(.regularMaterial)
-                .frame(height: 86)
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .black.opacity(0.9), location: 0.38),
-                            .init(color: .black, location: 1),
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .offset(y: -30)
-                .allowsHitTesting(false)
-
-            Button {
-                store.showProfilesSheet = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 14, weight: .medium))
-                    Text("Settings")
-                        .font(.system(size: 12.5, weight: .medium))
-                    Spacer()
-                }
-                .foregroundStyle(.secondary)
-                .padding(.leading, 16)
-                .padding(.trailing, 12)
-                .frame(height: 42)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                        .fill(settingsHovered ? Color.helmHover : Color.clear)
-                )
-                .contentShape(Rectangle())
+        Button {
+            store.showProfilesSheet = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 14, weight: .medium))
+                Text("Settings")
+                    .font(.system(size: 12.5, weight: .medium))
+                Spacer()
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
-            .onHover { settingsHovered = $0 }
-            .help("Profiles & vendor settings")
+            .foregroundStyle(.secondary)
+            .padding(.leading, 16)
+            .padding(.trailing, 12)
+            .frame(height: 42)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(settingsHovered ? Color.helmHover : Color.clear)
+            )
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .onHover { settingsHovered = $0 }
+        .help("Profiles & vendor settings")
     }
 }
 
