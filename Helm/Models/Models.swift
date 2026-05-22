@@ -92,7 +92,7 @@ enum ProjectLocation: Hashable, Codable {
 }
 
 enum SSHStatus: Hashable, Sendable {
-    case connected
+    case connected(path: String)
     case connecting
     case failed(reason: String)
 
@@ -101,6 +101,40 @@ enum SSHStatus: Hashable, Sendable {
         case .connected:  return .green
         case .connecting: return .yellow
         case .failed:     return .red
+        }
+    }
+
+    var isConnected: Bool {
+        if case .connected = self { return true }
+        return false
+    }
+
+    var isConnecting: Bool {
+        if case .connecting = self { return true }
+        return false
+    }
+
+    var resolvedPath: String? {
+        if case .connected(let path) = self { return path }
+        return nil
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .connected: return "SSH"
+        case .connecting: return "SSH checking"
+        case .failed: return "SSH offline"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .connected(let path):
+            return path.isEmpty ? "SSH connected" : "SSH connected: \(path)"
+        case .connecting:
+            return "Checking SSH connection"
+        case .failed(let reason):
+            return "SSH failed: \(reason)"
         }
     }
 }

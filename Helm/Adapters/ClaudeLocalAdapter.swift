@@ -66,7 +66,8 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             proc.arguments = SSHRemote.arguments(
                 host: host,
                 remoteCommand: remote,
-                batchMode: true
+                batchMode: true,
+                connectTimeout: 15
             )
         }
         proc.environment = env

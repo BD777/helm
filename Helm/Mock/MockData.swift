@@ -56,6 +56,7 @@ final class AppStore {
     private let profileStore: ProfileStore
     private let stateStore: StateStore
     private var loadingHistorySessionIds: Set<UUID> = []
+    private var probingSSHProjectIds: Set<UUID> = []
     /// One vendor-specific session store per vendor, used to lazily load
     /// history from the agent's own jsonl on disk and to enumerate sessions
     /// for "import existing CLI session" flows. Keep one instance each so
@@ -260,6 +261,23 @@ final class AppStore {
         return projects.first { $0.id == s.projectId }
     }
 
+    var selectedProject: Project? {
+        guard let selectedSessionId else { return nil }
+        return project(for: selectedSessionId)
+    }
+
+    var selectedSSHStatus: SSHStatus? {
+        guard let selectedProject else { return nil }
+        return sshStatus(for: selectedProject.id)
+    }
+
+    func sshStatus(for projectId: UUID) -> SSHStatus? {
+        guard let project = projects.first(where: { $0.id == projectId }),
+              case .ssh(_, _, let status) = project.location
+        else { return nil }
+        return status
+    }
+
     func sessions(in projectId: UUID) -> [Session] {
         sessions.filter { $0.projectId == projectId && !$0.isDraft }
     }
@@ -348,10 +366,29 @@ final class AppStore {
         guard let idx = projects.firstIndex(where: { $0.id == projectId }),
               case .ssh(let host, let path, _) = projects[idx].location
         else { return }
+        guard !probingSSHProjectIds.contains(projectId) else { return }
+        probingSSHProjectIds.insert(projectId)
+        defer { probingSSHProjectIds.remove(projectId) }
         projects[idx].location = projects[idx].location.withSSHStatus(.connecting)
+        NSLog("[helm.ssh] probe start host=%@ path=%@", host, path)
         let status = await SSHProbe.check(host: host, path: path)
         guard let latestIdx = projects.firstIndex(where: { $0.id == projectId }) else { return }
         projects[latestIdx].location = projects[latestIdx].location.withSSHStatus(status)
+        NSLog("[helm.ssh] probe result host=%@ status=%@",
+              host, status.helpText)
+    }
+
+    func retrySSHProject(_ projectId: UUID) {
+        Task { @MainActor [weak self] in
+            await self?.probeSSHProject(projectId)
+        }
+    }
+
+    func retrySelectedSSHProject() {
+        guard let project = selectedProject,
+              case .ssh = project.location
+        else { return }
+        retrySSHProject(project.id)
     }
 
     private static func defaultSSHProjectName(host: String, path: String) -> String {
@@ -811,7 +848,7 @@ final class AppStore {
 enum SSHProbe {
     static func check(host: String, path: String) async -> SSHStatus {
         await Task.detached(priority: .utility) {
-            let command = "cd -- \(SSHRemote.shellPath(path)) && pwd >/dev/null"
+            let command = "cd -- \(SSHRemote.shellPath(path)) && pwd -P"
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
             proc.arguments = SSHRemote.arguments(
@@ -821,9 +858,10 @@ enum SSHProbe {
                 connectTimeout: 8
             )
 
-            let output = Pipe()
-            proc.standardOutput = output
-            proc.standardError = output
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
 
             do {
                 try proc.run()
@@ -831,17 +869,23 @@ enum SSHProbe {
                 return .failed(reason: error.localizedDescription)
             }
             proc.waitUntilExit()
+            let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
             guard proc.terminationStatus == 0 else {
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                let reason = raw
-                    .split(separator: "\n", omittingEmptySubsequences: true)
-                    .last
-                    .map(String.init)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let reason = lastNonEmptyLine(stderrText) ?? lastNonEmptyLine(stdoutText)
                 return .failed(reason: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
             }
-            return .connected
+            let resolvedPath = lastNonEmptyLine(stdoutText) ?? path
+            return .connected(path: resolvedPath)
         }.value
+    }
+
+    private static func lastNonEmptyLine(_ raw: String) -> String? {
+        raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

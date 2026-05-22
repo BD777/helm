@@ -233,6 +233,8 @@ private struct ProjectSection: View {
             }
             .buttonStyle(.plain)
 
+            sshRetryButton
+
             Button {
                 if store.newSession(in: project.id) == nil {
                     store.showProfilesSheet = true
@@ -251,6 +253,26 @@ private struct ProjectSection: View {
         .padding(.vertical, 4)
         .padding(.leading, 14)
         .padding(.trailing, 8)
+    }
+
+    @ViewBuilder
+    private var sshRetryButton: some View {
+        if case .ssh(_, _, let status) = project.location {
+            Button {
+                store.retrySSHProject(project.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(status.isConnected ? .tertiary : .secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(status.isConnecting)
+            .opacity(status.isConnecting ? 0.45 : 1)
+            .help("Check SSH connection")
+            .accessibilityLabel("Check SSH connection for \(project.name)")
+        }
     }
 
     private var deleteBinding: Binding<Bool> {
@@ -291,22 +313,21 @@ private struct ProjectSection: View {
             .foregroundStyle(.tertiary)
         case .ssh(let host, _, let status):
             HStack(spacing: 4) {
-                Circle()
-                    .fill(status.color)
-                    .frame(width: 6, height: 6)
+                if status.isConnecting {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.45)
+                        .frame(width: 7, height: 7)
+                } else {
+                    Circle()
+                        .fill(status.color)
+                        .frame(width: 6, height: 6)
+                }
                 Text("ssh \(host)")
                     .font(.system(size: 10))
             }
             .foregroundStyle(.tertiary)
-            .help(sshHelp(status))
-        }
-    }
-
-    private func sshHelp(_ s: SSHStatus) -> String {
-        switch s {
-        case .connected: return "Connected"
-        case .connecting: return "Connecting..."
-        case .failed(let r): return "Failed: \(r)"
+            .help(status.helpText)
         }
     }
 }
@@ -487,8 +508,8 @@ private struct SSHProjectSheet: View {
 
     private func statusText(_ status: SSHStatus) -> String {
         switch status {
-        case .connected:
-            return "Connected"
+        case .connected(let path):
+            return path.isEmpty ? "Connected" : "Connected: \(path)"
         case .connecting:
             return "Testing connection..."
         case .failed(let reason):

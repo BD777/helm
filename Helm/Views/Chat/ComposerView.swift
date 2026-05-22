@@ -94,6 +94,10 @@ struct ComposerView: View {
     }
 
     private var composerPlaceholder: String {
+        if let status = store.selectedSSHStatus,
+           !status.isConnected {
+            return status.isConnecting ? "Checking SSH connection..." : "Reconnect SSH to send"
+        }
         let vendor = store.selectedSession
             .flatMap { store.profile($0.profileId) }?
             .vendor.displayName ?? "agent"
@@ -107,6 +111,7 @@ struct ComposerView: View {
     private var canSubmit: Bool {
         if store.selectedSessionIsStreaming { return true }
         if isStreamingInAnotherSession { return false }
+        if selectedSSHSendBlockReason != nil { return false }
         return hasComposerContent
     }
 
@@ -119,13 +124,29 @@ struct ComposerView: View {
     private var submitButtonColor: Color {
         if store.selectedSessionIsStreaming { return .red }
         if isStreamingInAnotherSession { return .secondary.opacity(0.45) }
+        if selectedSSHSendBlockReason != nil { return .secondary.opacity(0.45) }
         return .accentColor
     }
 
     private var submitButtonHelp: String {
         if store.selectedSessionIsStreaming { return "Stop current response" }
         if isStreamingInAnotherSession { return "Another conversation is running" }
+        if let reason = selectedSSHSendBlockReason { return reason }
         return "Send message"
+    }
+
+    private var selectedSSHSendBlockReason: String? {
+        guard let status = store.selectedSSHStatus,
+              !status.isConnected
+        else { return nil }
+        switch status {
+        case .connected:
+            return nil
+        case .connecting:
+            return "SSH connection is still being checked"
+        case .failed(let reason):
+            return "SSH connection failed: \(reason)"
+        }
     }
 
     private func sendIfPossible() {
@@ -133,7 +154,7 @@ struct ComposerView: View {
             store.cancelStreaming()
             return
         }
-        if store.isStreaming || !hasComposerContent {
+        if store.isStreaming || !hasComposerContent || selectedSSHSendBlockReason != nil {
             return
         }
         let toSend = text
@@ -229,6 +250,9 @@ struct ComposerView: View {
                     codexEffortChip(session: session)
                 }
             }
+            if let sshStatus = store.selectedSSHStatus {
+                sshStatusChip(sshStatus)
+            }
 
             Spacer()
 
@@ -260,6 +284,50 @@ struct ComposerView: View {
 
     private func runConfigHelp(_ isLocked: Bool, _ unlockedHelp: String) -> String {
         isLocked ? "Cannot change while response is running" : unlockedHelp
+    }
+
+    private func sshStatusChip(_ status: SSHStatus) -> some View {
+        HStack(spacing: 5) {
+            if status.isConnecting {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.5)
+                    .frame(width: 10, height: 10)
+            } else {
+                Circle()
+                    .fill(status.color)
+                    .frame(width: 6, height: 6)
+            }
+            Text(status.shortLabel)
+                .font(.system(size: 12))
+                .foregroundStyle(status.isConnected ? Color.secondary : status.color)
+                .lineLimit(1)
+            if !status.isConnected && !status.isConnecting {
+                Button {
+                    store.retrySelectedSSHProject()
+                    refocusComposerAfterMenuSelection()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .help("Check SSH connection")
+                .accessibilityLabel("Check SSH connection")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(Color.helmCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .stroke(Color.helmBorder, lineWidth: 1)
+                )
+        )
+        .help(status.helpText)
     }
 
     private func claudePermissionChip(session: Session) -> some View {
