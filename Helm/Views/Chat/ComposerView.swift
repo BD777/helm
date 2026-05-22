@@ -10,6 +10,7 @@ struct ComposerView: View {
     @State private var draftSessionId: UUID?
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
+    @State private var focusRequest = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,12 +26,18 @@ struct ComposerView: View {
         .onAppear {
             loadDraft(for: store.selectedSessionId)
             installPasteMonitor()
+            requestComposerFocus()
         }
         .onChange(of: store.selectedSessionId) { _, newSessionId in
             saveCurrentDraft()
             loadDraft(for: newSessionId)
+            requestComposerFocus()
         }
         .onDisappear { removePasteMonitor() }
+    }
+
+    private func requestComposerFocus() {
+        focusRequest += 1
     }
 
     private var inner: some View {
@@ -50,6 +57,7 @@ struct ComposerView: View {
                 placeholder: composerPlaceholder,
                 minLines: 2,
                 maxLines: 11,
+                focusRequest: focusRequest,
                 onSend: sendIfPossible
             )
             .padding(.horizontal, 10)

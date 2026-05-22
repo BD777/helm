@@ -19,6 +19,7 @@ struct ComposerTextView: NSViewRepresentable {
     let placeholder: String
     let minLines: Int
     let maxLines: Int
+    let focusRequest: Int
     let onSend: () -> Void
 
     static let font = NSFont.systemFont(ofSize: 13.5)
@@ -58,6 +59,9 @@ struct ComposerTextView: NSViewRepresentable {
         if tv.string != text { tv.string = text }
         tv.placeholder = placeholder
         tv.onCommandReturn = onSend
+        if context.coordinator.consumeFocusRequest(focusRequest) {
+            context.coordinator.focus(tv)
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
@@ -89,10 +93,41 @@ struct ComposerTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
-        init(_ p: ComposerTextView) { self.parent = p }
+        private var lastFocusRequest: Int
+
+        init(_ p: ComposerTextView) {
+            self.parent = p
+            self.lastFocusRequest = p.focusRequest
+        }
+
         func textDidChange(_ note: Notification) {
             guard let tv = note.object as? NSTextView else { return }
             parent.text = tv.string
+        }
+
+        func consumeFocusRequest(_ request: Int) -> Bool {
+            guard request != lastFocusRequest else { return false }
+            lastFocusRequest = request
+            return true
+        }
+
+        func focus(_ tv: NSTextView) {
+            DispatchQueue.main.async { [weak tv] in
+                guard let tv else { return }
+                self.focusWhenWindowIsReady(tv)
+            }
+        }
+
+        private func focusWhenWindowIsReady(_ tv: NSTextView, retry: Bool = true) {
+            tv.selectedRange = NSRange(location: tv.string.utf16.count, length: 0)
+            if let window = tv.window {
+                window.makeFirstResponder(tv)
+            } else if retry {
+                DispatchQueue.main.async { [weak tv] in
+                    guard let tv else { return }
+                    self.focusWhenWindowIsReady(tv, retry: false)
+                }
+            }
         }
     }
 }
