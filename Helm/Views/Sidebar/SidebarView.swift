@@ -12,6 +12,7 @@ struct SidebarView: View {
     @State private var projectHeaderFrames: [UUID: CGRect] = [:]
     @State private var projectDragLocation: CGPoint?
     @State private var projectDragAnchorYOffset: CGFloat = 0
+    @State private var searchText = ""
 
     var body: some View {
         @Bindable var store = store
@@ -23,19 +24,25 @@ struct SidebarView: View {
                     if store.projects.isEmpty {
                         emptyState
                     } else {
-                        ForEach(store.projects) { project in
-                            ProjectSection(
-                                project: project,
-                                isDragging: draggingProjectId == project.id,
-                                dropPlacement: projectDropTargetId == project.id ? projectDropPlacement : nil,
-                                onDragChanged: { value in
-                                    updateProjectDrag(project.id, value: value)
-                                },
-                                onDragEnded: { value in
-                                    updateProjectDrag(project.id, value: value)
-                                    finishProjectDrag()
-                                }
-                            )
+                        searchField
+                        if visibleProjects.isEmpty {
+                            noSearchResults
+                        } else {
+                            ForEach(visibleProjects) { project in
+                                ProjectSection(
+                                    project: project,
+                                    searchText: searchText,
+                                    isDragging: draggingProjectId == project.id,
+                                    dropPlacement: projectDropTargetId == project.id ? projectDropPlacement : nil,
+                                    onDragChanged: { value in
+                                        updateProjectDrag(project.id, value: value)
+                                    },
+                                    onDragEnded: { value in
+                                        updateProjectDrag(project.id, value: value)
+                                        finishProjectDrag()
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -61,6 +68,37 @@ struct SidebarView: View {
             SSHProjectSheet()
                 .environment(store)
         }
+    }
+
+    private var normalizedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var visibleProjects: [Project] {
+        guard !normalizedSearch.isEmpty else { return store.projects }
+        return store.projects.filter { project in
+            projectMatches(project) ||
+            store.sessions(in: project.id).contains { sessionMatches($0, in: project) }
+        }
+    }
+
+    private func projectMatches(_ project: Project) -> Bool {
+        let haystack = [
+            project.name,
+            project.location.subtitle,
+            project.location.pathString,
+        ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
+    }
+
+    private func sessionMatches(_ session: Session, in project: Project) -> Bool {
+        let haystack = [
+            session.title,
+            store.sessionHeadline(session),
+            project.name,
+            project.location.pathString,
+        ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
     }
 
     private func updateProjectDrag(_ projectId: UUID, value: DragGesture.Value) {
@@ -160,6 +198,54 @@ struct SidebarView: View {
         .padding(.vertical, 12)
     }
 
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+            TextField("Search projects and chats", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .accessibilityLabel("Search projects and chats")
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(Color.helmCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .stroke(Color.helmBorder, lineWidth: 1)
+                )
+        )
+        .padding(.bottom, 2)
+    }
+
+    private var noSearchResults: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("No matches")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Try a project, session, model, or path.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 12)
+    }
+
     private var addProjectButton: some View {
         Menu {
             Button {
@@ -223,6 +309,7 @@ struct SidebarView: View {
 private struct ProjectSection: View {
     @Environment(AppStore.self) private var store
     let project: Project
+    let searchText: String
     let isDragging: Bool
     let dropPlacement: ProjectDropPlacement?
     var onDragChanged: (DragGesture.Value) -> Void
@@ -236,8 +323,8 @@ private struct ProjectSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             header
-            if !project.collapsed {
-                ForEach(store.sessions(in: project.id)) { s in
+            if !project.collapsed || isFiltering {
+                ForEach(visibleSessions) { s in
                     Button {
                         store.selectedSessionId = s.id
                     } label: {
@@ -327,6 +414,39 @@ private struct ProjectSection: View {
         } message: {
             Text("Choose a short title for this session.")
         }
+    }
+
+    private var normalizedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var isFiltering: Bool {
+        !normalizedSearch.isEmpty
+    }
+
+    private var visibleSessions: [Session] {
+        let sessions = store.sessions(in: project.id)
+        guard isFiltering, !projectMatchesSearch else { return sessions }
+        return sessions.filter(sessionMatchesSearch)
+    }
+
+    private var projectMatchesSearch: Bool {
+        let haystack = [
+            project.name,
+            project.location.subtitle,
+            project.location.pathString,
+        ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
+    }
+
+    private func sessionMatchesSearch(_ session: Session) -> Bool {
+        let haystack = [
+            session.title,
+            store.sessionHeadline(session),
+            project.name,
+            project.location.pathString,
+        ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
     }
 
     private var header: some View {
