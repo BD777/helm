@@ -41,7 +41,9 @@ final class AppStore {
     }
     var showProfilesSheet: Bool = false
     var showSSHProjectSheet: Bool = false
+    var showQuickSwitcher: Bool = false
     var imagePreviewURL: URL?
+    var composerFocusTick: Int = 0
 
     /// Bumped each time the user sends a message. The chat list watches this
     /// to force a scroll-to-bottom after Send, regardless of where the user
@@ -287,6 +289,58 @@ final class AppStore {
 
     func sessions(in projectId: UUID) -> [Session] {
         sessions.filter { $0.projectId == projectId && !$0.isDraft }
+    }
+
+    var visibleSessions: [Session] {
+        projects.flatMap { project in
+            sessions(in: project.id)
+        }
+    }
+
+    func requestComposerFocus() {
+        composerFocusTick &+= 1
+    }
+
+    func showQuickSwitcherPanel() {
+        guard !visibleSessions.isEmpty else {
+            requestComposerFocus()
+            return
+        }
+        showQuickSwitcher = true
+    }
+
+    func hideQuickSwitcherPanel() {
+        showQuickSwitcher = false
+    }
+
+    @discardableResult
+    func newSessionInCurrentProject() -> UUID? {
+        let projectId = selectedProject?.id ?? projects.first?.id
+        guard let projectId else { return nil }
+        return newSession(in: projectId)
+    }
+
+    func selectRelativeSession(offset: Int) {
+        let scopedSessions: [Session] = {
+            if let selectedProject {
+                let projectSessions = sessions(in: selectedProject.id)
+                if !projectSessions.isEmpty { return projectSessions }
+            }
+            return visibleSessions
+        }()
+        guard !scopedSessions.isEmpty else { return }
+
+        let currentIndex = selectedSessionId
+            .flatMap { selectedId in scopedSessions.firstIndex { $0.id == selectedId } }
+        let base = currentIndex ?? (offset > 0 ? -1 : scopedSessions.count)
+        let nextIndex = (base + offset + scopedSessions.count) % scopedSessions.count
+        selectedSessionId = scopedSessions[nextIndex].id
+    }
+
+    func selectSidebarItem(_ oneBasedIndex: Int) {
+        let rows = visibleSessions
+        guard rows.indices.contains(oneBasedIndex - 1) else { return }
+        selectedSessionId = rows[oneBasedIndex - 1].id
     }
 
     func renameSession(_ id: UUID, title: String) {
@@ -590,6 +644,7 @@ final class AppStore {
     private var activeRunId: UUID?
     private var activeSessionId: UUID?
     private var activeAssistantId: UUID?
+    var activeRunStartedAt: Date?
     /// Maps vendor tool_use ids → our ToolCall.id for the active assistant
     /// message so input fragments and tool_results can land on the right call.
     private var toolMap: [String: UUID] = [:]
@@ -666,6 +721,7 @@ final class AppStore {
         activeRunId = runId
         activeSessionId = sessionId
         activeAssistantId = assistantId
+        activeRunStartedAt = Date()
         toolMap = [:]
 
         let adapter: AgentAdapter
@@ -722,6 +778,7 @@ final class AppStore {
         activeRunId = nil
         activeSessionId = nil
         activeAssistantId = nil
+        activeRunStartedAt = nil
         toolMap = [:]
     }
 
@@ -784,6 +841,8 @@ final class AppStore {
 
         case .finalResult(let text, let isError):
             var followupAnswer: Message?
+            let adapterToClose = currentAdapter
+            let taskToClose = streamTask
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.role = .assistant(meta: isError ? "error" : "done")
                 msg.meta = isError ? "error" : nil
@@ -815,6 +874,9 @@ final class AppStore {
             if let followupAnswer {
                 sessions[sIdx].transcript.append(.message(followupAnswer))
             }
+            finishStreaming(runId: runId)
+            taskToClose?.cancel()
+            adapterToClose?.cancel()
 
         case .error(let detail):
             mutateAssistant(at: sIdx, id: assistantId) { msg in

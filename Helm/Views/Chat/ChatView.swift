@@ -14,7 +14,7 @@ struct ChatView: View {
             .overlay(alignment: .top) {
                 headerEdgeFade
             }
-            ComposerView(externalFocusRequest: composerFocusRequest)
+            ComposerView(externalFocusRequest: composerFocusRequest + store.composerFocusTick)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.helmChatBg)

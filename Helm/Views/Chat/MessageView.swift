@@ -11,7 +11,7 @@ struct MessageListView: View {
         let items = displayItems
 
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     displayRow(item, isLatest: index == items.count - 1)
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
@@ -950,7 +950,8 @@ struct MarkdownishText: View {
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        if let attr = try? AttributedString(
+        if shouldParseMarkdown,
+           let attr = try? AttributedString(
             markdown: raw,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace
@@ -965,5 +966,15 @@ struct MarkdownishText: View {
                 .font(.system(size: 13.5))
                 .textSelection(.enabled)
         }
+    }
+
+    private var shouldParseMarkdown: Bool {
+        raw.contains("`") ||
+        raw.contains("*") ||
+        raw.contains("_") ||
+        raw.contains("[") ||
+        raw.contains("#") ||
+        raw.contains(">") ||
+        raw.contains("!")
     }
 }
