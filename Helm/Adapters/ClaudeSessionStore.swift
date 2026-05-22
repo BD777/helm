@@ -30,6 +30,7 @@ final class ClaudeSessionStore: AgentSessionStore {
     // MARK: - AgentSessionStore
 
     func sessions(for project: Project) async throws -> [VendorSessionRef] {
+        guard !project.location.isSSH else { return [] }
         let bucket = bucketURL(for: project)
         guard FileManager.default.fileExists(atPath: bucket.path) else { return [] }
         let urls = try FileManager.default.contentsOfDirectory(
@@ -52,6 +53,12 @@ final class ClaudeSessionStore: AgentSessionStore {
     }
 
     func history(sessionId: String, project: Project) async throws -> [TranscriptItem] {
+        if case .ssh(let host, let path, let status) = project.location {
+            return try await remoteHistory(sessionId: sessionId,
+                                           host: host,
+                                           path: path,
+                                           status: status)
+        }
         let url = bucketURL(for: project)
             .appendingPathComponent("\(sessionId).jsonl", isDirectory: false)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -65,6 +72,104 @@ final class ClaudeSessionStore: AgentSessionStore {
             applyImageManifest(into: &items, sessionId: helmId)
         }
         return items
+    }
+
+    private func remoteHistory(sessionId: String,
+                               host: String,
+                               path: String,
+                               status: SSHStatus) async throws -> [TranscriptItem] {
+        let cwd = try await remoteWorkingDirectory(host: host,
+                                                   path: path,
+                                                   status: status)
+        let bucket = Self.bucketName(for: cwd)
+        let file = "$HOME/.claude/projects/"
+            + SSHRemote.shellQuote(bucket)
+            + "/"
+            + SSHRemote.shellQuote("\(sessionId).jsonl")
+        let command = "if [ -f \(file) ]; then cat -- \(file); fi"
+        let data = try await sshOutput(host: host, remoteCommand: command)
+        guard !data.isEmpty else { return [] }
+        var items = ClaudeSessionLogParser().parse(data)
+        if let helmId = UUID(uuidString: sessionId) {
+            applyImageManifest(into: &items, sessionId: helmId)
+        }
+        return items
+    }
+
+    private func remoteWorkingDirectory(host: String,
+                                        path: String,
+                                        status: SSHStatus) async throws -> String {
+        if let resolved = status.resolvedPath, !resolved.isEmpty {
+            return resolved
+        }
+        let command = "cd -- \(SSHRemote.shellPath(path)) && pwd -P"
+        let data = try await sshOutput(host: host, remoteCommand: command)
+        let raw = String(data: data, encoding: .utf8) ?? ""
+        return raw
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? path
+    }
+
+    private func sshOutput(host: String, remoteCommand: String) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: remoteCommand,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+            let stdoutBuffer = PipeBuffer()
+            let stderrBuffer = PipeBuffer()
+            stdout.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                stdoutBuffer.append(chunk)
+            }
+            stderr.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                stderrBuffer.append(chunk)
+            }
+            defer {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                stderr.fileHandleForReading.readabilityHandler = nil
+            }
+
+            try proc.run()
+            proc.waitUntilExit()
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            let remainingOut = stdout.fileHandleForReading.readDataToEndOfFile()
+            let remainingErr = stderr.fileHandleForReading.readDataToEndOfFile()
+
+            stdoutBuffer.append(remainingOut)
+            stderrBuffer.append(remainingErr)
+            let data = stdoutBuffer.value()
+            let errData = stderrBuffer.value()
+            guard proc.terminationStatus == 0 else {
+                let reason = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw NSError(
+                    domain: "Helm.SSH",
+                    code: Int(proc.terminationStatus),
+                    userInfo: [
+                        NSLocalizedDescriptionKey: reason?.isEmpty == false
+                            ? reason!
+                            : "ssh exited \(proc.terminationStatus)"
+                    ]
+                )
+            }
+            return data
+        }.value
     }
 
     private func applyImageManifest(into items: inout [TranscriptItem], sessionId: UUID) {
@@ -118,6 +223,24 @@ final class ClaudeSessionStore: AgentSessionStore {
             }
         }
         return ScanResult(count: count, preview: preview)
+    }
+}
+
+private final class PipeBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.lock()
+        storage.append(chunk)
+        lock.unlock()
+    }
+
+    func value() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 
