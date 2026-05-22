@@ -170,8 +170,9 @@ private final class ChatAutoScrollController: ObservableObject {
     private var isLiveUserScroll = false
     private var scheduledScrollID = 0
 
-    private let bottomTolerance: CGFloat = 96
+    private let bottomTolerance: CGFloat = 140
     private let animatedDuration: TimeInterval = 0.18
+    private let maxScrollPasses = 6
 
     deinit {
         let center = NotificationCenter.default
@@ -320,7 +321,7 @@ private final class ChatAutoScrollController: ObservableObject {
                                     animated: Bool,
                                     force: Bool,
                                     pass: Int) {
-        let delay: DispatchTimeInterval = pass == 0 ? .nanoseconds(0) : .milliseconds(16)
+        let delay = scrollDelay(forPass: pass)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self,
@@ -328,13 +329,24 @@ private final class ChatAutoScrollController: ObservableObject {
                       force || self.followsBottom
                 else { return }
                 self.scrollToBottom(animated: animated && pass == 0)
-                if pass < 2 {
+                if pass + 1 < self.maxScrollPasses {
                     self.scheduleScrollPass(scrollID: scrollID,
                                             animated: false,
                                             force: force,
                                             pass: pass + 1)
                 }
             }
+        }
+    }
+
+    private func scrollDelay(forPass pass: Int) -> DispatchTimeInterval {
+        switch pass {
+        case 0: return .nanoseconds(0)
+        case 1: return .milliseconds(16)
+        case 2: return .milliseconds(33)
+        case 3: return .milliseconds(66)
+        case 4: return .milliseconds(120)
+        default: return .milliseconds(200)
         }
     }
 
