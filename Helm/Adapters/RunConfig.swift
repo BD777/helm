@@ -34,6 +34,7 @@ enum ResolverError: LocalizedError {
 enum RunConfigResolver {
     static func resolve(profile: Profile,
                         session: Session,
+                        isRemoteProject: Bool = false,
                         providers: [Provider],
                         models: [Model]) throws -> RunConfig {
         guard let provider = providers.first(where: { $0.id == profile.providerId }) else {
@@ -49,10 +50,12 @@ enum RunConfigResolver {
         switch profile.vendor {
         case .claude:
             return resolveClaude(profile: profile, session: session, provider: provider,
-                                 primary: primary, models: models)
+                                 primary: primary, models: models,
+                                 isRemoteProject: isRemoteProject)
         case .codex:
             return resolveCodex(profile: profile, session: session, provider: provider,
-                                primary: primary, models: models)
+                                primary: primary, models: models,
+                                isRemoteProject: isRemoteProject)
         }
     }
 
@@ -62,7 +65,8 @@ enum RunConfigResolver {
                                       session: Session,
                                       provider: Provider,
                                       primary: Model,
-                                      models: [Model]) -> RunConfig {
+                                      models: [Model],
+                                      isRemoteProject: Bool) -> RunConfig {
         var env: [String: String] = [:]
         if !provider.baseURL.isEmpty {
             env["ANTHROPIC_BASE_URL"] = provider.baseURL
@@ -87,7 +91,7 @@ enum RunConfigResolver {
         if let win = profile.autoCompactWindow {
             env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = String(win)
         }
-        if let root = profile.configRoot, !root.isEmpty {
+        if !isRemoteProject, let root = profile.configRoot, !root.isEmpty {
             env["CLAUDE_CONFIG_DIR"] = (root as NSString).expandingTildeInPath
         }
         for (k, v) in provider.extraEnv { env[k] = v }
@@ -98,7 +102,7 @@ enum RunConfigResolver {
         args.append(contentsOf: ["--permission-mode",
                                  session.claudePermissionMode.rawValue])
         args.append(contentsOf: ["--effort", session.claudeEffort.rawValue])
-        if let root = profile.configRoot, !root.isEmpty {
+        if !isRemoteProject, let root = profile.configRoot, !root.isEmpty {
             args.append(contentsOf: ["--setting-sources", "user,project,local"])
         }
 
@@ -118,15 +122,16 @@ enum RunConfigResolver {
                                      session: Session,
                                      provider: Provider,
                                      primary: Model,
-                                     models: [Model]) -> RunConfig {
+                                     models: [Model],
+                                     isRemoteProject: Bool) -> RunConfig {
         var env: [String: String] = [:]
-        if let root = profile.configRoot, !root.isEmpty {
+        if !isRemoteProject, let root = profile.configRoot, !root.isEmpty {
             env["CODEX_HOME"] = (root as NSString).expandingTildeInPath
         }
 
         var args: [String] = []
 
-        if let delegate = profile.delegateVendorProfile, !delegate.isEmpty {
+        if !isRemoteProject, let delegate = profile.delegateVendorProfile, !delegate.isEmpty {
             args.append(contentsOf: ["--profile", delegate])
         } else {
             // Inline -c overrides. Provider gets a synthesized name; safe

@@ -583,6 +583,7 @@ final class AppStore {
         do {
             runConfig = try RunConfigResolver.resolve(profile: profile,
                                                      session: session,
+                                                     isRemoteProject: project.location.isSSH,
                                                      providers: providers,
                                                      models: models)
         } catch {

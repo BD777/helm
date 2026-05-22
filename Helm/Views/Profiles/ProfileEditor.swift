@@ -185,7 +185,7 @@ struct ProfileEditor: View {
                 .frame(maxWidth: 280)
             }
             field("Delegate to vendor profile",
-                  hint: "If set, spawn `codex --profile X` and let codex resolve [profiles.X]. Other fields above are then ignored.") {
+                  hint: "Local projects only. SSH projects always use Helm's local profile settings instead of remote [profiles.X].") {
                 TextField("optional — e.g. aidp", text: Binding(
                     get: { profile.delegateVendorProfile ?? "" },
                     set: { profile.delegateVendorProfile = $0.isEmpty ? nil : $0 }
@@ -207,8 +207,8 @@ struct ProfileEditor: View {
             }
             field("Config root",
                   hint: profile.vendor == .claude
-                  ? "Override CLAUDE_CONFIG_DIR. Leave blank for ~/.claude."
-                  : "Override CODEX_HOME. Leave blank for ~/.codex.") {
+                  ? "Override CLAUDE_CONFIG_DIR for local projects. SSH keeps profile resolution in Helm."
+                  : "Override CODEX_HOME for local projects. SSH keeps profile resolution in Helm.") {
                 TextField("~/.claude or ~/.codex", text: Binding(
                     get: { profile.configRoot ?? "" },
                     set: { profile.configRoot = $0.isEmpty ? nil : $0 }
