@@ -27,7 +27,6 @@ struct MessageListView: View {
                 }
             )
         }
-        .id(store.selectedSessionId)
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .frame(maxWidth: .infinity, maxHeight: .infinity)

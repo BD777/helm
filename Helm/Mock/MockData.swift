@@ -23,6 +23,7 @@ final class AppStore {
             }
             scheduleStateSave()
             if let id = selectedSessionId {
+                restoreTranscriptSnapshotIfNeeded(for: id)
                 Task { @MainActor [weak self] in
                     await self?.ensureHistoryLoaded(for: id)
                 }
@@ -104,6 +105,7 @@ final class AppStore {
         // didSet doesn't fire from `init`, so kick off the lazy-load
         // explicitly if there's a selected session restored from disk.
         if let sid = self.selectedSessionId {
+            restoreTranscriptSnapshotIfNeeded(for: sid)
             Task { @MainActor [weak self] in
                 await self?.ensureHistoryLoaded(for: sid)
             }
@@ -514,12 +516,7 @@ final class AppStore {
         guard !loadingHistorySessionIds.contains(sessionId) else { return }
 
         if sessions[sIdx].transcript.isEmpty {
-            let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
-            if !snapshot.isEmpty {
-                sessions[sIdx].transcript = snapshot
-                NSLog("[helm.history] restored %ld snapshot items for %@",
-                      snapshot.count, sessionId.uuidString)
-            }
+            restoreTranscriptSnapshotIfNeeded(for: sessionId)
         } else {
             return
         }
@@ -548,6 +545,21 @@ final class AppStore {
             NSLog("[helm.history] load failed for %@: %@",
                   vendorId, error.localizedDescription)
         }
+    }
+
+    @discardableResult
+    private func restoreTranscriptSnapshotIfNeeded(for sessionId: UUID) -> Bool {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[idx].transcript.isEmpty
+        else { return false }
+
+        let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+        guard !snapshot.isEmpty else { return false }
+
+        sessions[idx].transcript = snapshot
+        NSLog("[helm.history] restored %ld snapshot items for %@",
+              snapshot.count, sessionId.uuidString)
+        return true
     }
 
     // MARK: - Agent invocation
