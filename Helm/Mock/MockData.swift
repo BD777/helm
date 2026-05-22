@@ -521,10 +521,7 @@ final class AppStore {
         let adapter: AgentAdapter
         switch profile.vendor {
         case .claude: adapter = ClaudeLocalAdapter()
-        case .codex:
-            appendError(to: sIdx, "Codex adapter not implemented yet.")
-            finishStreaming(runId: runId)
-            return
+        case .codex:  adapter = CodexLocalAdapter()
         }
         currentAdapter = adapter
 
@@ -633,11 +630,27 @@ final class AppStore {
             }
 
         case .finalResult(let text, let isError):
+            var followupAnswer: Message?
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.role = .assistant(meta: isError ? "error" : "done")
                 msg.meta = isError ? "error" : nil
                 if !text.isEmpty {
-                    if msg.parts.isEmpty {
+                    let hasToolCall = msg.parts.contains { part in
+                        if case .toolCall = part { return true }
+                        return false
+                    }
+                    if !isError, hasToolCall {
+                        if case .text(let existing) = msg.parts.last, existing == text {
+                            msg.parts.removeLast()
+                        }
+                        followupAnswer = Message(
+                            id: UUID(),
+                            role: .assistant(meta: "done"),
+                            who: msg.who,
+                            meta: nil,
+                            parts: [.text(text)]
+                        )
+                    } else if msg.parts.isEmpty {
                         msg.parts.append(.text(text))
                     } else if isError {
                         msg.parts.append(.text("⚠️ " + text))
@@ -645,6 +658,9 @@ final class AppStore {
                 } else if isError, msg.parts.isEmpty {
                     msg.parts.append(.text("⚠️ Agent reported an error but produced no output. Check Console.app for `helm.claude` logs."))
                 }
+            }
+            if let followupAnswer {
+                sessions[sIdx].transcript.append(.message(followupAnswer))
             }
 
         case .error(let detail):

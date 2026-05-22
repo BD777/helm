@@ -33,6 +33,7 @@
 		BCFE9929885B09056EA92DE9 /* ModelEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A79E2BE71301090B30B2EE /* ModelEditor.swift */; };
 		BD821E1FA76E53FFB9577134 /* ChatToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A127AB44EADFCF6954A7840C /* ChatToolbar.swift */; };
 		C025ADDF8BF93588B2316033 /* CodexSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15707ACDAA141997F5E482B6 /* CodexSessionStore.swift */; };
+		C0DEC0DEC0DEC0DEC0DEC0D1 /* CodexLocalAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DEC0DEC0DEC0DEC0DEC0D0 /* CodexLocalAdapter.swift */; };
 		C180D26A5AF455800B7C270B /* SavedIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48BA9C9EFF19B3BA2688AC80 /* SavedIndicator.swift */; };
 		C5F842C14A456091C1B1EC87 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 88F44550306FA5A33BEFC537 /* Assets.xcassets */; };
 		CE6827C81EC4FBD79D491C71 /* EmptyChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 912FAE6CF9DB902DD560F01D /* EmptyChatView.swift */; };
@@ -73,6 +74,7 @@
 		ACA291F85FAAF945DDCF206D /* ClaudeLocalAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeLocalAdapter.swift; sourceTree = "<group>"; };
 		B72EEEBFC7773373A65448FD /* ProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStore.swift; sourceTree = "<group>"; };
 		C16418C0D5D474EA754955C8 /* RunConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunConfig.swift; sourceTree = "<group>"; };
+		C0DEC0DEC0DEC0DEC0DEC0D0 /* CodexLocalAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexLocalAdapter.swift; sourceTree = "<group>"; };
 		C82827309F2C3C4358299950 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		C1B2A3D4E5F6789012345678 /* ComposerTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTextView.swift; sourceTree = "<group>"; };
 		C2B3A4D5E6F7890123456789 /* SessionEventView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEventView.swift; sourceTree = "<group>"; };
@@ -193,6 +195,7 @@
 				F89896F9DA54298C7D0CF748 /* AgentSessionStore.swift */,
 				ACA291F85FAAF945DDCF206D /* ClaudeLocalAdapter.swift */,
 				66DBC588FF3FA8BDB3D6AE5E /* ClaudeSessionStore.swift */,
+				C0DEC0DEC0DEC0DEC0DEC0D0 /* CodexLocalAdapter.swift */,
 				15707ACDAA141997F5E482B6 /* CodexSessionStore.swift */,
 				10C3F561B8504E415F31FC3C /* ModelCatalogService.swift */,
 				C16418C0D5D474EA754955C8 /* RunConfig.swift */,
@@ -292,6 +295,7 @@
 				5DA566DEB727440A5FF26121 /* ChatView.swift in Sources */,
 				E0569C07DE143DCBBCC2AF04 /* ClaudeLocalAdapter.swift in Sources */,
 				F3424ABA693B2DDC9B1EE163 /* ClaudeSessionStore.swift in Sources */,
+				C0DEC0DEC0DEC0DEC0DEC0D1 /* CodexLocalAdapter.swift in Sources */,
 				C025ADDF8BF93588B2316033 /* CodexSessionStore.swift in Sources */,
 				A4C82EF6BBB383FAC2091D92 /* ComposerView.swift in Sources */,
 				B1A2C3D4E5F6789012345678 /* ComposerTextView.swift in Sources */,

@@ -133,6 +133,7 @@ enum RunConfigResolver {
             // because we re-emit it on every spawn.
             let providerKey = sanitizeKey("helm_" + provider.name)
             args.append(contentsOf: ["-c", "model_provider=\(providerKey)"])
+            args.append(contentsOf: ["-c", "model_providers.\(providerKey).name=\"\(provider.name)\""])
             if !provider.baseURL.isEmpty {
                 args.append(contentsOf: ["-c", "model_providers.\(providerKey).base_url=\"\(provider.baseURL)\""])
             }
