@@ -107,6 +107,7 @@ private final class ChatAutoScrollController: ObservableObject {
     private var documentObserver: NSObjectProtocol?
     private var followsBottom = true
     private var isProgrammaticScroll = false
+    private var isLiveUserScroll = false
     private var scheduledScrollID = 0
 
     private let bottomTolerance: CGFloat = 96
@@ -138,33 +139,72 @@ private final class ChatAutoScrollController: ObservableObject {
                     self?.visibleBoundsDidChange()
                 }
             })
+            scrollObservers.append(center.addObserver(
+                forName: NSScrollView.willStartLiveScrollNotification,
+                object: scrollView,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isLiveUserScroll = true
+                    self?.updateFollowPreference()
+                }
+            })
+            scrollObservers.append(center.addObserver(
+                forName: NSScrollView.didLiveScrollNotification,
+                object: scrollView,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isLiveUserScroll = true
+                    self?.updateFollowPreference()
+                }
+            })
+            scrollObservers.append(center.addObserver(
+                forName: NSScrollView.didEndLiveScrollNotification,
+                object: scrollView,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.updateFollowPreference()
+                    self?.isLiveUserScroll = false
+                }
+            })
             followsBottom = true
         }
 
         observeDocumentView(scrollView.documentView)
         if followsBottom {
-            scheduleScrollToBottom(animated: false)
+            scheduleScrollToBottom(animated: false, force: false)
         }
     }
 
     func followIfNeeded() {
         guard followsBottom else { return }
-        scheduleScrollToBottom(animated: false)
+        scheduleScrollToBottom(animated: false, force: false)
     }
 
     func forceScrollToBottom(animated: Bool) {
         followsBottom = true
-        scheduleScrollToBottom(animated: animated)
+        scheduleScrollToBottom(animated: animated, force: true)
     }
 
     private func visibleBoundsDidChange() {
         guard !isProgrammaticScroll, let scrollView else { return }
-        followsBottom = distanceFromBottom(in: scrollView) <= bottomTolerance
+        if isLiveUserScroll || currentEventLooksLikeUserScroll {
+            updateFollowPreference()
+        } else if distanceFromBottom(in: scrollView) <= bottomTolerance {
+            followsBottom = true
+        }
     }
 
     private func documentFrameDidChange() {
         guard followsBottom else { return }
-        scheduleScrollToBottom(animated: false)
+        scheduleScrollToBottom(animated: false, force: false)
+    }
+
+    private func updateFollowPreference() {
+        guard let scrollView else { return }
+        followsBottom = distanceFromBottom(in: scrollView) <= bottomTolerance
     }
 
     private func observeDocumentView(_ documentView: NSView?) {
@@ -198,13 +238,30 @@ private final class ChatAutoScrollController: ObservableObject {
         scrollObservers = []
     }
 
-    private func scheduleScrollToBottom(animated: Bool) {
+    private func scheduleScrollToBottom(animated: Bool, force: Bool) {
         scheduledScrollID += 1
         let scrollID = scheduledScrollID
-        DispatchQueue.main.async { [weak self] in
+        scheduleScrollPass(scrollID: scrollID, animated: animated, force: force, pass: 0)
+    }
+
+    private func scheduleScrollPass(scrollID: Int,
+                                    animated: Bool,
+                                    force: Bool,
+                                    pass: Int) {
+        let delay: DispatchTimeInterval = pass == 0 ? .nanoseconds(0) : .milliseconds(16)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, self.scheduledScrollID == scrollID else { return }
-                self.scrollToBottom(animated: animated)
+                guard let self,
+                      self.scheduledScrollID == scrollID,
+                      force || self.followsBottom
+                else { return }
+                self.scrollToBottom(animated: animated && pass == 0)
+                if pass < 2 {
+                    self.scheduleScrollPass(scrollID: scrollID,
+                                            animated: false,
+                                            force: force,
+                                            pass: pass + 1)
+                }
             }
         }
     }
@@ -254,6 +311,17 @@ private final class ChatAutoScrollController: ObservableObject {
     private func finishProgrammaticScroll() {
         followsBottom = true
         isProgrammaticScroll = false
+    }
+
+    private var currentEventLooksLikeUserScroll: Bool {
+        guard let event = NSApp.currentEvent else { return false }
+        switch event.type {
+        case .scrollWheel, .leftMouseDragged, .rightMouseDragged,
+             .otherMouseDragged, .leftMouseDown, .keyDown:
+            return true
+        default:
+            return false
+        }
     }
 
     private func distanceFromBottom(in scrollView: NSScrollView) -> CGFloat {
