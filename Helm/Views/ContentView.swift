@@ -4,20 +4,29 @@ struct ContentView: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 240, ideal: DS.sidebarWidth, max: 360)
-        } detail: {
-            Group {
-                if store.selectedSession != nil {
-                    ChatView()
-                } else {
-                    EmptyChatView()
+        GeometryReader { proxy in
+            if proxy.size.width < DS.sidebarAutoHideWidth {
+                detailPane
+            } else {
+                HSplitView {
+                    SidebarView()
+                        .frame(width: DS.sidebarWidth)
+                    detailPane
+                        .frame(minWidth: 0, maxWidth: .infinity)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.helmChatBg)
         }
-        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var detailPane: some View {
+        Group {
+            if store.selectedSession != nil {
+                ChatView()
+            } else {
+                EmptyChatView()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.helmChatBg)
     }
 }

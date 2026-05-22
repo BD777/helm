@@ -12,6 +12,7 @@ struct ComposerView: View {
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
+    @State private var footerWidth: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +20,7 @@ struct ComposerView: View {
                 inner
             }
             .frame(maxWidth: DS.messageMaxWidth)
+            .background(ComposerWidthReader(width: $footerWidth))
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -222,64 +224,138 @@ struct ComposerView: View {
         let modelLabel = model?.label ?? "no model"
         let configLocked = session.map { store.isSessionStreaming($0.id) } ?? false
 
-        return HStack(spacing: 8) {
-            Button { pickerOpen.toggle() } label: {
-                if let profile {
-                    HStack(spacing: 6) {
-                        VendorBadge(vendor: profile.vendor).frame(width: 14, height: 14)
-                        Text(modelLabel).font(.system(size: 12)).foregroundStyle(.secondary)
-                        Image(systemName: "chevron.down").font(.system(size: 8)).foregroundStyle(.tertiary)
-                    }
-                }
+        return Group {
+            if footerWidth >= 600 {
+                wideFooter(session: session,
+                           profile: profile,
+                           modelLabel: modelLabel,
+                           configLocked: configLocked)
+            } else {
+                compactFooter(session: session,
+                              profile: profile,
+                              modelLabel: modelLabel,
+                              configLocked: configLocked)
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $pickerOpen, arrowEdge: .bottom) {
-                ModelPickerMenu().frame(width: 360)
-            }
-            .disabled(configLocked)
-            .help(runConfigHelp(configLocked, "Change model"))
-
-            if let session, let profile {
-                switch profile.vendor {
-                case .claude:
-                    claudePermissionChip(session: session)
-                    claudeEffortChip(session: session)
-                case .codex:
-                    codexSandboxChip(session: session)
-                    codexApprovalChip(session: session)
-                    codexEffortChip(session: session)
-                }
-            }
-            if let sshStatus = store.selectedSSHStatus {
-                sshStatusChip(sshStatus)
-            }
-
-            Spacer()
-
-            Text("⌘↵")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
-
-            Button {
-                sendIfPossible()
-            } label: {
-                Text(submitButtonTitle)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule().fill(submitButtonColor)
-                    )
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!canSubmit)
-            .help(submitButtonHelp)
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
         .padding(.top, 4)
+    }
+
+    private func wideFooter(session: Session?,
+                            profile: Profile?,
+                            modelLabel: String,
+                            configLocked: Bool) -> some View {
+        HStack(spacing: 8) {
+            modelPickerButton(profile: profile,
+                              modelLabel: modelLabel,
+                              configLocked: configLocked,
+                              maxWidth: 240)
+            runConfigControls(session: session, profile: profile)
+            sshStatusControl
+            Spacer(minLength: 8)
+            sendShortcut
+            submitButton
+        }
+    }
+
+    private func compactFooter(session: Session?,
+                               profile: Profile?,
+                               modelLabel: String,
+                               configLocked: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                modelPickerButton(profile: profile,
+                                  modelLabel: modelLabel,
+                                  configLocked: configLocked,
+                                  maxWidth: .infinity)
+                Spacer(minLength: 8)
+                sendShortcut
+                submitButton
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    runConfigControls(session: session, profile: profile)
+                    sshStatusControl
+                }
+                .padding(.vertical, 1)
+            }
+        }
+    }
+
+    private func modelPickerButton(profile: Profile?,
+                                   modelLabel: String,
+                                   configLocked: Bool,
+                                   maxWidth: CGFloat) -> some View {
+        Button { pickerOpen.toggle() } label: {
+            HStack(spacing: 6) {
+                if let profile {
+                    VendorBadge(vendor: profile.vendor).frame(width: 14, height: 14)
+                }
+                Text(modelLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: maxWidth, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $pickerOpen, arrowEdge: .bottom) {
+            ModelPickerMenu().frame(width: 360)
+        }
+        .disabled(configLocked)
+        .help(runConfigHelp(configLocked, "Change model"))
+    }
+
+    @ViewBuilder
+    private func runConfigControls(session: Session?, profile: Profile?) -> some View {
+        if let session, let profile {
+            switch profile.vendor {
+            case .claude:
+                claudePermissionChip(session: session)
+                claudeEffortChip(session: session)
+            case .codex:
+                codexSandboxChip(session: session)
+                codexApprovalChip(session: session)
+                codexEffortChip(session: session)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sshStatusControl: some View {
+        if let sshStatus = store.selectedSSHStatus {
+            sshStatusChip(sshStatus)
+        }
+    }
+
+    private var sendShortcut: some View {
+        Text("⌘↵")
+            .font(.system(size: 10.5))
+            .foregroundStyle(.tertiary)
+    }
+
+    private var submitButton: some View {
+        Button {
+            sendIfPossible()
+        } label: {
+            Text(submitButtonTitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule().fill(submitButtonColor)
+                )
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.return, modifiers: .command)
+        .disabled(!canSubmit)
+        .help(submitButtonHelp)
     }
 
     private func runConfigHelp(_ isLocked: Bool, _ unlockedHelp: String) -> String {
@@ -580,4 +656,31 @@ struct ComposerView: View {
 private struct ComposerDraft {
     var text: String
     var attachments: [ImageAttachment]
+}
+
+private struct ComposerWidthReader: View {
+    @Binding var width: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: ComposerWidthPreferenceKey.self,
+                            value: proxy.size.width)
+        }
+        .onPreferenceChange(ComposerWidthPreferenceKey.self) { newWidth in
+            DispatchQueue.main.async {
+                let roundedWidth = newWidth.rounded()
+                guard abs(width - roundedWidth) > 0.5 else { return }
+                width = roundedWidth
+            }
+        }
+    }
+}
+
+private struct ComposerWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
 }

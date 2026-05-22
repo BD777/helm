@@ -3,6 +3,9 @@ import SwiftUI
 enum DS {
     static let sidebarWidth: CGFloat = 280
     static let messageMaxWidth: CGFloat = 760
+    static let windowMinWidth: CGFloat = 560
+    static let windowMinHeight: CGFloat = 520
+    static let sidebarAutoHideWidth: CGFloat = 820
     static let cornerRadius: CGFloat = 8
     static let cornerRadiusSmall: CGFloat = 6
     static let cornerRadiusLarge: CGFloat = 12

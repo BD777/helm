@@ -99,7 +99,7 @@ final class HelmAppDelegate: NSObject, NSApplicationDelegate {
 
         let root = ContentView()
             .environment(store)
-            .frame(minWidth: 880, minHeight: 560)
+            .frame(minWidth: DS.windowMinWidth, minHeight: DS.windowMinHeight)
             .toolbarBackground(.hidden, for: .windowToolbar)
             .background(WindowTitleHider())
 
@@ -114,9 +114,12 @@ final class HelmAppDelegate: NSObject, NSApplicationDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unifiedCompact
-        window.contentMinSize = NSSize(width: 880, height: 560)
+        window.contentMinSize = NSSize(width: DS.windowMinWidth,
+                                       height: DS.windowMinHeight)
         window.contentViewController = NSHostingController(rootView: root)
         window.isReleasedWhenClosed = false
+        let defaultFrame = NSRect(x: 0, y: 0, width: 1180, height: 760)
+        window.setFrame(defaultFrame, display: false)
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

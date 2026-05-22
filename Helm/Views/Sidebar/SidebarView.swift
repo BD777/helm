@@ -364,9 +364,9 @@ private struct SessionRow: View {
             Spacer(minLength: 0)
             if isRunning {
                 ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.55)
-                    .frame(width: 12, height: 12)
+                    .controlSize(.small)
+                    .scaleEffect(0.82)
+                    .frame(width: 16, height: 16)
             }
         }
         .padding(.leading, 18)
