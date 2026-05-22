@@ -30,6 +30,12 @@ struct MessageListView: View {
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .background(Color.helmChatBg)
+        .overlay {
+            if showHistoryLoading {
+                historyLoadingView
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if autoScroll.showJumpToBottom {
                 Button {
@@ -54,6 +60,7 @@ struct MessageListView: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: autoScroll.showJumpToBottom)
+        .animation(.easeOut(duration: 0.12), value: showHistoryLoading)
         // Initial appearance lands at the bottom. Streaming follow is driven
         // from AppKit's real scroll geometry below so it can resume when the
         // user manually returns close to the bottom.
@@ -79,6 +86,29 @@ struct MessageListView: View {
     private var displayItems: [DisplayItem] {
         guard let s = store.selectedSession else { return [] }
         return groupTranscript(s.transcript)
+    }
+
+    private var showHistoryLoading: Bool {
+        store.selectedSessionIsLoadingHistory && displayItems.isEmpty
+    }
+
+    private var historyLoadingView: some View {
+        VStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading conversation...")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Loading conversation")
     }
 
     @ViewBuilder

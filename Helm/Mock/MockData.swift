@@ -34,6 +34,10 @@ final class AppStore {
         guard let selectedSessionId else { return false }
         return isSessionStreaming(selectedSessionId)
     }
+    var selectedSessionIsLoadingHistory: Bool {
+        guard let selectedSessionId else { return false }
+        return loadingHistorySessionIds.contains(selectedSessionId)
+    }
     var showProfilesSheet: Bool = false
     var showSSHProjectSheet: Bool = false
 
@@ -51,6 +55,7 @@ final class AppStore {
 
     private let profileStore: ProfileStore
     private let stateStore: StateStore
+    private var loadingHistorySessionIds: Set<UUID> = []
     /// One vendor-specific session store per vendor, used to lazily load
     /// history from the agent's own jsonl on disk and to enumerate sessions
     /// for "import existing CLI session" flows. Keep one instance each so
@@ -465,15 +470,23 @@ final class AppStore {
               let project = projects.first(where: { $0.id == sessions[sIdx].projectId }),
               let store = sessionStores[profile.vendor]
         else { return }
+        guard !loadingHistorySessionIds.contains(sessionId) else { return }
+        loadingHistorySessionIds.insert(sessionId)
+        defer { loadingHistorySessionIds.remove(sessionId) }
         // Use the vendor session id if we have one; otherwise our session.id
         // doubles as the vendor id for Claude (we passed it via --session-id).
         let vendorId = sessions[sIdx].vendorSessionId
             ?? sessions[sIdx].id.uuidString.lowercased()
+        NSLog("[helm.history] loading %@ for %@", vendorId, sessionId.uuidString)
         do {
-            let items = try await store.history(sessionId: vendorId, project: project)
+            let items = try await Task.detached(priority: .userInitiated) {
+                try await store.history(sessionId: vendorId, project: project)
+            }.value
             guard let stillIdx = sessions.firstIndex(where: { $0.id == sessionId }),
                   sessions[stillIdx].transcript.isEmpty else { return }
             sessions[stillIdx].transcript = items
+            NSLog("[helm.history] loaded %ld items for %@",
+                  items.count, vendorId)
         } catch {
             NSLog("[helm.history] load failed for %@: %@",
                   vendorId, error.localizedDescription)
