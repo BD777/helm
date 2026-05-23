@@ -278,8 +278,7 @@ struct ComposerView: View {
             moveSlashHighlight(by: -1)
             return true
         case 36, 48, 76:
-            insertHighlightedSkillCommand()
-            return true
+            return insertHighlightedSkillCommand()
         case 53:
             slashSuppressedText = text
             return true
@@ -298,8 +297,7 @@ struct ComposerView: View {
             moveSlashHighlight(by: 1)
             return true
         case .accept:
-            insertHighlightedSkillCommand()
-            return true
+            return insertHighlightedSkillCommand()
         case .cancel:
             slashSuppressedText = text
             return true
@@ -315,11 +313,12 @@ struct ComposerView: View {
         slashHighlightedId = list[(current + offset + list.count) % list.count].id
     }
 
-    private func insertHighlightedSkillCommand() {
+    private func insertHighlightedSkillCommand() -> Bool {
         guard let id = currentSlashHighlight,
               let skill = slashFilteredSkills.first(where: { $0.id == id })
-        else { return }
+        else { return false }
         insertSkillCommand(skill)
+        return true
     }
 
     private func insertSkillCommand(_ skill: ComposerSkill) {
