@@ -9,6 +9,7 @@ struct ComposerView: View {
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
     @State private var selectedSkills: [ComposerSkill] = []
+    @State private var skillInsertionRequest: ComposerSkillInsertionRequest?
     @State private var draftSessionId: UUID?
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
@@ -20,7 +21,8 @@ struct ComposerView: View {
     @State private var slashFilteredSkills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
     @State private var slashScrollTargetId: String?
-    @State private var slashSuppressedText: String?
+    @State private var slashContext: ComposerSlashContext?
+    @State private var slashSuppressedSignature: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,9 +55,6 @@ struct ComposerView: View {
         .onChange(of: externalFocusRequest) { _, _ in
             requestComposerFocus()
         }
-        .onChange(of: text) { oldText, newText in
-            handleTextChange(oldText: oldText, newText: newText)
-        }
         .onDisappear { removePasteMonitor() }
     }
 
@@ -78,24 +77,24 @@ struct ComposerView: View {
 
     private var box: some View {
         VStack(spacing: 0) {
-            if !selectedSkills.isEmpty {
-                selectedSkillsRow(selectedSkills)
-            }
             if !attachments.isEmpty {
                 attachmentRow
             }
             ComposerTextView(
                 text: $text,
+                skillChips: $selectedSkills,
                 placeholder: composerPlaceholder,
-                minLines: 2,
+                minLines: selectedSkills.isEmpty && text.isEmpty ? 2 : 1,
                 maxLines: 11,
                 focusRequest: focusRequest,
+                skillInsertionRequest: skillInsertionRequest,
                 onKeyDown: handleComposerKeyDown,
                 onTextCommand: handleComposerTextCommand,
+                onSlashContextChange: handleSlashContextChange,
                 onSend: sendIfPossible
             )
             .padding(.horizontal, 10)
-            .padding(.top, 8)
+            .padding(.top, attachments.isEmpty ? 8 : 6)
             .padding(.bottom, 8)
         }
         .background(
@@ -208,30 +207,52 @@ struct ComposerView: View {
     }
 
     private func composedPrompt() -> String {
-        guard !selectedSkills.isEmpty else { return text }
-        let commands = selectedSkills.map { "/\($0.name)" }.joined(separator: " ")
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return commands }
-        return "\(commands) \(body)"
+        Self.serializeComposerText(text,
+                                   skillChips: selectedSkills,
+                                   vendor: selectedVendor)
+    }
+
+    private var selectedVendor: Vendor {
+        store.selectedSession
+            .flatMap { store.profile($0.profileId) }?
+            .vendor ?? .codex
+    }
+
+    private static func serializeComposerText(_ text: String,
+                                              skillChips: [ComposerSkill],
+                                              vendor: Vendor) -> String {
+        var output = ""
+        var skillIndex = 0
+        for character in text {
+            if String(character) == ComposerTextView.attachmentPlaceholder,
+               skillIndex < skillChips.count {
+                output += skillCommand(for: skillChips[skillIndex], vendor: vendor)
+                skillIndex += 1
+            } else {
+                output.append(character)
+            }
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func skillCommand(for skill: ComposerSkill, vendor: Vendor) -> String {
+        switch vendor {
+        case .claude:
+            return "/\(skill.name)"
+        case .codex:
+            return "$\(skill.name)"
+        }
     }
 
     // MARK: - Slash skill picker
 
     private var slashQuery: String? {
-        return Self.slashQuery(in: text)
-    }
-
-    private static func slashQuery(in text: String) -> String? {
-        guard text.hasPrefix("/") else { return nil }
-        let rawQuery = String(text.dropFirst())
-        guard rawQuery.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
-            return nil
-        }
-        return ComposerSkill.normalizedSearchText(rawQuery)
+        slashContext?.query
     }
 
     private var slashMenuVisible: Bool {
-        slashQuery != nil && slashSuppressedText != text
+        guard let slashContext else { return false }
+        return slashSuppressedSignature != slashContext.signature
     }
 
     private var currentSlashHighlight: String? {
@@ -265,28 +286,28 @@ struct ComposerView: View {
                 skills = loadedSkills
                 isRefreshingSkills = false
 
-                if let split = splitLeadingSkillCommand(in: text) {
-                    selectSkill(split.skill, remainingText: split.remainingText)
-                } else {
-                    updateSlashResults()
+                if let slashContext,
+                   let skill = exactSkillMatch(for: slashContext) {
+                    requestSkillInsertion(skill)
                 }
+                updateSlashResults()
             }
         }
     }
 
-    private func handleTextChange(oldText: String, newText: String) {
-        if slashSuppressedText != newText {
-            slashSuppressedText = nil
+    private func handleSlashContextChange(_ context: ComposerSlashContext?) {
+        let oldContext = slashContext
+        slashContext = context
+        if slashSuppressedSignature != context?.signature {
+            slashSuppressedSignature = nil
         }
-        if let split = splitLeadingSkillCommand(in: newText) {
-            selectSkill(split.skill, remainingText: split.remainingText)
-            return
-        }
-
-        let wasSlashCommand = Self.slashQuery(in: oldText) != nil
-        let isSlashCommand = slashQuery != nil
-        if isSlashCommand && !wasSlashCommand {
+        if context != nil && oldContext == nil {
             refreshSkillsAsync()
+        }
+        if let context,
+           let skill = exactSkillMatch(for: context) {
+            requestSkillInsertion(skill)
+            return
         }
         updateSlashResults()
     }
@@ -301,12 +322,10 @@ struct ComposerView: View {
         }
 
         let filtered: [ComposerSkill]
-        let selectedSkillIds = Set(selectedSkills.map(\.id))
-        let availableSkills = skills.filter { !selectedSkillIds.contains($0.id) }
         if query.isEmpty {
-            filtered = availableSkills
+            filtered = skills
         } else {
-            filtered = availableSkills
+            filtered = skills
                 .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
                     guard let score = skill.matchScore(for: query) else { return nil }
                     return (skill, score)
@@ -344,14 +363,6 @@ struct ComposerView: View {
     private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.isEmpty else { return false }
-        if event.keyCode == 51,
-           !selectedSkills.isEmpty,
-           text.isEmpty {
-            selectedSkills.removeLast()
-            updateSlashResults()
-            requestComposerFocus()
-            return true
-        }
 
         guard slashMenuVisible else { return false }
 
@@ -367,7 +378,7 @@ struct ComposerView: View {
         case 48:
             return insertHighlightedSkillCommand()
         case 53:
-            slashSuppressedText = text
+            slashSuppressedSignature = slashContext?.signature
             return true
         default:
             return false
@@ -388,7 +399,7 @@ struct ComposerView: View {
         case .complete:
             return insertHighlightedSkillCommand()
         case .cancel:
-            slashSuppressedText = text
+            slashSuppressedSignature = slashContext?.signature
             return true
         }
     }
@@ -413,14 +424,11 @@ struct ComposerView: View {
     }
 
     private func insertSkillCommand(_ skill: ComposerSkill) {
-        selectSkill(skill, remainingText: "")
+        requestSkillInsertion(skill)
     }
 
-    private func selectSkill(_ skill: ComposerSkill, remainingText: String) {
-        if !selectedSkills.contains(where: { $0.id == skill.id }) {
-            selectedSkills.append(skill)
-        }
-        text = remainingText
+    private func requestSkillInsertion(_ skill: ComposerSkill) {
+        skillInsertionRequest = ComposerSkillInsertionRequest(skill: skill)
         requestComposerFocus()
         resetSlashPickerState()
     }
@@ -428,81 +436,22 @@ struct ComposerView: View {
     private func resetSlashPickerState() {
         slashHighlightedId = nil
         slashScrollTargetId = nil
-        slashSuppressedText = nil
+        slashSuppressedSignature = nil
+        slashContext = nil
         if !slashFilteredSkills.isEmpty {
             slashFilteredSkills = []
         }
     }
 
-    private func splitLeadingSkillCommand(in candidate: String) -> (skill: ComposerSkill, remainingText: String)? {
-        guard candidate.hasPrefix("/") else { return nil }
-
-        let rawCommand = candidate.dropFirst()
-        guard !rawCommand.isEmpty else { return nil }
-        let commandEnd = rawCommand.firstIndex { $0.isWhitespace } ?? rawCommand.endIndex
-        let command = String(rawCommand[..<commandEnd])
-        guard !command.isEmpty else { return nil }
-
-        let normalizedCommand = ComposerSkill.normalizedSearchText(command)
-        guard let skill = skills.first(where: { $0.searchName == normalizedCommand }) else {
+    private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
+        guard !context.query.isEmpty else { return nil }
+        guard let skill = skills.first(where: { $0.searchName == context.query }) else {
             return nil
         }
-        let userTypedBoundary = commandEnd != rawCommand.endIndex
-        if !userTypedBoundary,
-           skills.contains(where: { $0.searchName != normalizedCommand && $0.searchName.hasPrefix(normalizedCommand) }) {
+        if skills.contains(where: { $0.searchName != context.query && $0.searchName.hasPrefix(context.query) }) {
             return nil
         }
-
-        let remainingText = String(rawCommand[commandEnd...].drop(while: { $0.isWhitespace }))
-        return (skill, remainingText)
-    }
-
-    private func selectedSkillsRow(_ skills: [ComposerSkill]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(skills) { skill in
-                    selectedSkillChip(skill)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-        }
-    }
-
-    private func selectedSkillChip(_ skill: ComposerSkill) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-            Text("/\(skill.name)")
-                .font(DS.monoFontSmall)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(skill.source)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-            Button {
-                selectedSkills.removeAll { $0.id == skill.id }
-                updateSlashResults()
-                requestComposerFocus()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 26)
-        .background(
-            Capsule()
-                .fill(Color.helmSelected.opacity(0.9))
-        )
-        .overlay(
-            Capsule()
-                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-        )
+        return skill
     }
 
     private var attachmentRow: some View {
@@ -1139,7 +1088,7 @@ private struct SlashSkillRow: View {
     }
 }
 
-private struct ComposerSkill: Identifiable, Hashable {
+struct ComposerSkill: Identifiable, Hashable {
     let id: String
     let name: String
     let description: String
@@ -1150,7 +1099,7 @@ private struct ComposerSkill: Identifiable, Hashable {
     let searchHaystack: String
     let searchNameCharacters: [Character]
 
-    func matchScore(for rawQuery: String) -> ComposerSkillMatchScore? {
+    fileprivate func matchScore(for rawQuery: String) -> ComposerSkillMatchScore? {
         let query = Self.normalizedSearchText(rawQuery)
         guard !query.isEmpty else { return nil }
 
