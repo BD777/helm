@@ -20,6 +20,8 @@ struct ComposerTextView: NSViewRepresentable {
     let minLines: Int
     let maxLines: Int
     let focusRequest: Int
+    let onKeyDown: (NSEvent) -> Bool
+    let onTextCommand: (ComposerTextCommand) -> Bool
     let onSend: () -> Void
 
     static let font = NSFont.systemFont(ofSize: 13.5)
@@ -42,6 +44,8 @@ struct ComposerTextView: NSViewRepresentable {
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         tv.placeholder = placeholder
+        tv.onKeyDown = onKeyDown
+        tv.onTextCommand = onTextCommand
         tv.onCommandReturn = onSend
 
         let scroll = NSScrollView()
@@ -58,6 +62,8 @@ struct ComposerTextView: NSViewRepresentable {
         guard let tv = scroll.documentView as? PlaceholderTextView else { return }
         if tv.string != text { tv.string = text }
         tv.placeholder = placeholder
+        tv.onKeyDown = onKeyDown
+        tv.onTextCommand = onTextCommand
         tv.onCommandReturn = onSend
         if context.coordinator.consumeFocusRequest(focusRequest) {
             context.coordinator.focus(tv)
@@ -132,6 +138,13 @@ struct ComposerTextView: NSViewRepresentable {
     }
 }
 
+enum ComposerTextCommand {
+    case moveUp
+    case moveDown
+    case accept
+    case cancel
+}
+
 /// NSTextView with a placeholder string and ⌘+Return forwarding.
 final class PlaceholderTextView: NSTextView {
     var placeholder: String = "" {
@@ -142,6 +155,8 @@ final class PlaceholderTextView: NSTextView {
         }
     }
     var onCommandReturn: () -> Void = {}
+    var onKeyDown: (NSEvent) -> Bool = { _ in false }
+    var onTextCommand: (ComposerTextCommand) -> Bool = { _ in false }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
@@ -161,11 +176,49 @@ final class PlaceholderTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if onKeyDown(event) {
+            return
+        }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 36, flags == .command {
             onCommandReturn()
             return
         }
         super.keyDown(with: event)
+    }
+
+    override func moveUp(_ sender: Any?) {
+        if onTextCommand(.moveUp) {
+            return
+        }
+        super.moveUp(sender)
+    }
+
+    override func moveDown(_ sender: Any?) {
+        if onTextCommand(.moveDown) {
+            return
+        }
+        super.moveDown(sender)
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        if onTextCommand(.accept) {
+            return
+        }
+        super.insertNewline(sender)
+    }
+
+    override func insertTab(_ sender: Any?) {
+        if onTextCommand(.accept) {
+            return
+        }
+        super.insertTab(sender)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if onTextCommand(.cancel) {
+            return
+        }
+        super.cancelOperation(sender)
     }
 }

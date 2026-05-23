@@ -13,6 +13,9 @@ struct ComposerView: View {
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
     @State private var footerWidth: CGFloat = 0
+    @State private var skills: [ComposerSkill] = []
+    @State private var slashHighlightedId: String?
+    @State private var slashSuppressedText: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +31,7 @@ struct ComposerView: View {
         .background(Color.helmChatBg)
         .onAppear {
             loadDraft(for: store.selectedSessionId)
+            refreshSkills()
             installPasteMonitor()
             requestComposerFocus()
         }
@@ -43,6 +47,12 @@ struct ComposerView: View {
         }
         .onChange(of: externalFocusRequest) { _, _ in
             requestComposerFocus()
+        }
+        .onChange(of: text) { _, _ in
+            if slashSuppressedText != text {
+                slashSuppressedText = nil
+            }
+            syncSlashHighlight()
         }
         .onDisappear { removePasteMonitor() }
     }
@@ -75,6 +85,8 @@ struct ComposerView: View {
                 minLines: 2,
                 maxLines: 11,
                 focusRequest: focusRequest,
+                onKeyDown: handleComposerKeyDown,
+                onTextCommand: handleComposerTextCommand,
                 onSend: sendIfPossible
             )
             .padding(.horizontal, 10)
@@ -89,6 +101,22 @@ struct ComposerView: View {
                         .stroke(Color.helmBorderStrong, lineWidth: 1)
                 )
         )
+        .overlay(alignment: .topLeading) {
+            if slashMenuVisible {
+                SlashSkillMenu(
+                    skills: slashFilteredSkills,
+                    highlightedId: currentSlashHighlight,
+                    query: slashQuery ?? "",
+                    onHover: { slashHighlightedId = $0 },
+                    onSelect: insertSkillCommand
+                )
+                .frame(width: slashMenuWidth, height: slashMenuHeight)
+                .offset(x: 0, y: -(slashMenuHeight + 8))
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
+                .zIndex(10)
+            }
+        }
+        .animation(.easeOut(duration: 0.10), value: slashMenuVisible)
     }
 
     private var hasComposerContent: Bool {
@@ -167,6 +195,128 @@ struct ComposerView: View {
             drafts[sessionId] = nil
         }
         store.send(toSend, attachments: toSendAttachments)
+    }
+
+    // MARK: - Slash skill picker
+
+    private var slashQuery: String? {
+        guard text.hasPrefix("/") else { return nil }
+        let rawQuery = String(text.dropFirst())
+        guard rawQuery.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+            return nil
+        }
+        return rawQuery.lowercased()
+    }
+
+    private var slashMenuVisible: Bool {
+        slashQuery != nil && slashSuppressedText != text && !skills.isEmpty
+    }
+
+    private var slashFilteredSkills: [ComposerSkill] {
+        guard let query = slashQuery else { return [] }
+        guard !query.isEmpty else { return skills }
+        return skills.filter { skill in
+            skill.haystack.contains(query)
+        }
+    }
+
+    private var currentSlashHighlight: String? {
+        if let slashHighlightedId,
+           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
+            return slashHighlightedId
+        }
+        return slashFilteredSkills.first?.id
+    }
+
+    private var slashMenuWidth: CGFloat {
+        guard footerWidth > 0 else { return 560 }
+        return min(560, max(300, footerWidth))
+    }
+
+    private var slashMenuHeight: CGFloat {
+        let visibleRows = max(1, min(6, slashFilteredSkills.count))
+        return CGFloat(visibleRows * 54 + 41)
+    }
+
+    private func refreshSkills() {
+        skills = ComposerSkillCatalog.load()
+        syncSlashHighlight()
+    }
+
+    private func syncSlashHighlight() {
+        guard slashQuery != nil else {
+            slashHighlightedId = nil
+            return
+        }
+        if let slashHighlightedId,
+           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
+            return
+        }
+        slashHighlightedId = slashFilteredSkills.first?.id
+    }
+
+    private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
+        guard slashMenuVisible else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.isEmpty else { return false }
+
+        switch event.keyCode {
+        case 125:
+            moveSlashHighlight(by: 1)
+            return true
+        case 126:
+            moveSlashHighlight(by: -1)
+            return true
+        case 36, 48, 76:
+            insertHighlightedSkillCommand()
+            return true
+        case 53:
+            slashSuppressedText = text
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func handleComposerTextCommand(_ command: ComposerTextCommand) -> Bool {
+        guard slashMenuVisible else { return false }
+        switch command {
+        case .moveUp:
+            moveSlashHighlight(by: -1)
+            return true
+        case .moveDown:
+            moveSlashHighlight(by: 1)
+            return true
+        case .accept:
+            insertHighlightedSkillCommand()
+            return true
+        case .cancel:
+            slashSuppressedText = text
+            return true
+        }
+    }
+
+    private func moveSlashHighlight(by offset: Int) {
+        let list = slashFilteredSkills
+        guard !list.isEmpty else { return }
+        let current = currentSlashHighlight.flatMap { id in
+            list.firstIndex { $0.id == id }
+        } ?? 0
+        slashHighlightedId = list[(current + offset + list.count) % list.count].id
+    }
+
+    private func insertHighlightedSkillCommand() {
+        guard let id = currentSlashHighlight,
+              let skill = slashFilteredSkills.first(where: { $0.id == id })
+        else { return }
+        insertSkillCommand(skill)
+    }
+
+    private func insertSkillCommand(_ skill: ComposerSkill) {
+        let command = "/\(skill.name) "
+        text = command
+        slashSuppressedText = command
+        requestComposerFocus()
     }
 
     private var attachmentRow: some View {
@@ -650,6 +800,308 @@ struct ComposerView: View {
         }
         text = draft.text
         attachments = draft.attachments
+    }
+}
+
+private struct SlashSkillMenu: View {
+    let skills: [ComposerSkill]
+    let highlightedId: String?
+    let query: String
+    let onHover: (String) -> Void
+    let onSelect: (ComposerSkill) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                Text("Skills")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !query.isEmpty {
+                    Text("/\(query)")
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+
+            Rectangle()
+                .fill(Color.helmBorder)
+                .frame(height: 1)
+
+            if skills.isEmpty {
+                HStack(spacing: 9) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                    Text("No matching skills")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 54)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(skills) { skill in
+                            Button {
+                                onSelect(skill)
+                            } label: {
+                                SlashSkillRow(
+                                    skill: skill,
+                                    isHighlighted: skill.id == highlightedId
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .onHover { hovering in
+                                if hovering {
+                                    onHover(skill.id)
+                                }
+                            }
+                        }
+                    }
+                    .padding(6)
+                }
+            }
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 10)
+    }
+}
+
+private struct SlashSkillRow: View {
+    let skill: ComposerSkill
+    let isHighlighted: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isHighlighted ? Color.accentColor : Color.secondary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("/\(skill.name)")
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(skill.source)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Text(skill.description.isEmpty ? skill.path : skill.description)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 52)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(isHighlighted ? Color.helmSelected : Color.clear)
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+private struct ComposerSkill: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let description: String
+    let source: String
+    let path: String
+    let haystack: String
+}
+
+private enum ComposerSkillCatalog {
+    static func load(fileManager: FileManager = .default) -> [ComposerSkill] {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let env = ProcessInfo.processInfo.environment
+        let codexHome = env["CODEX_HOME"].map(expandHome) ?? home.appendingPathComponent(".codex", isDirectory: true)
+        let agentsHome = env["AGENTS_HOME"].map(expandHome) ?? home.appendingPathComponent(".agents", isDirectory: true)
+        let claudeHome = env["CLAUDE_CONFIG_DIR"].map(expandHome) ?? home.appendingPathComponent(".claude", isDirectory: true)
+
+        let roots: [(label: String, url: URL, depth: Int)] = [
+            ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
+            ("Agents", agentsHome.appendingPathComponent("skills", isDirectory: true), 2),
+            ("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2),
+            ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
+        ]
+
+        var skillsByName: [String: ComposerSkill] = [:]
+        var seenPaths = Set<String>()
+        for root in roots {
+            for fileURL in skillFiles(in: root.url, maxDepth: root.depth, fileManager: fileManager) {
+                let path = fileURL.standardizedFileURL.path
+                guard seenPaths.insert(path).inserted,
+                      let skill = parseSkill(at: fileURL, source: sourceLabel(for: fileURL, fallback: root.label))
+                else { continue }
+                let key = skill.name.lowercased()
+                if skillsByName[key] == nil {
+                    skillsByName[key] = skill
+                }
+            }
+        }
+
+        return skillsByName.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private static func skillFiles(in root: URL,
+                                   maxDepth: Int,
+                                   fileManager: FileManager) -> [URL] {
+        guard maxDepth >= 0,
+              fileManager.fileExists(atPath: root.path)
+        else { return [] }
+
+        var out: [URL] = []
+        walk(root, depth: maxDepth, fileManager: fileManager, out: &out)
+        return out
+    }
+
+    private static func walk(_ directory: URL,
+                             depth: Int,
+                             fileManager: FileManager,
+                             out: inout [URL]) {
+        guard depth >= 0, out.count < 500 else { return }
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsPackageDescendants]
+        ) else { return }
+
+        if let skillFile = entries.first(where: { $0.lastPathComponent == "SKILL.md" }) {
+            out.append(skillFile)
+            return
+        }
+
+        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard out.count < 500 else { return }
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                continue
+            }
+            walk(entry, depth: depth - 1, fileManager: fileManager, out: &out)
+        }
+    }
+
+    private static func parseSkill(at url: URL, source: String) -> ComposerSkill? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let raw = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        var name = url.deletingLastPathComponent().lastPathComponent
+        var description = ""
+
+        if raw.hasPrefix("---") {
+            let lines = raw.components(separatedBy: .newlines)
+            for line in lines.dropFirst() {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed == "---" {
+                    break
+                }
+                guard let colon = trimmed.firstIndex(of: ":") else { continue }
+                let key = trimmed[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let value = trimmed[trimmed.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                switch key {
+                case "name":
+                    name = cleanYAMLScalar(String(value))
+                case "description":
+                    description = cleanYAMLScalar(String(value))
+                default:
+                    break
+                }
+            }
+        }
+
+        if description.isEmpty {
+            description = firstBodySummary(raw)
+        }
+
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { return nil }
+        let normalizedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let haystack = [normalizedName, normalizedDescription, source]
+            .joined(separator: " ")
+            .lowercased()
+
+        return ComposerSkill(
+            id: url.standardizedFileURL.path,
+            name: normalizedName,
+            description: normalizedDescription,
+            source: source,
+            path: url.path,
+            haystack: haystack
+        )
+    }
+
+    private static func sourceLabel(for url: URL, fallback: String) -> String {
+        let path = url.path
+        if path.contains("/.codex/skills/.system/") {
+            return "System"
+        }
+        if path.contains("/.codex/plugins/cache/") {
+            return "Plugin"
+        }
+        return fallback
+    }
+
+    private static func expandHome(_ raw: String) -> URL {
+        URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    private static func cleanYAMLScalar(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return trimmed }
+        if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) ||
+            (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")) {
+            return String(trimmed.dropFirst().dropLast())
+        }
+        return trimmed
+    }
+
+    private static func firstBodySummary(_ raw: String) -> String {
+        let lines = raw.components(separatedBy: .newlines)
+        var inFrontmatter = raw.hasPrefix("---")
+        var skippedOpening = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if inFrontmatter {
+                if !skippedOpening {
+                    skippedOpening = true
+                    continue
+                }
+                if trimmed == "---" {
+                    inFrontmatter = false
+                }
+                continue
+            }
+            guard !trimmed.isEmpty,
+                  !trimmed.hasPrefix("#"),
+                  !trimmed.hasPrefix("```")
+            else { continue }
+            return String(trimmed.prefix(160))
+        }
+        return ""
     }
 }
 
