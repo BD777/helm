@@ -628,10 +628,14 @@ final class AppStore {
               sessions[idx].transcript.isEmpty
         else { return false }
 
-        let snapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+        let rawSnapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+        let snapshot = Self.removingRecoverableResumeErrors(from: rawSnapshot)
         guard !snapshot.isEmpty else { return false }
 
         sessions[idx].transcript = snapshot
+        if snapshot.count != rawSnapshot.count {
+            TranscriptSnapshotStore.save(sessionId: sessionId, items: snapshot)
+        }
         NSLog("[helm.history] restored %ld snapshot items for %@",
               snapshot.count, sessionId.uuidString)
         return true
@@ -649,7 +653,9 @@ final class AppStore {
     /// message so input fragments and tool_results can land on the right call.
     private var toolMap: [String: UUID] = [:]
 
-    func send(_ prompt: String, attachments: [ImageAttachment] = []) {
+    func send(_ prompt: String,
+              displayParts: [Part]? = nil,
+              attachments: [ImageAttachment] = []) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isStreaming, !trimmed.isEmpty || !attachments.isEmpty else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
@@ -683,8 +689,10 @@ final class AppStore {
             return
         }
 
-        var userParts: [Part] = []
-        if !trimmed.isEmpty { userParts.append(.text(trimmed)) }
+        var userParts: [Part] = displayParts ?? []
+        if userParts.isEmpty, !trimmed.isEmpty {
+            userParts.append(.text(trimmed))
+        }
         for att in attachments { userParts.append(.image(att.fileURL)) }
         let userMsg = Message(
             id: UUID(), role: .user, who: "you", meta: nil,
@@ -734,19 +742,16 @@ final class AppStore {
         do {
             let stream = try adapter.start(prompt: trimmed, attachments: attachments, session: session, run: runConfig, project: project)
             streamTask = Task { [weak self] in
-                do {
-                    for try await event in stream {
-                        guard !Task.isCancelled else { break }
-                        self?.handle(event, runId: runId,
-                                     sessionId: sessionId,
-                                     assistantId: assistantId)
-                    }
-                } catch {
-                    self?.handle(.error(error.localizedDescription),
-                                 runId: runId,
-                                 sessionId: sessionId, assistantId: assistantId)
-                }
-                self?.finishStreaming(runId: runId)
+                await self?.consumeAgentStream(stream,
+                                               runId: runId,
+                                               sessionId: sessionId,
+                                               assistantId: assistantId,
+                                               prompt: trimmed,
+                                               attachments: attachments,
+                                               project: project,
+                                               profile: profile,
+                                               runConfig: runConfig,
+                                               retryCount: 0)
             }
         } catch {
             appendError(to: sIdx, "Failed to start agent: \(error.localizedDescription)")
@@ -780,6 +785,133 @@ final class AppStore {
         activeAssistantId = nil
         activeRunStartedAt = nil
         toolMap = [:]
+    }
+
+    private func consumeAgentStream(_ stream: AsyncThrowingStream<AgentEvent, Error>,
+                                    runId: UUID,
+                                    sessionId: UUID,
+                                    assistantId: UUID,
+                                    prompt: String,
+                                    attachments: [ImageAttachment],
+                                    project: Project,
+                                    profile: Profile,
+                                    runConfig: RunConfig,
+                                    retryCount: Int) async {
+        var sawMissingConversation = false
+        do {
+            for try await event in stream {
+                guard !Task.isCancelled else { break }
+                if shouldRecoverMissingConversation(from: event, retryCount: retryCount) {
+                    sawMissingConversation = true
+                    continue
+                }
+                handle(event, runId: runId,
+                       sessionId: sessionId,
+                       assistantId: assistantId)
+            }
+        } catch {
+            let event = AgentEvent.error(error.localizedDescription)
+            if shouldRecoverMissingConversation(from: event, retryCount: retryCount) {
+                sawMissingConversation = true
+            } else {
+                handle(event, runId: runId,
+                       sessionId: sessionId,
+                       assistantId: assistantId)
+            }
+        }
+
+        if sawMissingConversation,
+           retryCount == 0,
+           await retryAfterMissingConversation(runId: runId,
+                                               sessionId: sessionId,
+                                               assistantId: assistantId,
+                                               prompt: prompt,
+                                               attachments: attachments,
+                                               project: project,
+                                               profile: profile,
+                                               runConfig: runConfig) {
+            return
+        }
+
+        finishStreaming(runId: runId)
+    }
+
+    private func shouldRecoverMissingConversation(from event: AgentEvent,
+                                                  retryCount: Int) -> Bool {
+        guard retryCount == 0 else { return false }
+        switch event {
+        case .error(let detail):
+            return Self.isMissingConversationError(detail)
+        case .finalResult(let text, let isError):
+            return isError && Self.isMissingConversationError(text)
+        default:
+            return false
+        }
+    }
+
+    private func retryAfterMissingConversation(runId: UUID,
+                                               sessionId: UUID,
+                                               assistantId: UUID,
+                                               prompt: String,
+                                               attachments: [ImageAttachment],
+                                               project: Project,
+                                               profile: Profile,
+                                               runConfig: RunConfig) async -> Bool {
+        guard activeRunId == runId,
+              let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
+        else { return false }
+
+        let staleVendorSessionId = sessions[sIdx].vendorSessionId
+        sessions[sIdx].vendorSessionId = nil
+        removeRecoverableResumeErrors(from: sIdx)
+        mutateAssistant(at: sIdx, id: assistantId) { msg in
+            msg.role = .assistant(meta: "thinking…")
+            msg.meta = "thinking…"
+            msg.parts.removeAll { part in
+                if case .text(let text) = part {
+                    return Self.isRecoverableAgentErrorArtifact(text)
+                }
+                return false
+            }
+        }
+        scheduleStateSave()
+        NSLog("[helm.agent] stale vendor session %@ for %@; retrying without resume",
+              staleVendorSessionId ?? "<nil>",
+              sessionId.uuidString)
+
+        let adapter: AgentAdapter
+        switch profile.vendor {
+        case .claude: adapter = ClaudeLocalAdapter()
+        case .codex:  adapter = CodexLocalAdapter()
+        }
+        currentAdapter = adapter
+        activeRunStartedAt = Date()
+
+        do {
+            let retrySession = sessions[sIdx]
+            let retryStream = try adapter.start(prompt: prompt,
+                                                attachments: attachments,
+                                                session: retrySession,
+                                                run: runConfig,
+                                                project: project)
+            await consumeAgentStream(retryStream,
+                                     runId: runId,
+                                     sessionId: sessionId,
+                                     assistantId: assistantId,
+                                     prompt: prompt,
+                                     attachments: attachments,
+                                     project: project,
+                                     profile: profile,
+                                     runConfig: runConfig,
+                                     retryCount: 1)
+            return true
+        } catch {
+            handle(.error("Failed to restart agent after clearing stale session: \(error.localizedDescription)"),
+                   runId: runId,
+                   sessionId: sessionId,
+                   assistantId: assistantId)
+            return false
+        }
     }
 
     private func handle(_ event: AgentEvent, runId: UUID,
@@ -883,6 +1015,40 @@ final class AppStore {
                 msg.meta = "error"
                 msg.parts.append(.text("⚠️ " + detail))
             }
+        }
+    }
+
+    private static func isMissingConversationError(_ detail: String) -> Bool {
+        detail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .contains("no conversation found with session id")
+    }
+
+    private static func isRecoverableAgentErrorArtifact(_ detail: String) -> Bool {
+        let normalized = detail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized.contains("no conversation found with session id")
+            || normalized.contains("agent reported an error but produced no output")
+    }
+
+    private func removeRecoverableResumeErrors(from sIdx: Int) {
+        let cleaned = Self.removingRecoverableResumeErrors(from: sessions[sIdx].transcript)
+        guard cleaned.count != sessions[sIdx].transcript.count else { return }
+        sessions[sIdx].transcript = cleaned
+    }
+
+    private static func removingRecoverableResumeErrors(from items: [TranscriptItem]) -> [TranscriptItem] {
+        items.filter { item in
+            guard case .message(let msg) = item,
+                  case .assistant = msg.role,
+                  msg.meta == "error",
+                  msg.parts.count == 1,
+                  case .text(let text) = msg.parts[0],
+                  isRecoverableAgentErrorArtifact(text)
+            else { return true }
+            return false
         }
     }
 

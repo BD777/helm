@@ -294,7 +294,11 @@ final class ClaudeStreamParser {
 
         case "result":
             let isError = obj["is_error"] as? Bool ?? false
-            let text = obj["result"] as? String ?? ""
+            let errors = obj["errors"] as? [String] ?? []
+            let resultText = obj["result"] as? String ?? ""
+            let text = resultText.isEmpty && isError
+                ? errors.joined(separator: "\n")
+                : resultText
             var out: [AgentEvent] = []
             if let sid = obj["session_id"] as? String { out.append(.sessionId(sid)) }
             out.append(.finalResult(text: text, isError: isError))

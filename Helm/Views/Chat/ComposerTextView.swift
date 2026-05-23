@@ -133,20 +133,27 @@ struct ComposerTextView: NSViewRepresentable {
             tv.typingAttributes = ComposerTextView.plainTextAttributes
             let localText = tv.string
             let localSkillChips = tv.skillChips()
+            let localSlashContext = tv.currentSlashContext()
             let externalTextBeforeLocalEdit = parent.text
             let externalSkillChipsBeforeLocalEdit = parent.skillChips
-            parent.text = localText
-            parent.skillChips = localSkillChips
             markPendingLocalEdit(text: localText,
                                  skillChips: localSkillChips,
                                  externalText: externalTextBeforeLocalEdit,
                                  externalSkillChips: externalSkillChipsBeforeLocalEdit)
-            parent.onSlashContextChange(tv.currentSlashContext())
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.parent.text = localText
+                self.parent.skillChips = localSkillChips
+                self.parent.onSlashContextChange(localSlashContext)
+            }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let tv = notification.object as? PlaceholderTextView else { return }
-            parent.onSlashContextChange(tv.currentSlashContext())
+            let localSlashContext = tv.currentSlashContext()
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onSlashContextChange(localSlashContext)
+            }
         }
 
         func consumeFocusRequest(_ request: Int) -> Bool {
@@ -299,7 +306,7 @@ final class PlaceholderTextView: NSTextView {
         didChangeText()
         selectedRange = NSRange(location: replacementRange.location + insertion.length, length: 0)
         typingAttributes = ComposerTextView.plainTextAttributes
-        onSlashContextChange(currentSlashContext())
+        notifySlashContextChanged()
     }
 
     func skillChips() -> [ComposerSkill] {
@@ -449,8 +456,15 @@ final class PlaceholderTextView: NSTextView {
         storage.replaceCharacters(in: range, with: "")
         didChangeText()
         selectedRange = NSRange(location: range.location, length: 0)
-        onSlashContextChange(currentSlashContext())
+        notifySlashContextChanged()
         return true
+    }
+
+    private func notifySlashContextChanged() {
+        let slashContext = currentSlashContext()
+        DispatchQueue.main.async { [weak self] in
+            self?.onSlashContextChange(slashContext)
+        }
     }
 }
 
@@ -489,7 +503,7 @@ private final class ComposerSkillTextAttachment: NSTextAttachment {
     }
 }
 
-private enum ComposerSkillChipRenderer {
+enum ComposerSkillChipRenderer {
     private static let height: CGFloat = 18
     private static let iconSize: CGFloat = 13
     private static let iconTextGap: CGFloat = 2
@@ -499,13 +513,17 @@ private enum ComposerSkillChipRenderer {
     }
 
     static func image(for skill: ComposerSkill) -> NSImage {
+        image(forName: skill.name)
+    }
+
+    static func image(forName skillName: String) -> NSImage {
         let accent = NSColor.controlAccentColor
         let nameAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13.5, weight: .medium),
             .foregroundColor: accent,
         ]
 
-        let name = skill.name as NSString
+        let name = skillName as NSString
         let nameSize = name.size(withAttributes: nameAttributes)
         let textX = iconSize + iconTextGap
         let width = min(260, textX + ceil(nameSize.width))

@@ -409,6 +409,7 @@ enum SessionEvent: Identifiable, Hashable, Codable {
 
 enum Part: Hashable, Identifiable, Codable {
     case text(String)
+    case skillText([SkillTextSegment])
     case toolCall(ToolCall)
     /// Local file URL for an image attached to a user message. We store the
     /// path (not bytes) so state.json / RAM stay small; the file lives under
@@ -418,9 +419,24 @@ enum Part: Hashable, Identifiable, Codable {
     var id: String {
         switch self {
         case .text(let s):     return "t:" + String(s.hashValue)
+        case .skillText(let segments):
+            return "s:" + String(segments.hashValue)
         case .toolCall(let t): return "c:" + t.id.uuidString
         case .image(let u):    return "i:" + u.lastPathComponent
         }
+    }
+}
+
+struct SkillTextSegment: Hashable, Codable {
+    var text: String?
+    var skillName: String?
+
+    static func text(_ value: String) -> SkillTextSegment {
+        SkillTextSegment(text: value, skillName: nil)
+    }
+
+    static func skill(_ name: String) -> SkillTextSegment {
+        SkillTextSegment(text: nil, skillName: name)
     }
 }
 

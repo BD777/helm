@@ -18,6 +18,7 @@ struct ComposerView: View {
     @State private var skills: [ComposerSkill] = []
     @State private var isRefreshingSkills = false
     @State private var skillRefreshToken = 0
+    @State private var skillCatalogSignature: String?
     @State private var slashFilteredSkills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
     @State private var slashScrollTargetId: String?
@@ -38,13 +39,14 @@ struct ComposerView: View {
         .background(Color.helmChatBg)
         .onAppear {
             loadDraft(for: store.selectedSessionId)
-            refreshSkillsAsync()
+            refreshSkillsAsync(force: true)
             installPasteMonitor()
             requestComposerFocus()
         }
         .onChange(of: store.selectedSessionId) { _, newSessionId in
             saveCurrentDraft()
             loadDraft(for: newSessionId)
+            refreshSkillsAsync(force: true)
             requestComposerFocus()
         }
         .onChange(of: pickerOpen) { _, isOpen in
@@ -54,6 +56,9 @@ struct ComposerView: View {
         }
         .onChange(of: externalFocusRequest) { _, _ in
             requestComposerFocus()
+        }
+        .onChange(of: currentSkillCatalogContext?.signature) { _, _ in
+            refreshSkillsAsync(force: true)
         }
         .onDisappear { removePasteMonitor() }
     }
@@ -196,6 +201,7 @@ struct ComposerView: View {
             return
         }
         let toSend = composedPrompt()
+        let displayParts = composerDisplayParts()
         let toSendAttachments = attachments
         text = ""
         selectedSkills = []
@@ -203,7 +209,7 @@ struct ComposerView: View {
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
         }
-        store.send(toSend, attachments: toSendAttachments)
+        store.send(toSend, displayParts: displayParts, attachments: toSendAttachments)
     }
 
     private func composedPrompt() -> String {
@@ -212,10 +218,42 @@ struct ComposerView: View {
                                    vendor: selectedVendor)
     }
 
+    private func composerDisplayParts() -> [Part] {
+        Self.displayPartsForComposerText(text,
+                                         skillChips: selectedSkills,
+                                         fallbackText: composedPrompt())
+    }
+
     private var selectedVendor: Vendor {
-        store.selectedSession
-            .flatMap { store.profile($0.profileId) }?
-            .vendor ?? .codex
+        selectedProfile?.vendor ?? .codex
+    }
+
+    private var selectedProfile: Profile? {
+        store.selectedSession.flatMap { store.profile($0.profileId) }
+    }
+
+    private var selectedProject: Project? {
+        guard let session = store.selectedSession else { return nil }
+        return store.project(for: session.id)
+    }
+
+    private var currentSkillCatalogContext: ComposerSkillCatalog.Context? {
+        guard let profile = selectedProfile,
+              let project = selectedProject
+        else { return nil }
+
+        let sshHost: String?
+        if case .ssh(let host, _, _) = project.location {
+            sshHost = host
+        } else {
+            sshHost = nil
+        }
+        return ComposerSkillCatalog.Context(
+            vendor: profile.vendor,
+            projectPath: project.location.pathString,
+            sshHost: sshHost,
+            configRoot: profile.configRoot
+        )
     }
 
     private static func serializeComposerText(_ text: String,
@@ -238,10 +276,80 @@ struct ComposerView: View {
     private static func skillCommand(for skill: ComposerSkill, vendor: Vendor) -> String {
         switch vendor {
         case .claude:
-            return "/\(skill.name)"
+            return "\(skill.name) skill"
         case .codex:
             return "$\(skill.name)"
         }
+    }
+
+    private static func displayPartsForComposerText(_ text: String,
+                                                    skillChips: [ComposerSkill],
+                                                    fallbackText: String) -> [Part] {
+        guard text.contains(ComposerTextView.attachmentPlaceholder),
+              !skillChips.isEmpty
+        else {
+            return fallbackText.isEmpty ? [] : [.text(fallbackText)]
+        }
+
+        var segments: [SkillTextSegment] = []
+        var textBuffer = ""
+        var skillIndex = 0
+
+        func flushText() {
+            guard !textBuffer.isEmpty else { return }
+            segments.append(.text(textBuffer))
+            textBuffer = ""
+        }
+
+        for character in text {
+            if String(character) == ComposerTextView.attachmentPlaceholder,
+               skillIndex < skillChips.count {
+                flushText()
+                segments.append(.skill(skillChips[skillIndex].name))
+                skillIndex += 1
+            } else {
+                textBuffer.append(character)
+            }
+        }
+        flushText()
+        trimOuterWhitespace(in: &segments)
+        return segments.isEmpty ? [] : [.skillText(segments)]
+    }
+
+    private static func trimOuterWhitespace(in segments: inout [SkillTextSegment]) {
+        while let first = segments.first,
+              first.skillName == nil,
+              (first.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.removeFirst()
+        }
+        if let first = segments.first,
+           first.skillName == nil,
+           let text = first.text {
+            segments[0] = .text(trimLeadingWhitespace(text))
+        }
+
+        while let last = segments.last,
+              last.skillName == nil,
+              (last.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.removeLast()
+        }
+        if let last = segments.last,
+           last.skillName == nil,
+           let text = last.text {
+            segments[segments.count - 1] = .text(trimTrailingWhitespace(text))
+        }
+    }
+
+    private static func trimLeadingWhitespace(_ value: String) -> String {
+        String(value.drop(while: { $0.isWhitespace }))
+    }
+
+    private static func trimTrailingWhitespace(_ value: String) -> String {
+        var result = value
+        while result.last?.isWhitespace == true {
+            result.removeLast()
+        }
+        return result
     }
 
     // MARK: - Slash skill picker
@@ -273,15 +381,21 @@ struct ComposerView: View {
         return CGFloat(visibleRows * 54 + 41)
     }
 
-    private func refreshSkillsAsync() {
-        guard !isRefreshingSkills else { return }
+    private func refreshSkillsAsync(force: Bool = false) {
+        guard let context = currentSkillCatalogContext else {
+            skills = []
+            updateSlashResults()
+            return
+        }
+        guard force || skillCatalogSignature != context.signature || skills.isEmpty else { return }
         skillRefreshToken += 1
         let token = skillRefreshToken
+        skillCatalogSignature = context.signature
         isRefreshingSkills = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let loadedSkills = ComposerSkillCatalog.load()
-            DispatchQueue.main.async {
+        Task.detached(priority: .userInitiated) {
+            let loadedSkills = await ComposerSkillCatalog.load(context: context)
+            await MainActor.run {
                 guard token == skillRefreshToken else { return }
                 skills = loadedSkills
                 isRefreshingSkills = false
@@ -449,9 +563,10 @@ struct ComposerView: View {
 
     private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
         guard !context.query.isEmpty else { return nil }
-        guard let skill = skills.first(where: { $0.searchName == context.query }) else {
-            return nil
-        }
+        let exactMatches = skills.filter { $0.searchName == context.query }
+        guard exactMatches.count == 1,
+              let skill = exactMatches.first
+        else { return nil }
         if skills.contains(where: { $0.searchName != context.query && $0.searchName.hasPrefix(context.query) }) {
             return nil
         }
@@ -1212,48 +1327,329 @@ private struct ComposerSkillMatchScore: Comparable, Equatable {
 }
 
 private enum ComposerSkillCatalog {
-    static func load(fileManager: FileManager = .default) -> [ComposerSkill] {
+    struct Context: Equatable {
+        let vendor: Vendor
+        let projectPath: String
+        let sshHost: String?
+        let configRoot: String?
+
+        var signature: String {
+            [
+                vendor.rawValue,
+                sshHost ?? "local",
+                projectPath,
+                configRoot ?? "",
+            ].joined(separator: "|")
+        }
+    }
+
+    static func load(context: Context,
+                     fileManager: FileManager = .default) async -> [ComposerSkill] {
+        if let host = context.sshHost {
+            return await loadRemote(context: context, host: host)
+        }
+        return loadLocal(context: context, fileManager: fileManager)
+    }
+
+    private static func loadLocal(context: Context,
+                                  fileManager: FileManager) -> [ComposerSkill] {
         let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
         let env = ProcessInfo.processInfo.environment
-        let codexHome = env["CODEX_HOME"].map(expandHome) ?? home.appendingPathComponent(".codex", isDirectory: true)
-        let agentsHome = env["AGENTS_HOME"].map(expandHome) ?? home.appendingPathComponent(".agents", isDirectory: true)
-        let claudeHome = env["CLAUDE_CONFIG_DIR"].map(expandHome) ?? home.appendingPathComponent(".claude", isDirectory: true)
+        let project = expandHome(context.projectPath)
+        let roots: [(label: String, url: URL, depth: Int)]
 
-        var roots: [(label: String, url: URL, depth: Int)] = [
-            ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
-            ("Agents", agentsHome.appendingPathComponent("skills", isDirectory: true), 2),
-            ("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2),
-            ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
-        ]
-        roots.append(contentsOf: linkedSkillRoots(
-            from: agentsHome.appendingPathComponent("skills/.my-skills-links.json"),
-            label: "My Skills",
-            fileManager: fileManager
-        ))
-        roots.append(contentsOf: linkedSkillRoots(
-            from: claudeHome.appendingPathComponent("skills/.my-skills-links.json"),
-            label: "My Skills",
-            fileManager: fileManager
-        ))
+        switch context.vendor {
+        case .claude:
+            let claudeHome = context.configRoot.map(expandHome)
+                ?? env["CLAUDE_CONFIG_DIR"].map(expandHome)
+                ?? home.appendingPathComponent(".claude", isDirectory: true)
+            roots = projectSkillRoots(project: project,
+                                      component: ".claude/skills",
+                                      label: "Project",
+                                      fileManager: fileManager)
+                + [("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2)]
+                + linkedSkillRoots(from: claudeHome.appendingPathComponent("skills/.my-skills-links.json"),
+                                   label: "My Skills",
+                                   fileManager: fileManager)
+        case .codex:
+            let codexHome = context.configRoot.map(expandHome)
+                ?? env["CODEX_HOME"].map(expandHome)
+                ?? home.appendingPathComponent(".codex", isDirectory: true)
+            let agentsHome = home.appendingPathComponent(".agents", isDirectory: true)
+            roots = codexProjectSkillRoots(project: project, fileManager: fileManager)
+                + [
+                    ("User", agentsHome.appendingPathComponent("skills", isDirectory: true), 3),
+                    ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
+                    ("Admin", URL(fileURLWithPath: "/etc/codex/skills", isDirectory: true), 3),
+                    ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
+                ]
+                + linkedSkillRoots(from: agentsHome.appendingPathComponent("skills/.my-skills-links.json"),
+                                   label: "My Skills",
+                                   fileManager: fileManager)
+        }
 
-        var skillsByName: [String: ComposerSkill] = [:]
+        var loadedSkills: [ComposerSkill] = []
         var seenPaths = Set<String>()
         for root in roots {
             for fileURL in skillFiles(in: root.url, maxDepth: root.depth, fileManager: fileManager) {
-                let path = fileURL.standardizedFileURL.path
+                let path = fileURL.resolvingSymlinksInPath().standardizedFileURL.path
                 guard seenPaths.insert(path).inserted,
                       let skill = parseSkill(at: fileURL, source: sourceLabel(for: fileURL, fallback: root.label))
                 else { continue }
-                let key = skill.name.lowercased()
-                if skillsByName[key] == nil {
-                    skillsByName[key] = skill
-                }
+                loadedSkills.append(skill)
             }
         }
 
-        return skillsByName.values.sorted {
+        return loadedSkills.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+    }
+
+    private static func codexProjectSkillRoots(project: URL,
+                                               fileManager: FileManager) -> [(label: String, url: URL, depth: Int)] {
+        let start = project.standardizedFileURL
+        let stop = nearestGitRoot(from: start, fileManager: fileManager) ?? start
+        var cursor = start
+        var roots: [(label: String, url: URL, depth: Int)] = []
+
+        while true {
+            roots.append(("Project", cursor.appendingPathComponent(".agents/skills", isDirectory: true), 3))
+            if cursor.path == stop.path { break }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path { break }
+            cursor = parent
+        }
+
+        return roots
+    }
+
+    private static func projectSkillRoots(project: URL,
+                                          component: String,
+                                          label: String,
+                                          fileManager: FileManager) -> [(label: String, url: URL, depth: Int)] {
+        let root = project.standardizedFileURL
+        var roots: [(label: String, url: URL, depth: Int)] = [
+            (label, root.appendingPathComponent(component, isDirectory: true), 3),
+        ]
+
+        if let gitRoot = nearestGitRoot(from: root, fileManager: fileManager),
+           gitRoot != root {
+            roots.append((label, gitRoot.appendingPathComponent(component, isDirectory: true), 3))
+        }
+        return roots
+    }
+
+    private static func nearestGitRoot(from url: URL, fileManager: FileManager) -> URL? {
+        var cursor = url
+        while true {
+            if fileManager.fileExists(atPath: cursor.appendingPathComponent(".git").path) {
+                return cursor
+            }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path { return nil }
+            cursor = parent
+        }
+    }
+
+    private static func loadRemote(context: Context, host: String) async -> [ComposerSkill] {
+        await Task.detached(priority: .userInitiated) {
+            let command = remoteSkillDiscoveryCommand(context: context)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(host: host,
+                                                 remoteCommand: command,
+                                                 batchMode: true,
+                                                 connectTimeout: 10)
+
+            let stdout = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = Pipe()
+
+            do {
+                try proc.run()
+            } catch {
+                return []
+            }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return [] }
+
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            guard let records = try? JSONDecoder().decode([RemoteSkillRecord].self, from: data) else {
+                return []
+            }
+
+            var loadedSkills: [ComposerSkill] = []
+            var seenPaths = Set<String>()
+            for record in records {
+                guard seenPaths.insert(record.path).inserted,
+                      let skill = makeSkill(name: record.name,
+                                            description: record.description,
+                                            source: record.source,
+                                            path: "\(host):\(record.path)")
+                else { continue }
+                loadedSkills.append(skill)
+            }
+            return loadedSkills.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        }.value
+    }
+
+    private static func remoteSkillDiscoveryCommand(context: Context) -> String {
+        let vendor = SSHRemote.shellQuote(context.vendor.rawValue)
+        let project = SSHRemote.shellQuote(context.projectPath)
+        return """
+        HELM_VENDOR=\(vendor); export HELM_VENDOR
+        HELM_PROJECT_PATH=\(project); export HELM_PROJECT_PATH
+        if command -v python3 >/dev/null 2>&1; then
+          python3 - <<'PY'
+        \(remoteSkillDiscoveryScript)
+        PY
+        elif command -v python >/dev/null 2>&1; then
+          python - <<'PY'
+        \(remoteSkillDiscoveryScript)
+        PY
+        else
+          printf '[]'
+        fi
+        """
+    }
+
+    private static let remoteSkillDiscoveryScript = #"""
+import json
+import os
+
+vendor = os.environ.get("HELM_VENDOR", "codex")
+project = os.path.expanduser(os.environ.get("HELM_PROJECT_PATH", "."))
+home = os.path.expanduser("~")
+
+def root(path):
+    return os.path.abspath(os.path.expanduser(path))
+
+if vendor == "claude":
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
+    roots = [
+        ("Project", root(os.path.join(project, ".claude", "skills")), 3),
+        ("Claude", root(os.path.join(config, "skills")), 2),
+    ]
+else:
+    config = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
+    agents_home = root(os.path.join(home, ".agents"))
+
+    def git_root(path):
+        cursor = root(path)
+        while True:
+            if os.path.exists(os.path.join(cursor, ".git")):
+                return cursor
+            parent = os.path.dirname(cursor)
+            if parent == cursor:
+                return None
+            cursor = parent
+
+    def codex_project_roots(path):
+        cursor = root(path)
+        stop = git_root(cursor) or cursor
+        out = []
+        while True:
+            out.append(("Project", root(os.path.join(cursor, ".agents", "skills")), 3))
+            if cursor == stop:
+                break
+            parent = os.path.dirname(cursor)
+            if parent == cursor:
+                break
+            cursor = parent
+        return out
+
+    roots = codex_project_roots(project) + [
+        ("User", root(os.path.join(agents_home, "skills")), 3),
+        ("Codex", root(os.path.join(config, "skills")), 3),
+        ("Admin", "/etc/codex/skills", 3),
+        ("Plugin", root(os.path.join(config, "plugins", "cache")), 7),
+    ]
+
+def frontmatter(raw):
+    out = {}
+    if not raw.startswith("---"):
+        return out
+    lines = raw.splitlines()
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        value = value.strip().strip('"').strip("'")
+        out[key.strip().lower()] = value
+    return out
+
+def body_summary(raw):
+    for line in raw.splitlines():
+        text = line.strip()
+        if text and text != "---" and not text.startswith("#"):
+            return text[:240]
+    return ""
+
+def parse_skill(path, source):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = fh.read(20000)
+    except Exception:
+        return None
+    meta = frontmatter(raw)
+    name = (meta.get("name") or os.path.basename(os.path.dirname(path))).strip()
+    if not name:
+        return None
+    return {
+        "name": name,
+        "description": (meta.get("description") or body_summary(raw)).strip(),
+        "source": source,
+        "path": path,
+    }
+
+def skill_files(start, depth, out, visited):
+    if len(out) >= 500 or depth < 0 or not os.path.exists(start):
+        return
+    real = os.path.realpath(start)
+    if real in visited:
+        return
+    visited.add(real)
+    try:
+        entries = list(os.scandir(start))
+    except Exception:
+        return
+    for entry in entries:
+        if entry.name == "SKILL.md" and entry.is_file(follow_symlinks=True):
+            out.append(entry.path)
+            return
+    dirs = [entry for entry in entries if entry.is_dir(follow_symlinks=True)]
+    for entry in sorted(dirs, key=lambda item: item.name.lower()):
+        skill_files(entry.path, depth - 1, out, visited)
+        if len(out) >= 500:
+            return
+
+records = []
+seen_paths = set()
+for label, start, depth in roots:
+    paths = []
+    skill_files(start, depth, paths, set())
+    for path in paths:
+        real = os.path.realpath(path)
+        if real in seen_paths:
+            continue
+        seen_paths.add(real)
+        record = parse_skill(path, label)
+        if record:
+            records.append(record)
+
+print(json.dumps(records, ensure_ascii=False))
+"""#
+
+    private struct RemoteSkillRecord: Decodable {
+        let name: String
+        let description: String
+        let source: String
+        let path: String
     }
 
     private static func linkedSkillRoots(from manifestURL: URL,
@@ -1282,15 +1678,19 @@ private enum ComposerSkillCatalog {
         else { return [] }
 
         var out: [URL] = []
-        walk(root, depth: maxDepth, fileManager: fileManager, out: &out)
+        var visited: Set<String> = []
+        walk(root, depth: maxDepth, fileManager: fileManager, visited: &visited, out: &out)
         return out
     }
 
     private static func walk(_ directory: URL,
                              depth: Int,
                              fileManager: FileManager,
+                             visited: inout Set<String>,
                              out: inout [URL]) {
         guard depth >= 0, out.count < 500 else { return }
+        let realPath = directory.resolvingSymlinksInPath().standardizedFileURL.path
+        guard visited.insert(realPath).inserted else { return }
         guard let entries = try? fileManager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -1304,10 +1704,13 @@ private enum ComposerSkillCatalog {
 
         for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             guard out.count < 500 else { return }
-            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue
+            else {
                 continue
             }
-            walk(entry, depth: depth - 1, fileManager: fileManager, out: &out)
+            walk(entry, depth: depth - 1, fileManager: fileManager, visited: &visited, out: &out)
         }
     }
 
@@ -1333,6 +1736,16 @@ private enum ComposerSkillCatalog {
             description = firstBodySummary(raw)
         }
 
+        return makeSkill(name: name,
+                         description: description,
+                         source: source,
+                         path: url.path)
+    }
+
+    private static func makeSkill(name: String,
+                                  description: String,
+                                  source: String,
+                                  path: String) -> ComposerSkill? {
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else { return nil }
         let normalizedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1342,11 +1755,11 @@ private enum ComposerSkillCatalog {
         let searchHaystack = ComposerSkill.normalizedSearchText(haystack)
 
         return ComposerSkill(
-            id: url.standardizedFileURL.path,
+            id: path,
             name: normalizedName,
             description: normalizedDescription,
             source: source,
-            path: url.path,
+            path: path,
             haystack: haystack,
             searchName: searchName,
             searchHaystack: searchHaystack,

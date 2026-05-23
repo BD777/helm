@@ -148,6 +148,8 @@ struct MessageListView: View {
             switch part {
             case .text(let text):
                 return "t\(text.count)"
+            case .skillText(let segments):
+                return "s\(segments.count):\(segments.hashValue)"
             case .toolCall(let call):
                 return "c\(call.id.uuidString):\(call.arg.count):\(call.body?.count ?? 0):\(call.status)"
             case .image(let url):
@@ -252,7 +254,7 @@ private final class ChatAutoScrollController: ObservableObject {
     func prepareForSessionChange() {
         scheduledScrollID += 1
         followsBottom = true
-        showJumpToBottom = false
+        setShowJumpToBottom(false)
     }
 
     func forceScrollToBottom(animated: Bool) {
@@ -266,7 +268,7 @@ private final class ChatAutoScrollController: ObservableObject {
             userDidScroll()
         } else if distanceFromBottom(in: scrollView) <= followResumeTolerance {
             followsBottom = true
-            showJumpToBottom = false
+            setShowJumpToBottom(false)
         }
     }
 
@@ -306,15 +308,15 @@ private final class ChatAutoScrollController: ObservableObject {
         guard let scrollView else { return }
         let distance = distanceFromBottom(in: scrollView)
         followsBottom = distance <= resumeTolerance
-        showJumpToBottom = distance > jumpButtonTolerance
+        setShowJumpToBottom(distance > jumpButtonTolerance)
     }
 
     private func refreshJumpButton() {
         guard let scrollView else {
-            showJumpToBottom = false
+            setShowJumpToBottom(false)
             return
         }
-        showJumpToBottom = distanceFromBottom(in: scrollView) > jumpButtonTolerance
+        setShowJumpToBottom(distanceFromBottom(in: scrollView) > jumpButtonTolerance)
     }
 
     private func observeDocumentView(_ documentView: NSView?) {
@@ -405,7 +407,7 @@ private final class ChatAutoScrollController: ObservableObject {
         let targetOrigin = clipView.constrainBoundsRect(requestedBounds).origin
         guard abs(clipView.bounds.origin.y - targetOrigin.y) > 0.5 else {
             followsBottom = true
-            showJumpToBottom = false
+            setShowJumpToBottom(false)
             return
         }
 
@@ -432,8 +434,20 @@ private final class ChatAutoScrollController: ObservableObject {
 
     private func finishProgrammaticScroll() {
         followsBottom = true
-        showJumpToBottom = false
+        setShowJumpToBottom(false)
         isProgrammaticScroll = false
+    }
+
+    private func setShowJumpToBottom(_ isVisible: Bool) {
+        guard showJumpToBottom != isVisible else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.showJumpToBottom != isVisible
+                else { return }
+                self.showJumpToBottom = isVisible
+            }
+        }
     }
 
     private var currentEventLooksLikeUserScroll: Bool {
@@ -613,6 +627,9 @@ struct MessageView: View {
         switch part {
         case .text(let s):
             MarkdownishText(s)
+                .padding(.top, 2)
+        case .skillText(let segments):
+            InlineSkillText(segments: segments)
                 .padding(.top, 2)
         case .toolCall(let t):
             ToolCallCard(call: t)
@@ -940,6 +957,80 @@ struct ImagePreviewOverlay: View {
             return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
         }
         return image.size
+    }
+}
+
+private struct InlineSkillText: NSViewRepresentable {
+    let segments: [SkillTextSegment]
+
+    func makeNSView(context: Context) -> NSTextView {
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = true
+        tv.drawsBackground = false
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.font = ComposerTextView.font
+        tv.textStorage?.setAttributedString(attributedText())
+        return tv
+    }
+
+    func updateNSView(_ tv: NSTextView, context: Context) {
+        tv.textStorage?.setAttributedString(attributedText())
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
+        guard let lm = nsView.layoutManager,
+              let tc = nsView.textContainer
+        else { return nil }
+        let width: CGFloat = {
+            if let w = proposal.width, w.isFinite, w > 0 { return w }
+            if nsView.bounds.width > 0 { return nsView.bounds.width }
+            return 600
+        }()
+        if tc.size.width != width {
+            tc.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        }
+        lm.ensureLayout(for: tc)
+        let used = lm.usedRect(for: tc)
+        return CGSize(width: width, height: max(lm.defaultLineHeight(for: ComposerTextView.font),
+                                                ceil(used.height)))
+    }
+
+    private func attributedText() -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        for segment in segments {
+            if let name = segment.skillName, !name.isEmpty {
+                out.append(NSAttributedString(attachment: MessageSkillTextAttachment(name: name)))
+            } else if let text = segment.text, !text.isEmpty {
+                out.append(NSAttributedString(string: text,
+                                              attributes: ComposerTextView.plainTextAttributes))
+            }
+        }
+        return out
+    }
+}
+
+private final class MessageSkillTextAttachment: NSTextAttachment {
+    init(name: String) {
+        super.init(data: nil, ofType: nil)
+        let image = ComposerSkillChipRenderer.image(forName: name)
+        self.image = image
+        self.bounds = NSRect(x: 0,
+                             y: ComposerSkillChipRenderer.baselineOffset,
+                             width: image.size.width,
+                             height: image.size.height)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
     }
 }
 
