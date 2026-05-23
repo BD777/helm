@@ -537,6 +537,34 @@ final class AppStore {
         scheduleStateSave()
     }
 
+    func setGoal(_ goal: SessionGoal?, on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard let goal else {
+            sessions[idx].goal = nil
+            scheduleStateSave()
+            return
+        }
+        let trimmed = goal.trimmedText
+        guard !trimmed.isEmpty else {
+            sessions[idx].goal = nil
+            scheduleStateSave()
+            return
+        }
+        sessions[idx].goal = SessionGoal(text: trimmed,
+                                         tokenBudget: goal.tokenBudget,
+                                         isComplete: goal.isComplete,
+                                         lastAppliedAt: goal.lastAppliedAt)
+        scheduleStateSave()
+    }
+
+    func markGoalComplete(on sessionId: UUID) {
+        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[idx].goal != nil
+        else { return }
+        sessions[idx].goal?.isComplete = true
+        scheduleStateSave()
+    }
+
     /// Update the session's Claude permission mode. No-op for non-Claude
     /// sessions (the field is still stored, just unused at spawn time).
     func setClaudePermission(_ mode: ClaudePermissionMode, on sessionId: UUID) {
@@ -669,13 +697,15 @@ final class AppStore {
                                               attachments: attachments)
         }
         sessions[sIdx].lastUpdate = "now"
-        let session = sessions[sIdx]
-        guard let project = projects.first(where: { $0.id == session.projectId }) else {
-            appendError(to: sIdx, "Session has no project (id=\(session.projectId))."); return
+        guard let project = projects.first(where: { $0.id == sessions[sIdx].projectId }) else {
+            appendError(to: sIdx, "Session has no project (id=\(sessions[sIdx].projectId))."); return
         }
-        guard let profile = profile(session.profileId) else {
+        guard let profile = profile(sessions[sIdx].profileId) else {
             appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return
         }
+
+        let activeGoal = sessions[sIdx].goal?.isActive == true ? sessions[sIdx].goal : nil
+        let session = sessions[sIdx]
 
         let runConfig: RunConfig
         do {
@@ -687,6 +717,24 @@ final class AppStore {
         } catch {
             appendError(to: sIdx, error.localizedDescription)
             return
+        }
+
+        let agentPrompt: String
+        if let activeGoal {
+            let appliedAt = Date()
+            sessions[sIdx].goal?.lastAppliedAt = appliedAt
+            sessions[sIdx].transcript.append(.event(.goalApplied(
+                id: UUID(),
+                goal: activeGoal.trimmedText,
+                vendor: profile.vendor,
+                appliedAt: appliedAt
+            )))
+            scheduleStateSave()
+            agentPrompt = Self.promptWithGoal(trimmed,
+                                              goal: activeGoal,
+                                              vendor: profile.vendor)
+        } else {
+            agentPrompt = trimmed
         }
 
         var userParts: [Part] = displayParts ?? []
@@ -740,13 +788,13 @@ final class AppStore {
         currentAdapter = adapter
 
         do {
-            let stream = try adapter.start(prompt: trimmed, attachments: attachments, session: session, run: runConfig, project: project)
+            let stream = try adapter.start(prompt: agentPrompt, attachments: attachments, session: session, run: runConfig, project: project)
             streamTask = Task { [weak self] in
                 await self?.consumeAgentStream(stream,
                                                runId: runId,
                                                sessionId: sessionId,
                                                assistantId: assistantId,
-                                               prompt: trimmed,
+                                               prompt: agentPrompt,
                                                attachments: attachments,
                                                project: project,
                                                profile: profile,
@@ -1142,6 +1190,29 @@ final class AppStore {
 
         guard base.count > maxLength else { return base }
         return String(base.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+    }
+
+    private static func promptWithGoal(_ prompt: String,
+                                       goal: SessionGoal,
+                                       vendor: Vendor) -> String {
+        let budgetLine = goal.tokenBudget.map {
+            "Token budget: \($0)"
+        } ?? "Token budget: not set"
+        return """
+        <helm_session_goal>
+        Status: active
+        Vendor: \(vendor.displayName)
+        \(budgetLine)
+        Objective: \(goal.trimmedText)
+
+        This block is emitted by Helm and is intended for the real \(vendor.displayName) executor.
+        Treat it as the active objective for the current conversation. Use the user's message below as the next step toward this objective. Do not ask the user to restate it. If the objective is already satisfied, say so clearly and explain the evidence.
+        </helm_session_goal>
+
+        <user_message>
+        \(prompt)
+        </user_message>
+        """
     }
 }
 

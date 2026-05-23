@@ -1,9 +1,8 @@
 import SwiftUI
 
 /// Inline marker rendered between dialog turns when the agent did something
-/// the user didn't directly author — today only Claude's auto-compact
-/// summary, but the layout (hairline rules + small label) is generic so
-/// future event kinds (model switch, permission change) can reuse it.
+/// the user didn't directly author, such as Claude's auto-compact summary
+/// or Helm attaching a session goal to a vendor turn.
 ///
 /// Click expands the captured summary text. We keep it collapsed by default
 /// because the summary is verbose and almost always uninteresting once the
@@ -18,6 +17,10 @@ struct SessionEventView: View {
             divider(label: "Conversation compacted",
                     icon: "arrow.triangle.merge",
                     detail: summary)
+        case .goalApplied(_, let goal, let vendor, let appliedAt):
+            divider(label: "Goal attached to \(vendor.displayName) turn",
+                    icon: "target",
+                    detail: "Helm attached this active goal to the prompt sent to \(vendor.displayName) at \(Self.format(appliedAt)):\n\n\(goal)")
         }
     }
 
@@ -63,5 +66,12 @@ struct SessionEventView: View {
             .fill(Color.helmBorderStrong.opacity(0.35))
             .frame(height: 0.5)
             .frame(maxWidth: .infinity)
+    }
+
+    private static func format(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 }

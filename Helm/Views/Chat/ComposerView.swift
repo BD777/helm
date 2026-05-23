@@ -24,6 +24,10 @@ struct ComposerView: View {
     @State private var slashScrollTargetId: String?
     @State private var slashContext: ComposerSlashContext?
     @State private var slashSuppressedSignature: String?
+    @State private var activeBuiltinAction: BuiltinAction.Kind?
+    @State private var goalPanelVisible = false
+    @State private var goalDraftText = ""
+    @State private var goalBudgetDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,6 +51,8 @@ struct ComposerView: View {
             saveCurrentDraft()
             loadDraft(for: newSessionId)
             refreshSkillsAsync(force: true)
+            activeBuiltinAction = nil
+            goalPanelVisible = false
             requestComposerFocus()
         }
         .onChange(of: pickerOpen) { _, isOpen in
@@ -126,8 +132,40 @@ struct ComposerView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
                 .zIndex(10)
             }
+            if let activeBuiltinAction, !slashMenuVisible {
+                let height = builtinActionPanelHeight(for: activeBuiltinAction)
+                BuiltinActionPanel(
+                    kind: activeBuiltinAction,
+                    onClose: closeBuiltinActionPanel
+                )
+                .frame(width: builtinActionPanelWidth, height: height)
+                .offset(x: 0, y: -(height + 8))
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
+                .zIndex(9)
+            }
+            if let session = store.selectedSession,
+               goalPanelVisible,
+               !slashMenuVisible,
+               activeBuiltinAction == nil {
+                GoalPanel(
+                    session: session,
+                    vendor: selectedVendor,
+                    goalText: $goalDraftText,
+                    tokenBudgetText: $goalBudgetDraft,
+                    onClose: closeGoalPanel,
+                    onSave: { saveGoalDraft(for: session) },
+                    onClear: { clearGoal(for: session) },
+                    onComplete: { completeGoal(for: session) }
+                )
+                .frame(width: goalPanelWidth, height: goalPanelHeight)
+                .offset(x: 0, y: -(goalPanelHeight + 8))
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
+                .zIndex(8)
+            }
         }
         .animation(.easeOut(duration: 0.10), value: slashMenuVisible)
+        .animation(.easeOut(duration: 0.10), value: activeBuiltinAction)
+        .animation(.easeOut(duration: 0.10), value: goalPanelVisible)
     }
 
     private var hasComposerContent: Bool {
@@ -206,6 +244,8 @@ struct ComposerView: View {
         text = ""
         selectedSkills = []
         attachments = []
+        activeBuiltinAction = nil
+        goalPanelVisible = false
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
         }
@@ -412,6 +452,10 @@ struct ComposerView: View {
     private func handleSlashContextChange(_ context: ComposerSlashContext?) {
         let oldContext = slashContext
         slashContext = context
+        if context != nil {
+            activeBuiltinAction = nil
+            goalPanelVisible = false
+        }
         if oldContext?.signature != context?.signature {
             slashHighlightedId = nil
             slashScrollTargetId = nil
@@ -561,6 +605,174 @@ struct ComposerView: View {
         }
     }
 
+    // MARK: - Built-in actions
+
+    private var builtinActionPanelWidth: CGFloat {
+        guard footerWidth > 0 else { return 620 }
+        return min(680, max(320, footerWidth))
+    }
+
+    private var goalPanelWidth: CGFloat {
+        builtinActionPanelWidth
+    }
+
+    private var goalPanelHeight: CGFloat {
+        244
+    }
+
+    private func builtinActionPanelHeight(for kind: BuiltinAction.Kind) -> CGFloat {
+        switch kind {
+        case .status:
+            return 274
+        case .compact:
+            return 156
+        case .help:
+            return 286
+        }
+    }
+
+    private func builtinActionButton(profile: Profile?) -> some View {
+        let vendor = profile?.vendor ?? selectedVendor
+        return Menu {
+            ForEach(BuiltinAction.catalog(for: vendor)) { action in
+                Button {
+                    selectBuiltinAction(action.kind)
+                } label: {
+                    Label(action.title, systemImage: action.symbolName)
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("\(vendor.displayName) actions")
+        .accessibilityLabel("\(vendor.displayName) actions")
+    }
+
+    private func selectBuiltinAction(_ kind: BuiltinAction.Kind) {
+        resetSlashPickerState()
+        goalPanelVisible = false
+        activeBuiltinAction = kind
+    }
+
+    private func closeBuiltinActionPanel() {
+        activeBuiltinAction = nil
+        requestComposerFocus()
+    }
+
+    // MARK: - Goal
+
+    @ViewBuilder
+    private func goalChip(session: Session?, profile: Profile?) -> some View {
+        if let session {
+            let goal = session.goal
+            let isActive = goal?.isActive == true
+            let isComplete = goal?.isComplete == true
+            Button {
+                toggleGoalPanel(for: session)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "target")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                    Text("Goal")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                    if isActive || isComplete {
+                        Image(systemName: isActive ? "checkmark.circle.fill" : "checkmark.circle")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                    }
+                    Image(systemName: goalPanelVisible ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .fill(isActive ? Color.accentColor.opacity(0.12) : Color.helmCard)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                                .stroke(isActive ? Color.accentColor.opacity(0.35) : Color.helmBorder,
+                                        lineWidth: 1)
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(goalHelp(goal, vendor: profile?.vendor ?? selectedVendor))
+            .accessibilityLabel("Goal")
+        }
+    }
+
+    private func toggleGoalPanel(for session: Session) {
+        if goalPanelVisible {
+            closeGoalPanel()
+        } else {
+            openGoalPanel(for: session)
+        }
+    }
+
+    private func openGoalPanel(for session: Session) {
+        resetSlashPickerState()
+        activeBuiltinAction = nil
+        goalDraftText = session.goal?.trimmedText ?? ""
+        goalBudgetDraft = session.goal?.tokenBudget.map { String($0) } ?? ""
+        goalPanelVisible = true
+    }
+
+    private func closeGoalPanel() {
+        goalPanelVisible = false
+        requestComposerFocus()
+    }
+
+    private func saveGoalDraft(for session: Session) {
+        let trimmed = goalDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let budget = parsedGoalBudget
+        if trimmed.isEmpty {
+            store.setGoal(nil, on: session.id)
+        } else {
+            store.setGoal(SessionGoal(text: trimmed, tokenBudget: budget), on: session.id)
+        }
+        closeGoalPanel()
+    }
+
+    private func clearGoal(for session: Session) {
+        goalDraftText = ""
+        goalBudgetDraft = ""
+        store.setGoal(nil, on: session.id)
+        closeGoalPanel()
+    }
+
+    private func completeGoal(for session: Session) {
+        store.markGoalComplete(on: session.id)
+        closeGoalPanel()
+    }
+
+    private var parsedGoalBudget: Int? {
+        let trimmed = goalBudgetDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Int(trimmed), value > 0 else { return nil }
+        return value
+    }
+
+    private func goalHelp(_ goal: SessionGoal?, vendor: Vendor) -> String {
+        guard let goal else { return "Set session goal" }
+        if goal.isActive {
+            return "Active goal for \(vendor.displayName): \(goal.trimmedText)"
+        }
+        if goal.isComplete {
+            return "Goal complete"
+        }
+        return "Set session goal"
+    }
+
     private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
         guard !context.query.isEmpty else { return nil }
         let exactMatches = skills.filter { $0.searchName == context.query }
@@ -651,6 +863,8 @@ struct ComposerView: View {
                             modelLabel: String,
                             configLocked: Bool) -> some View {
         HStack(spacing: 8) {
+            builtinActionButton(profile: profile)
+            goalChip(session: session, profile: profile)
             modelPickerButton(profile: profile,
                               modelLabel: modelLabel,
                               configLocked: configLocked,
@@ -669,6 +883,8 @@ struct ComposerView: View {
                                configLocked: Bool) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
+                builtinActionButton(profile: profile)
+                goalChip(session: session, profile: profile)
                 modelPickerButton(profile: profile,
                                   modelLabel: modelLabel,
                                   configLocked: configLocked,
@@ -1204,6 +1420,459 @@ private struct SlashSkillRow: View {
                 .fill(isHighlighted ? Color.helmSelected : Color.clear)
         )
         .contentShape(Rectangle())
+    }
+}
+
+private struct GoalPanel: View {
+    let session: Session
+    let vendor: Vendor
+    @Binding var goalText: String
+    @Binding var tokenBudgetText: String
+    let onClose: () -> Void
+    let onSave: () -> Void
+    let onClear: () -> Void
+    let onComplete: () -> Void
+
+    private var goal: SessionGoal? {
+        session.goal
+    }
+
+    private var trimmedDraft: String {
+        goalText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSave: Bool {
+        !trimmedDraft.isEmpty
+    }
+
+    private var canClear: Bool {
+        goal != nil || !trimmedDraft.isEmpty || !tokenBudgetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canComplete: Bool {
+        goal?.isActive == true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Rectangle()
+                .fill(Color.helmBorder)
+                .frame(height: 1)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text("Objective")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    goalStateLabel
+                }
+
+                TextEditor(text: $goalText)
+                    .font(.system(size: 12.5))
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .frame(height: 72)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                            .fill(Color.helmCard.opacity(0.72))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                                    .stroke(Color.helmBorder, lineWidth: 1)
+                            )
+                    )
+
+                HStack(spacing: 8) {
+                    Text("Budget")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("optional", text: $tokenBudgetText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .frame(width: 104)
+                    Text(statusText)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 8) {
+                    Button("Clear", action: onClear)
+                        .disabled(!canClear)
+                    Button("Complete", action: onComplete)
+                        .disabled(!canComplete)
+                    Spacer()
+                    Button("Save", action: onSave)
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canSave)
+                }
+                .controlSize(.small)
+            }
+            .padding(14)
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 10)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "target")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text("Goal")
+                .font(.system(size: 13.5, weight: .semibold))
+            Text(vendor.displayName)
+                .font(DS.monoFontSmall)
+                .foregroundStyle(.tertiary)
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .help("Close")
+            .accessibilityLabel("Close goal panel")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+    }
+
+    private var goalStateLabel: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(goalColor)
+                .frame(width: 6, height: 6)
+            Text(goalStateText)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var goalStateText: String {
+        if goal?.isActive == true { return "Active" }
+        if goal?.isComplete == true { return "Complete" }
+        return "Not set"
+    }
+
+    private var goalColor: Color {
+        if goal?.isActive == true { return .accentColor }
+        if goal?.isComplete == true { return .green }
+        return .secondary.opacity(0.45)
+    }
+
+    private var statusText: String {
+        guard let goal else { return "No active goal" }
+        if goal.isComplete { return "Marked complete" }
+        if let lastAppliedAt = goal.lastAppliedAt {
+            return "Attached to last \(vendor.displayName) turn at \(Self.format(lastAppliedAt))"
+        }
+        if goal.isActive { return "Ready for next \(vendor.displayName) turn" }
+        return "No active goal"
+    }
+
+    private static func format(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+private struct BuiltinAction: Identifiable, Hashable {
+    enum Kind: String, Hashable {
+        case status
+        case compact
+        case help
+    }
+
+    let kind: Kind
+    let title: String
+    let commandName: String
+    let summary: String
+    let symbolName: String
+
+    var id: Kind { kind }
+
+    static func catalog(for vendor: Vendor) -> [BuiltinAction] {
+        switch vendor {
+        case .codex:
+            return [
+                BuiltinAction(kind: .status,
+                              title: "Status",
+                              commandName: "/status",
+                              summary: "Show session, model, context, and run configuration.",
+                              symbolName: "info.circle"),
+                BuiltinAction(kind: .compact,
+                              title: "Compact",
+                              commandName: "/compact",
+                              summary: "Compact conversation context when the vendor adapter supports it.",
+                              symbolName: "rectangle.compress.vertical"),
+                BuiltinAction(kind: .help,
+                              title: "Help",
+                              commandName: "/help",
+                              summary: "Show Codex actions available in Helm.",
+                              symbolName: "questionmark.circle"),
+            ]
+        case .claude:
+            return [
+                BuiltinAction(kind: .status,
+                              title: "Status",
+                              commandName: "/status",
+                              summary: "Show session, model, context, and run configuration.",
+                              symbolName: "info.circle"),
+                BuiltinAction(kind: .compact,
+                              title: "Compact",
+                              commandName: "/compact",
+                              summary: "Compact conversation context when the vendor adapter supports it.",
+                              symbolName: "rectangle.compress.vertical"),
+                BuiltinAction(kind: .help,
+                              title: "Help",
+                              commandName: "/help",
+                              summary: "Show Claude actions available in Helm.",
+                              symbolName: "questionmark.circle"),
+            ]
+        }
+    }
+
+    static func definition(for kind: Kind, vendor: Vendor) -> BuiltinAction {
+        catalog(for: vendor).first { $0.kind == kind }
+            ?? BuiltinAction(kind: kind,
+                             title: kind.rawValue.capitalized,
+                             commandName: "/" + kind.rawValue,
+                             summary: "",
+                             symbolName: "sparkle")
+    }
+}
+
+private struct BuiltinActionPanel: View {
+    @Environment(AppStore.self) private var store
+
+    let kind: BuiltinAction.Kind
+    let onClose: () -> Void
+
+    private var session: Session? { store.selectedSession }
+
+    private var profile: Profile? {
+        session.flatMap { store.profile($0.profileId) }
+    }
+
+    private var model: Model? {
+        profile.flatMap { store.model($0.primaryModelId) }
+    }
+
+    private var vendor: Vendor {
+        profile?.vendor ?? .codex
+    }
+
+    private var action: BuiltinAction {
+        BuiltinAction.definition(for: kind, vendor: vendor)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Rectangle()
+                .fill(Color.helmBorder)
+                .frame(height: 1)
+            content
+                .padding(14)
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 10)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: action.symbolName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text(action.title)
+                .font(.system(size: 13.5, weight: .semibold))
+            Text(action.commandName)
+                .font(DS.monoFontSmall)
+                .foregroundStyle(.tertiary)
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .help("Close")
+            .accessibilityLabel("Close action panel")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch kind {
+        case .status:
+            statusBody
+        case .compact:
+            compactBody
+        case .help:
+            helpBody
+        }
+    }
+
+    private var statusBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            infoRow("Session", sessionDisplayId, mono: true)
+            infoRow("Model", model?.label ?? "No model")
+            infoRow("Profile", profile?.name ?? "No profile")
+            infoRow("Project", projectDisplayPath, mono: true)
+            infoRow("Goal", goalStatusText)
+            infoRow("Context", estimatedContextText)
+            infoRow("Quota", "Unavailable")
+            if let session, let profile {
+                switch profile.vendor {
+                case .codex:
+                    infoRow("Runtime", "\(session.codexSandboxMode.displayName), \(session.codexApprovalMode.displayName), \(session.codexEffort.displayName)")
+                case .claude:
+                    infoRow("Runtime", "\(session.claudePermissionMode.displayName), \(session.claudeEffort.displayName)")
+                }
+            }
+        }
+    }
+
+    private var compactBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            infoRow("Command", action.commandName, mono: true)
+            emptyPanelText("Compaction is vendor-owned in the interactive CLIs. Helm shows the action here now; wiring a real compact turn needs adapter support so it does not get sent as ordinary chat text.")
+        }
+    }
+
+    private var helpBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(BuiltinAction.catalog(for: vendor)) { item in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: item.symbolName)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                Text(item.title)
+                                    .font(.system(size: 12.5, weight: .medium))
+                                Text(item.commandName)
+                                    .font(DS.monoFontSmall)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(item.summary)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                            .fill(Color.clear)
+                    )
+                }
+            }
+        }
+    }
+
+    private func infoRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(label + ":")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 72, alignment: .leading)
+            Text(value)
+                .font(mono ? DS.monoFontSmall : .system(size: 12.5))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func emptyPanelText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var sessionDisplayId: String {
+        if let vendorSessionId = session?.vendorSessionId,
+           !vendorSessionId.isEmpty {
+            return vendorSessionId
+        }
+        return session?.id.uuidString.lowercased() ?? "Unavailable"
+    }
+
+    private var projectDisplayPath: String {
+        guard let project = store.selectedProject else { return "No project" }
+        switch project.location {
+        case .local(let path):
+            return path
+        case .ssh(let host, let path, let status):
+            let resolved = status.resolvedPath?.isEmpty == false
+                ? status.resolvedPath!
+                : path
+            return "\(host):\(resolved)"
+        }
+    }
+
+    private var estimatedContextText: String {
+        guard let session else { return "Unavailable" }
+        let characters = session.transcript.reduce(0) { total, item in
+            guard let message = item.message else { return total }
+            return total + message.parts.reduce(0) { partTotal, part in
+                switch part {
+                case .text(let text):
+                    return partTotal + text.count
+                case .skillText(let segments):
+                    return partTotal + segments.reduce(0) { segmentTotal, segment in
+                        segmentTotal + (segment.text?.count ?? 0) + (segment.skillName?.count ?? 0)
+                    }
+                case .toolCall(let call):
+                    return partTotal + call.arg.count + (call.body?.count ?? 0)
+                case .image:
+                    return partTotal + 6000
+                }
+            }
+        }
+        guard characters > 0 else { return "0 tokens estimated" }
+        let tokens = max(1, characters / 4)
+        return "\(tokens) tokens estimated"
+    }
+
+    private var goalStatusText: String {
+        guard let goal = session?.goal else { return "Not set" }
+        if goal.isActive { return goal.trimmedText }
+        if goal.isComplete { return "Complete" }
+        return "Not set"
     }
 }
 
