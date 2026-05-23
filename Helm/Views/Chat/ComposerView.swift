@@ -939,12 +939,22 @@ private enum ComposerSkillCatalog {
         let agentsHome = env["AGENTS_HOME"].map(expandHome) ?? home.appendingPathComponent(".agents", isDirectory: true)
         let claudeHome = env["CLAUDE_CONFIG_DIR"].map(expandHome) ?? home.appendingPathComponent(".claude", isDirectory: true)
 
-        let roots: [(label: String, url: URL, depth: Int)] = [
+        var roots: [(label: String, url: URL, depth: Int)] = [
             ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
             ("Agents", agentsHome.appendingPathComponent("skills", isDirectory: true), 2),
             ("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2),
             ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
         ]
+        roots.append(contentsOf: linkedSkillRoots(
+            from: agentsHome.appendingPathComponent("skills/.my-skills-links.json"),
+            label: "My Skills",
+            fileManager: fileManager
+        ))
+        roots.append(contentsOf: linkedSkillRoots(
+            from: claudeHome.appendingPathComponent("skills/.my-skills-links.json"),
+            label: "My Skills",
+            fileManager: fileManager
+        ))
 
         var skillsByName: [String: ComposerSkill] = [:]
         var seenPaths = Set<String>()
@@ -964,6 +974,24 @@ private enum ComposerSkillCatalog {
         return skillsByName.values.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+    }
+
+    private static func linkedSkillRoots(from manifestURL: URL,
+                                         label: String,
+                                         fileManager: FileManager) -> [(label: String, url: URL, depth: Int)] {
+        guard fileManager.fileExists(atPath: manifestURL.path),
+              let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(LinkedSkillsManifest.self, from: data)
+        else { return [] }
+
+        let skillsRoot = expandHome(manifest.sourceRoot)
+            .appendingPathComponent("skills", isDirectory: true)
+        return manifest.links
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { skillName in
+                (label, skillsRoot.appendingPathComponent(skillName, isDirectory: true), 1)
+            }
     }
 
     private static func skillFiles(in root: URL,
@@ -1102,6 +1130,16 @@ private enum ComposerSkillCatalog {
             return String(trimmed.prefix(160))
         }
         return ""
+    }
+
+    private struct LinkedSkillsManifest: Decodable {
+        let sourceRoot: String
+        let links: [String]
+
+        private enum CodingKeys: String, CodingKey {
+            case sourceRoot = "source_root"
+            case links
+        }
     }
 }
 
