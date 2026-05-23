@@ -8,12 +8,14 @@ struct ComposerView: View {
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
+    @State private var selectedSkill: ComposerSkill?
     @State private var draftSessionId: UUID?
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
     @State private var footerWidth: CGFloat = 0
     @State private var skills: [ComposerSkill] = []
+    @State private var slashFilteredSkills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
     @State private var slashScrollTargetId: String?
     @State private var slashSuppressedText: String?
@@ -50,16 +52,7 @@ struct ComposerView: View {
             requestComposerFocus()
         }
         .onChange(of: text) { oldText, newText in
-            if slashSuppressedText != newText {
-                slashSuppressedText = nil
-            }
-            let wasSlashCommand = Self.slashQuery(in: oldText) != nil
-            let isSlashCommand = Self.slashQuery(in: newText) != nil
-            if isSlashCommand && !wasSlashCommand {
-                refreshSkills()
-            } else {
-                syncSlashHighlight()
-            }
+            handleTextChange(oldText: oldText, newText: newText)
         }
         .onDisappear { removePasteMonitor() }
     }
@@ -83,6 +76,9 @@ struct ComposerView: View {
 
     private var box: some View {
         VStack(spacing: 0) {
+            if let selectedSkill {
+                selectedSkillRow(selectedSkill)
+            }
             if !attachments.isEmpty {
                 attachmentRow
             }
@@ -128,7 +124,9 @@ struct ComposerView: View {
     }
 
     private var hasComposerContent: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        selectedSkill != nil
+            || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !attachments.isEmpty
     }
 
     private var composerPlaceholder: String {
@@ -195,9 +193,10 @@ struct ComposerView: View {
         if store.isStreaming || !hasComposerContent || selectedSSHSendBlockReason != nil {
             return
         }
-        let toSend = text
+        let toSend = composedPrompt()
         let toSendAttachments = attachments
         text = ""
+        selectedSkill = nil
         attachments = []
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
@@ -205,10 +204,18 @@ struct ComposerView: View {
         store.send(toSend, attachments: toSendAttachments)
     }
 
+    private func composedPrompt() -> String {
+        guard let selectedSkill else { return text }
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return "/\(selectedSkill.name)" }
+        return "/\(selectedSkill.name) \(body)"
+    }
+
     // MARK: - Slash skill picker
 
     private var slashQuery: String? {
-        Self.slashQuery(in: text)
+        guard selectedSkill == nil else { return nil }
+        return Self.slashQuery(in: text)
     }
 
     private static func slashQuery(in text: String) -> String? {
@@ -217,28 +224,11 @@ struct ComposerView: View {
         guard rawQuery.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
             return nil
         }
-        return rawQuery.lowercased()
+        return ComposerSkill.normalizedSearchText(rawQuery)
     }
 
     private var slashMenuVisible: Bool {
         slashQuery != nil && slashSuppressedText != text && !skills.isEmpty
-    }
-
-    private var slashFilteredSkills: [ComposerSkill] {
-        guard let query = slashQuery else { return [] }
-        guard !query.isEmpty else { return skills }
-        return skills
-            .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
-                guard let score = skill.matchScore(for: query) else { return nil }
-                return (skill, score)
-            }
-            .sorted {
-                if $0.score != $1.score {
-                    return $0.score < $1.score
-                }
-                return $0.skill.name.localizedCaseInsensitiveCompare($1.skill.name) == .orderedAscending
-            }
-            .map(\.skill)
     }
 
     private var currentSlashHighlight: String? {
@@ -261,6 +251,57 @@ struct ComposerView: View {
 
     private func refreshSkills() {
         skills = ComposerSkillCatalog.load()
+        updateSlashResults()
+    }
+
+    private func handleTextChange(oldText: String, newText: String) {
+        if slashSuppressedText != newText {
+            slashSuppressedText = nil
+        }
+        if let split = splitLeadingSkillCommand(in: newText) {
+            selectSkill(split.skill, remainingText: split.remainingText)
+            return
+        }
+
+        let wasSlashCommand = selectedSkill == nil && Self.slashQuery(in: oldText) != nil
+        let isSlashCommand = slashQuery != nil
+        if isSlashCommand && !wasSlashCommand {
+            refreshSkills()
+        } else {
+            updateSlashResults()
+        }
+    }
+
+    private func updateSlashResults() {
+        guard let query = slashQuery else {
+            if !slashFilteredSkills.isEmpty {
+                slashFilteredSkills = []
+            }
+            syncSlashHighlight()
+            return
+        }
+
+        let filtered: [ComposerSkill]
+        if query.isEmpty {
+            filtered = skills
+        } else {
+            filtered = skills
+                .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
+                    guard let score = skill.matchScore(for: query) else { return nil }
+                    return (skill, score)
+                }
+                .sorted {
+                    if $0.score != $1.score {
+                        return $0.score < $1.score
+                    }
+                    return $0.skill.name.localizedCaseInsensitiveCompare($1.skill.name) == .orderedAscending
+                }
+                .map(\.skill)
+        }
+
+        if slashFilteredSkills.map(\.id) != filtered.map(\.id) {
+            slashFilteredSkills = filtered
+        }
         syncSlashHighlight()
     }
 
@@ -280,9 +321,17 @@ struct ComposerView: View {
     }
 
     private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
-        guard slashMenuVisible else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.isEmpty else { return false }
+        if event.keyCode == 51,
+           selectedSkill != nil,
+           text.isEmpty {
+            selectedSkill = nil
+            requestComposerFocus()
+            return true
+        }
+
+        guard slashMenuVisible else { return false }
 
         switch event.keyCode {
         case 125:
@@ -342,16 +391,89 @@ struct ComposerView: View {
     }
 
     private func insertSkillCommand(_ skill: ComposerSkill) {
-        let command = "/\(skill.name) "
-        text = command
-        slashSuppressedText = command
+        selectSkill(skill, remainingText: "")
+    }
+
+    private func selectSkill(_ skill: ComposerSkill, remainingText: String) {
+        selectedSkill = skill
+        text = remainingText
         requestComposerFocus()
+        resetSlashPickerState()
     }
 
     private func resetSlashPickerState() {
         slashHighlightedId = nil
         slashScrollTargetId = nil
         slashSuppressedText = nil
+        if !slashFilteredSkills.isEmpty {
+            slashFilteredSkills = []
+        }
+    }
+
+    private func splitLeadingSkillCommand(in candidate: String) -> (skill: ComposerSkill, remainingText: String)? {
+        guard selectedSkill == nil,
+              candidate.hasPrefix("/")
+        else { return nil }
+
+        let rawCommand = candidate.dropFirst()
+        guard !rawCommand.isEmpty else { return nil }
+        let commandEnd = rawCommand.firstIndex { $0.isWhitespace } ?? rawCommand.endIndex
+        let command = String(rawCommand[..<commandEnd])
+        guard !command.isEmpty else { return nil }
+
+        let normalizedCommand = ComposerSkill.normalizedSearchText(command)
+        guard let skill = skills.first(where: { $0.searchName == normalizedCommand }) else {
+            return nil
+        }
+        let userTypedBoundary = commandEnd != rawCommand.endIndex
+        if !userTypedBoundary,
+           skills.contains(where: { $0.searchName != normalizedCommand && $0.searchName.hasPrefix(normalizedCommand) }) {
+            return nil
+        }
+
+        let remainingText = String(rawCommand[commandEnd...].drop(while: { $0.isWhitespace }))
+        return (skill, remainingText)
+    }
+
+    private func selectedSkillRow(_ skill: ComposerSkill) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("/\(skill.name)")
+                    .font(DS.monoFontSmall)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(skill.source)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Button {
+                    selectedSkill = nil
+                    requestComposerFocus()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(
+                Capsule()
+                    .fill(Color.helmSelected.opacity(0.9))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+            )
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
     }
 
     private var attachmentRow: some View {
@@ -818,11 +940,13 @@ struct ComposerView: View {
     private func saveCurrentDraft() {
         guard let sessionId = draftSessionId else { return }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && attachments.isEmpty {
+            && attachments.isEmpty
+            && selectedSkill == nil {
             drafts[sessionId] = nil
         } else {
             drafts[sessionId] = ComposerDraft(text: text,
-                                              attachments: attachments)
+                                              attachments: attachments,
+                                              selectedSkill: selectedSkill)
         }
     }
 
@@ -832,12 +956,14 @@ struct ComposerView: View {
         guard let sessionId, let draft = drafts[sessionId] else {
             text = ""
             attachments = []
-            syncSlashHighlight()
+            selectedSkill = nil
+            updateSlashResults()
             return
         }
         text = draft.text
         attachments = draft.attachments
-        syncSlashHighlight()
+        selectedSkill = draft.selectedSkill
+        updateSlashResults()
     }
 }
 
@@ -977,23 +1103,32 @@ private struct ComposerSkill: Identifiable, Hashable {
     let source: String
     let path: String
     let haystack: String
+    let searchName: String
+    let searchHaystack: String
+    let searchNameCharacters: [Character]
 
     func matchScore(for rawQuery: String) -> ComposerSkillMatchScore? {
         let query = Self.normalizedSearchText(rawQuery)
         guard !query.isEmpty else { return nil }
 
-        let normalizedName = Self.normalizedSearchText(name)
-        let normalizedHaystack = Self.normalizedSearchText(haystack)
-        let candidates = [
-            literalScore(query: query, in: normalizedName, targetPriority: 0),
-            literalScore(query: query, in: normalizedHaystack, targetPriority: 1),
-            subsequenceScore(query: query, in: normalizedName, targetPriority: 0),
-            subsequenceScore(query: query, in: normalizedHaystack, targetPriority: 1),
-        ]
-        return candidates.compactMap(\.self).min()
+        var candidates = [
+            literalScore(query: query, in: searchName, targetPriority: 0),
+            literalScore(query: query, in: searchHaystack, targetPriority: 1),
+        ].compactMap(\.self)
+
+        if query.count >= 3,
+           let nameSubsequenceScore = subsequenceScore(
+            queryCharacters: Array(query),
+            in: searchNameCharacters,
+            targetPriority: 0
+           ) {
+            candidates.append(nameSubsequenceScore)
+        }
+
+        return candidates.min()
     }
 
-    private static func normalizedSearchText(_ raw: String) -> String {
+    static func normalizedSearchText(_ raw: String) -> String {
         raw.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
             .lowercased()
     }
@@ -1019,11 +1154,9 @@ private struct ComposerSkill: Identifiable, Hashable {
         )
     }
 
-    private func subsequenceScore(query: String,
-                                  in target: String,
+    private func subsequenceScore(queryCharacters: [Character],
+                                  in targetCharacters: [Character],
                                   targetPriority: Int) -> ComposerSkillMatchScore? {
-        let queryCharacters = Array(query)
-        let targetCharacters = Array(target)
         guard let firstQueryCharacter = queryCharacters.first else { return nil }
 
         var bestScore: ComposerSkillMatchScore?
@@ -1045,9 +1178,12 @@ private struct ComposerSkill: Identifiable, Hashable {
             guard queryOffset == queryCharacters.count else { continue }
 
             let span = lastMatch - start + 1
+            let gaps = span - queryCharacters.count
+            guard gaps <= max(2, queryCharacters.count) else { continue }
+
             let score = ComposerSkillMatchScore(
                 tier: targetPriority == 0 ? 3 : 4,
-                gaps: span - queryCharacters.count,
+                gaps: gaps,
                 span: span,
                 start: start,
                 targetPriority: targetPriority,
@@ -1206,7 +1342,8 @@ private enum ComposerSkillCatalog {
         let normalizedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let haystack = [normalizedName, normalizedDescription, source]
             .joined(separator: " ")
-            .lowercased()
+        let searchName = ComposerSkill.normalizedSearchText(normalizedName)
+        let searchHaystack = ComposerSkill.normalizedSearchText(haystack)
 
         return ComposerSkill(
             id: url.standardizedFileURL.path,
@@ -1214,7 +1351,10 @@ private enum ComposerSkillCatalog {
             description: normalizedDescription,
             source: source,
             path: url.path,
-            haystack: haystack
+            haystack: haystack,
+            searchName: searchName,
+            searchHaystack: searchHaystack,
+            searchNameCharacters: Array(searchName)
         )
     }
 
@@ -1365,6 +1505,7 @@ private enum ComposerSkillCatalog {
 private struct ComposerDraft {
     var text: String
     var attachments: [ImageAttachment]
+    var selectedSkill: ComposerSkill?
 }
 
 private struct ComposerWidthReader: View {
