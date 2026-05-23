@@ -859,26 +859,35 @@ private struct SlashSkillMenu: View {
                 .padding(.horizontal, 12)
                 .frame(height: 54)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(skills) { skill in
-                            Button {
-                                onSelect(skill)
-                            } label: {
-                                SlashSkillRow(
-                                    skill: skill,
-                                    isHighlighted: skill.id == highlightedId
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .onHover { hovering in
-                                if hovering {
-                                    onHover(skill.id)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(skills) { skill in
+                                Button {
+                                    onSelect(skill)
+                                } label: {
+                                    SlashSkillRow(
+                                        skill: skill,
+                                        isHighlighted: skill.id == highlightedId
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .id(skill.id)
+                                .onHover { hovering in
+                                    if hovering {
+                                        onHover(skill.id)
+                                    }
                                 }
                             }
                         }
+                        .padding(6)
                     }
-                    .padding(6)
+                    .onChange(of: highlightedId) { _, newValue in
+                        guard let newValue else { return }
+                        withAnimation(.easeOut(duration: 0.08)) {
+                            proxy.scrollTo(newValue, anchor: .center)
+                        }
+                    }
                 }
             }
         }
