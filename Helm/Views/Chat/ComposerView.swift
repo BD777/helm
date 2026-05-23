@@ -15,6 +15,7 @@ struct ComposerView: View {
     @State private var footerWidth: CGFloat = 0
     @State private var skills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
+    @State private var slashScrollTargetId: String?
     @State private var slashSuppressedText: String?
 
     var body: some View {
@@ -112,6 +113,7 @@ struct ComposerView: View {
                 SlashSkillMenu(
                     skills: slashFilteredSkills,
                     highlightedId: currentSlashHighlight,
+                    scrollTargetId: slashScrollTargetId,
                     query: slashQuery ?? "",
                     onHover: { slashHighlightedId = $0 },
                     onSelect: insertSkillCommand
@@ -256,13 +258,16 @@ struct ComposerView: View {
     private func syncSlashHighlight() {
         guard slashQuery != nil else {
             slashHighlightedId = nil
+            slashScrollTargetId = nil
             return
         }
         if let slashHighlightedId,
            slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
             return
         }
-        slashHighlightedId = slashFilteredSkills.first?.id
+        let firstId = slashFilteredSkills.first?.id
+        slashHighlightedId = firstId
+        slashScrollTargetId = firstId
     }
 
     private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
@@ -310,7 +315,9 @@ struct ComposerView: View {
         let current = currentSlashHighlight.flatMap { id in
             list.firstIndex { $0.id == id }
         } ?? 0
-        slashHighlightedId = list[(current + offset + list.count) % list.count].id
+        let nextId = list[(current + offset + list.count) % list.count].id
+        slashHighlightedId = nextId
+        slashScrollTargetId = nextId
     }
 
     private func insertHighlightedSkillCommand() -> Bool {
@@ -815,6 +822,7 @@ struct ComposerView: View {
 private struct SlashSkillMenu: View {
     let skills: [ComposerSkill]
     let highlightedId: String?
+    let scrollTargetId: String?
     let query: String
     let onHover: (String) -> Void
     let onSelect: (ComposerSkill) -> Void
@@ -881,7 +889,7 @@ private struct SlashSkillMenu: View {
                         }
                         .padding(6)
                     }
-                    .onChange(of: highlightedId) { _, newValue in
+                    .onChange(of: scrollTargetId) { _, newValue in
                         guard let newValue else { return }
                         withAnimation(.easeOut(duration: 0.08)) {
                             proxy.scrollTo(newValue, anchor: .center)
