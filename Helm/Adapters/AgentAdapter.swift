@@ -1,4 +1,20 @@
+import Darwin
 import Foundation
+
+func jsonErrorIsPresent(_ value: Any?) -> Bool {
+    switch value {
+    case nil:
+        return false
+    case is NSNull:
+        return false
+    case let text as String:
+        return !text.isEmpty
+    case let object as [String: Any]:
+        return !object.isEmpty
+    default:
+        return true
+    }
+}
 
 enum SSHRemote {
     static let executable = "/usr/bin/ssh"
@@ -221,4 +237,75 @@ protocol AgentAdapter: AnyObject {
 
 extension AgentAdapter {
     func respondToApproval(id: String, decision: AgentApprovalDecision) {}
+}
+
+enum ProcessTreeTerminator {
+    static func terminate(_ process: Process,
+                          closing stdin: FileHandle? = nil,
+                          killAfter grace: TimeInterval = 1.5) {
+        let pid = process.processIdentifier
+        let descendants = descendantPIDs(of: pid)
+        for child in descendants.reversed() {
+            Darwin.kill(child, SIGTERM)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+        try? stdin?.close()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
+            let remaining = descendantPIDs(of: pid)
+            for child in remaining.reversed() {
+                Darwin.kill(child, SIGKILL)
+            }
+            if process.isRunning {
+                Darwin.kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    private static func descendantPIDs(of root: Int32) -> [Int32] {
+        let childrenByParent = processParentMap()
+        var out: [Int32] = []
+
+        func visit(_ pid: Int32) {
+            for child in childrenByParent[pid] ?? [] {
+                out.append(child)
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return out
+    }
+
+    private static func processParentMap() -> [Int32: [Int32]] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "pid=,ppid="]
+
+        let stdout = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = Pipe()
+
+        do {
+            try proc.run()
+        } catch {
+            return [:]
+        }
+        proc.waitUntilExit()
+
+        let text = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                          encoding: .utf8) ?? ""
+        var map: [Int32: [Int32]] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count >= 2,
+                  let pid = Int32(String(parts[0])),
+                  let ppid = Int32(String(parts[1]))
+            else { continue }
+            map[ppid, default: []].append(pid)
+        }
+        return map
+    }
 }

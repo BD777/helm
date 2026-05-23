@@ -183,9 +183,12 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     }
 
     func cancel() {
-        lock.lock(); let p = process; lock.unlock()
-        guard let p, p.isRunning else { return }
-        p.terminate()
+        lock.lock()
+        let p = process
+        process = nil
+        lock.unlock()
+        guard let p else { return }
+        ProcessTreeTerminator.terminate(p)
     }
 
     // MARK: -
@@ -316,12 +319,17 @@ final class ClaudeStreamParser {
             guard let block = event["content_block"] as? [String: Any] else { return [] }
             if (block["type"] as? String) == "tool_use" {
                 let id = block["id"] as? String ?? ""
-                let name = block["name"] as? String ?? ""
+                let rawName = block["name"] as? String ?? ""
                 let input = (block["input"] as? [String: Any])
                     .flatMap { try? JSONSerialization.data(withJSONObject: $0) }
                     .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 activeToolId = id
-                return [.toolCallStart(id: id, name: name, input: input)]
+                return [.toolCallStart(id: id,
+                                       name: CodexToolPresentation.name(rawName: rawName,
+                                                                        namespace: nil),
+                                       input: CodexToolPresentation.argument(rawName: rawName,
+                                                                             namespace: nil,
+                                                                             arguments: input))]
             }
             return []
 

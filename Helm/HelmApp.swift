@@ -1,9 +1,17 @@
+import Darwin
 import SwiftUI
 import AppKit
 
 @main
 struct HelmApp: App {
     @NSApplicationDelegateAdaptor(HelmAppDelegate.self) private var appDelegate
+
+    init() {
+        if CommandLine.arguments.dropFirst().contains(HelmComputerUseMCPProxy.commandLineFlag) {
+            HelmComputerUseMCPProxy.run()
+            exit(EXIT_SUCCESS)
+        }
+    }
 
     var body: some Scene {
         // Keep the AppKit delegate alive; it owns the explicit main window.

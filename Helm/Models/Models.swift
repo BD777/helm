@@ -264,11 +264,11 @@ enum CodexComputerUseMode: String, CaseIterable, Hashable, Codable, Identifiable
     var helpText: String {
         switch self {
         case .automatic:
-            return "Use Codex App's bundled Computer Use MCP for local Codex sessions when it is installed and startable."
+            return "Use Codex App's bundled Computer Use MCP for local Codex and Claude sessions when it is installed and startable."
         case .enabled:
-            return "Require Computer Use MCP for local Codex sessions; sending fails if the local bundle is missing or cannot start."
+            return "Require Computer Use MCP for local Codex and Claude sessions; sending fails if the local bundle is missing or cannot start."
         case .disabled:
-            return "Do not attach Computer Use MCP to Helm-launched Codex sessions."
+            return "Do not attach Computer Use MCP to Helm-launched agent sessions."
         }
     }
 

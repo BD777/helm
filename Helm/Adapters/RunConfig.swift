@@ -52,9 +52,9 @@ enum RunConfigResolver {
 
         switch profile.vendor {
         case .claude:
-            return resolveClaude(profile: profile, session: session, provider: provider,
-                                 primary: primary, models: models,
-                                 isRemoteProject: isRemoteProject)
+            return try resolveClaude(profile: profile, session: session, provider: provider,
+                                     primary: primary, models: models,
+                                     isRemoteProject: isRemoteProject)
         case .codex:
             return try resolveCodex(profile: profile, session: session, provider: provider,
                                     primary: primary, models: models,
@@ -69,7 +69,7 @@ enum RunConfigResolver {
                                       provider: Provider,
                                       primary: Model,
                                       models: [Model],
-                                      isRemoteProject: Bool) -> RunConfig {
+                                      isRemoteProject: Bool) throws -> RunConfig {
         var env: [String: String] = [:]
         if !provider.baseURL.isEmpty {
             env["ANTHROPIC_BASE_URL"] = provider.baseURL
@@ -108,6 +108,7 @@ enum RunConfigResolver {
         if !isRemoteProject, let root = profile.configRoot, !root.isEmpty {
             args.append(contentsOf: ["--setting-sources", "user,project,local"])
         }
+        args.append(contentsOf: try CodexComputerUseMCP.claudeConfigArgs(isRemoteProject: isRemoteProject))
 
         let head = primary.label
         return RunConfig(
@@ -252,10 +253,12 @@ struct CodexComputerUseDiagnostic: Equatable {
     }
 }
 
-/// Reuses the Codex App-bundled Computer Use MCP from Helm-launched local Codex
+/// Reuses the Codex App-bundled Computer Use MCP from Helm-launched local agent
 /// runs. This keeps Helm out of the macOS Accessibility / ScreenCaptureKit
 /// implementation and lets Codex own the native service.
 enum CodexComputerUseMCP {
+    static let claudeServerName = "helm_computer_use"
+
     private struct Server {
         var command: String
         var cwd: String
@@ -266,29 +269,40 @@ enum CodexComputerUseMCP {
     private static var failedServerKeys: [String: String] = [:]
 
     static func configArgs(isRemoteProject: Bool) throws -> [String] {
-        guard !isRemoteProject else { return [] }
-        guard ProcessInfo.processInfo.environment["HELM_DISABLE_CODEX_COMPUTER_USE_MCP"] != "1" else { return [] }
-
-        let mode = CodexComputerUseMode.stored()
-        guard mode != .disabled else { return [] }
-        guard let server = discoverServer() else {
-            if mode == .enabled {
-                throw ResolverError.computerUseUnavailable(missingDetail)
-            }
-            return []
-        }
-        if let failure = cachedFailure(for: server) {
-            if mode == .enabled {
-                throw ResolverError.computerUseUnavailable(failure)
-            }
-            return []
-        }
+        guard let server = try attachableServer(isRemoteProject: isRemoteProject) else { return [] }
 
         return [
             "-c", "mcp_servers.computer-use.command=\(tomlStringLiteral(server.command))",
             "-c", "mcp_servers.computer-use.args=[\"mcp\"]",
             "-c", "mcp_servers.computer-use.cwd=\(tomlStringLiteral(server.cwd))",
         ]
+    }
+
+    static func claudeConfigArgs(isRemoteProject: Bool) throws -> [String] {
+        guard try attachableServer(isRemoteProject: isRemoteProject) != nil else { return [] }
+        guard let executable = Bundle.main.executablePath else { return [] }
+        return ["--mcp-config", claudeProxyConfigString(command: executable)]
+    }
+
+    private static func attachableServer(isRemoteProject: Bool) throws -> Server? {
+        guard !isRemoteProject else { return nil }
+        guard ProcessInfo.processInfo.environment["HELM_DISABLE_CODEX_COMPUTER_USE_MCP"] != "1" else { return nil }
+
+        let mode = CodexComputerUseMode.stored()
+        guard mode != .disabled else { return nil }
+        guard let server = discoverServer() else {
+            if mode == .enabled {
+                throw ResolverError.computerUseUnavailable(missingDetail)
+            }
+            return nil
+        }
+        if let failure = startFailure(for: server, refresh: false) {
+            if mode == .enabled {
+                throw ResolverError.computerUseUnavailable(failure)
+            }
+            return nil
+        }
+        return server
     }
 
     static func diagnose(mode: CodexComputerUseMode = CodexComputerUseMode.stored(),
@@ -307,7 +321,7 @@ enum CodexComputerUseMCP {
             return CodexComputerUseDiagnostic(
                 state: .disabled,
                 title: "Disabled",
-                detail: "Helm will not attach Computer Use MCP to Codex sessions on this device.",
+                detail: "Helm will not attach Computer Use MCP to local agent sessions on this device.",
                 command: nil,
                 cwd: nil
             )
@@ -414,7 +428,7 @@ enum CodexComputerUseMCP {
         CodexComputerUseDiagnostic(
             state: .ready,
             title: "Ready",
-            detail: "Helm will attach Codex App's Computer Use MCP to local Codex sessions.",
+            detail: "Helm will attach Codex App's Computer Use MCP to local Codex and Claude sessions.",
             command: server.command,
             cwd: server.cwd
         )
@@ -644,6 +658,21 @@ enum CodexComputerUseMCP {
         out += "\""
         return out
     }
+
+    private static func claudeProxyConfigString(command: String) -> String {
+        let object: [String: Any] = [
+            "mcpServers": [
+                claudeServerName: [
+                    "command": command,
+                    "args": [HelmComputerUseMCPProxy.commandLineFlag],
+                ],
+            ],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return text
+    }
 }
 
 private final class MCPProbeOutput: @unchecked Sendable {
@@ -739,5 +768,433 @@ private final class LockedDataBuffer: @unchecked Sendable {
         let snapshot = data
         lock.unlock()
         return snapshot
+    }
+}
+
+enum HelmComputerUseMCPProxy {
+    static let commandLineFlag = "--computer-use-mcp-proxy"
+
+    static func run() {
+        while let line = readLine() {
+            autoreleasepool {
+                handleLine(line)
+            }
+        }
+    }
+
+    private static func handleLine(_ line: String) {
+        guard let object = parseJSONObject(line) else { return }
+        guard let id = object["id"] else { return }
+        let method = object["method"] as? String ?? ""
+        let params = object["params"] as? [String: Any]
+
+        switch method {
+        case "initialize":
+            writeResponse(id: id, result: [
+                "protocolVersion": params?["protocolVersion"] as? String ?? "2024-11-05",
+                "capabilities": [
+                    "tools": ["listChanged": false],
+                ],
+                "serverInfo": [
+                    "name": CodexComputerUseMCP.claudeServerName,
+                    "title": "Computer Use",
+                    "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+                ],
+            ])
+
+        case "tools/list":
+            writeResponse(id: id, result: ["tools": toolDefinitions])
+
+        case "tools/call":
+            let name = params?["name"] as? String ?? ""
+            let arguments = params?["arguments"] as? [String: Any] ?? [:]
+            let result = callTool(name: name, arguments: arguments)
+            writeResponse(id: id, result: result)
+
+        default:
+            writeError(id: id, code: -32601, message: "Unsupported method '\(method)'.")
+        }
+    }
+
+    private static var toolDefinitions: [[String: Any]] {
+        [
+            tool("list_apps", "List running and recently used macOS apps.", [:], []),
+            tool("get_app_state", "Read a macOS app window state and screenshot.",
+                 ["app": string("App name, path, or bundle identifier.")], ["app"]),
+            tool("click", "Click an app UI element or screen coordinate.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "element_index": string("Accessibility element index."),
+                    "x": number("X coordinate in screenshot pixels."),
+                    "y": number("Y coordinate in screenshot pixels."),
+                    "click_count": integer("Number of clicks."),
+                    "mouse_button": enumString(["left", "right", "middle"], "Mouse button."),
+                 ], ["app"]),
+            tool("perform_secondary_action", "Invoke a secondary accessibility action.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "element_index": string("Accessibility element index."),
+                    "action": string("Secondary action name."),
+                 ], ["app", "element_index", "action"]),
+            tool("set_value", "Set the value of a settable accessibility element.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "element_index": string("Accessibility element index."),
+                    "value": string("Value to assign."),
+                 ], ["app", "element_index", "value"]),
+            tool("select_text", "Select text or place the cursor inside a text element.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "element_index": string("Text element index."),
+                    "text": string("Target text."),
+                    "prefix": string("Text before the target."),
+                    "suffix": string("Text after the target."),
+                    "selection": enumString(["text", "cursor_before", "cursor_after"], "Selection mode."),
+                 ], ["app", "element_index", "text"]),
+            tool("scroll", "Scroll an app element.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "element_index": string("Scrollable element index."),
+                    "direction": enumString(["up", "down", "left", "right"], "Scroll direction."),
+                    "pages": number("Number of pages to scroll."),
+                 ], ["app", "element_index", "direction"]),
+            tool("drag", "Drag between two screenshot coordinates.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "from_x": number("Start X coordinate."),
+                    "from_y": number("Start Y coordinate."),
+                    "to_x": number("End X coordinate."),
+                    "to_y": number("End Y coordinate."),
+                 ], ["app", "from_x", "from_y", "to_x", "to_y"]),
+            tool("press_key", "Press a key or key combination.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "key": string("xdotool-style key or key combination."),
+                 ], ["app", "key"]),
+            tool("type_text", "Type literal text into an app.",
+                 [
+                    "app": string("App name, path, or bundle identifier."),
+                    "text": string("Literal text to type."),
+                 ], ["app", "text"]),
+        ]
+    }
+
+    private static func tool(_ name: String,
+                             _ description: String,
+                             _ properties: [String: Any],
+                             _ required: [String]) -> [String: Any] {
+        [
+            "name": name,
+            "title": "Computer Use \(name)",
+            "description": description,
+            "inputSchema": [
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            ],
+        ]
+    }
+
+    private static func string(_ description: String) -> [String: Any] {
+        ["type": "string", "description": description]
+    }
+
+    private static func number(_ description: String) -> [String: Any] {
+        ["type": "number", "description": description]
+    }
+
+    private static func integer(_ description: String) -> [String: Any] {
+        ["type": "integer", "description": description]
+    }
+
+    private static func enumString(_ values: [String], _ description: String) -> [String: Any] {
+        ["type": "string", "enum": values, "description": description]
+    }
+
+    private static func callTool(name: String, arguments: [String: Any]) -> [String: Any] {
+        guard toolDefinitions.contains(where: { ($0["name"] as? String) == name }) else {
+            return textResult("Unknown Computer Use tool '\(name)'.", isError: true)
+        }
+
+        let configArgs: [String]
+        do {
+            configArgs = try CodexComputerUseMCP.configArgs(isRemoteProject: false)
+        } catch {
+            return textResult(error.localizedDescription, isError: true)
+        }
+        guard !configArgs.isEmpty else {
+            return textResult("Computer Use MCP is disabled or unavailable on this device.",
+                              isError: true)
+        }
+
+        let argumentsJSON = serialize(arguments)
+        let prompt: String
+        if requiresFreshAppState(name) {
+            guard let app = arguments["app"] as? String, !app.isEmpty else {
+                return textResult("Computer Use tool '\(name)' requires a non-empty app argument.",
+                                  isError: true)
+            }
+            prompt = """
+            Use only computer-use MCP tool calls.
+            First call get_app_state with Arguments JSON: \(serialize(["app": app]))
+            Then call \(name) with Arguments JSON: \(argumentsJSON)
+
+            Do not use shell or any other tool. After the \(name) tool call finishes, reply exactly HELM_COMPUTER_USE_DONE.
+            """
+        } else {
+            prompt = """
+            Use exactly one computer-use MCP tool call.
+            Tool name: \(name)
+            Arguments JSON: \(argumentsJSON)
+
+            Do not use shell or any other tool. After the tool call finishes, reply exactly HELM_COMPUTER_USE_DONE.
+            """
+        }
+
+        let executable: String
+        do {
+            executable = try resolveCommand(ProcessInfo.processInfo.environment["HELM_CODEX_COMMAND"] ?? "codex")
+        } catch {
+            return textResult(error.localizedDescription, isError: true)
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: executable)
+        proc.arguments = [
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+        ] + configArgs + [prompt]
+        proc.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        let stdin = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        let stdoutBuffer = LockedDataBuffer()
+        let stderrBuffer = LockedDataBuffer()
+        proc.standardInput = stdin
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            stdoutBuffer.append(handle.availableData)
+        }
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            stderrBuffer.append(handle.availableData)
+        }
+
+        let finished = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in finished.signal() }
+        do {
+            try proc.run()
+            try? stdin.fileHandleForWriting.close()
+        } catch {
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            return textResult(error.localizedDescription, isError: true)
+        }
+
+        if finished.wait(timeout: .now() + .seconds(180)) == .timedOut {
+            ProcessTreeTerminator.terminate(proc, closing: stdin.fileHandleForWriting, killAfter: 0.5)
+            return textResult("Computer Use tool '\(name)' timed out.", isError: true)
+        }
+
+        stdout.fileHandleForReading.readabilityHandler = nil
+        stderr.fileHandleForReading.readabilityHandler = nil
+        stdoutBuffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
+        stderrBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
+
+        let stdoutText = String(data: stdoutBuffer.value(), encoding: .utf8) ?? ""
+        let stderrText = String(data: stderrBuffer.value(), encoding: .utf8) ?? ""
+        let parsed = parseCodexToolOutput(stdoutText, expectedTool: name)
+        if let tool = parsed.tool {
+            return tool
+        }
+        if proc.terminationStatus != 0 {
+            let detail = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            return textResult(detail.isEmpty ? "codex exited \(proc.terminationStatus)" : detail,
+                              isError: true)
+        }
+        if let final = parsed.final, !final.text.isEmpty {
+            return textResult(final.text, isError: final.isError)
+        }
+        return textResult("Codex did not return a Computer Use tool result.", isError: true)
+    }
+
+    private static func parseCodexToolOutput(_ output: String,
+                                             expectedTool: String) -> (tool: [String: Any]?, final: (text: String, isError: Bool)?) {
+        var toolResult: [String: Any]?
+        var final: (text: String, isError: Bool)?
+
+        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let object = parseJSONObject(String(rawLine)) else { continue }
+            switch object["type"] as? String {
+            case "item.completed":
+                guard let item = object["item"] as? [String: Any] else { continue }
+                let itemType = item["type"] as? String
+                if itemType == "mcp_tool_call",
+                   (item["server"] as? String) == "computer-use",
+                   (item["tool"] as? String) == expectedTool {
+                    let status = item["status"] as? String ?? ""
+                    toolResult = toolResultFromCodex(result: item["result"],
+                                                     error: item["error"],
+                                                     status: status)
+                } else if itemType == "agent_message" {
+                    final = (item["text"] as? String ?? "", false)
+                }
+            case "turn.failed":
+                final = (object["message"] as? String
+                    ?? object["error"] as? String
+                    ?? "Codex turn failed.", true)
+            default:
+                continue
+            }
+        }
+
+        return (toolResult, final)
+    }
+
+    private static func requiresFreshAppState(_ name: String) -> Bool {
+        name != "list_apps" && name != "get_app_state"
+    }
+
+    private static func toolResultFromCodex(result: Any?,
+                                            error: Any?,
+                                            status: String) -> [String: Any] {
+        let isError = status == "failed" || jsonErrorIsPresent(error)
+        let errorText = CodexToolPresentation.resultOutput(result: nil, error: error)
+        if !errorText.isEmpty {
+            return textResult(errorText, isError: true)
+        }
+
+        guard let object = result as? [String: Any] else {
+            let text = CodexToolPresentation.resultOutput(result: result, error: nil)
+            return textResult(text.isEmpty ? "Computer Use tool returned no content." : text,
+                              isError: isError)
+        }
+
+        var out: [String: Any] = [
+            "content": normalizedContent(from: object["content"])
+                ?? [[
+                    "type": "text",
+                    "text": CodexToolPresentation.resultOutput(result: result, error: nil),
+                ]],
+            "isError": isError,
+        ]
+        let structured = object["structuredContent"] ?? object["structured_content"]
+        if isJSONObjectValue(structured) {
+            out["structuredContent"] = structured
+        }
+        return out
+    }
+
+    private static func normalizedContent(from value: Any?) -> [[String: Any]]? {
+        guard let content = value as? [[String: Any]] else { return nil }
+        let normalized = content.compactMap { item -> [String: Any]? in
+            guard let type = item["type"] as? String else { return nil }
+            switch type {
+            case "text":
+                guard let text = item["text"] as? String else { return nil }
+                return ["type": "text", "text": text]
+            case "image":
+                guard let data = item["data"] as? String else { return nil }
+                var image: [String: Any] = ["type": "image", "data": data]
+                if let mimeType = item["mimeType"] as? String ?? item["mime_type"] as? String {
+                    image["mimeType"] = mimeType
+                }
+                return image
+            default:
+                return JSONSerialization.isValidJSONObject(item)
+                    ? item
+                    : ["type": "text", "text": serialize(item)]
+            }
+        }
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func textResult(_ text: String, isError: Bool) -> [String: Any] {
+        [
+            "content": [[
+                "type": "text",
+                "text": text,
+            ]],
+            "isError": isError,
+        ]
+    }
+
+    private static func isJSONObjectValue(_ value: Any?) -> Bool {
+        guard let value, !(value is NSNull) else { return false }
+        return JSONSerialization.isValidJSONObject(["value": value])
+    }
+
+    private static func resolveCommand(_ command: String) throws -> String {
+        if command.contains("/") {
+            return (command as NSString).expandingTildeInPath
+        }
+        let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        let fallbackDirs = ["\(NSHomeDirectory())/.local/bin",
+                            "/opt/homebrew/bin",
+                            "/usr/local/bin",
+                            "/usr/bin"]
+        for dir in pathDirs + fallbackDirs {
+            let full = "\(dir)/\(command)"
+            if FileManager.default.isExecutableFile(atPath: full) {
+                return full
+            }
+        }
+        throw AdapterError.commandNotFound(command)
+    }
+
+    private static func parseJSONObject(_ text: String) -> [String: Any]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8)
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func writeResponse(id: Any, result: Any) {
+        writeJSONObject([
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        ])
+    }
+
+    private static func writeError(id: Any, code: Int, message: String) {
+        writeJSONObject([
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": [
+                "code": code,
+                "message": message,
+            ],
+        ])
+    }
+
+    private static func writeJSONObject(_ object: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        FileHandle.standardOutput.write(Data((text + "\n").utf8))
+    }
+
+    private static func serialize(_ value: Any?) -> String {
+        switch value {
+        case let string as String:
+            return string
+        case let object?:
+            guard JSONSerialization.isValidJSONObject(object),
+                  let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+                  let text = String(data: data, encoding: .utf8)
+            else { return "{}" }
+            return text
+        case nil:
+            return "{}"
+        }
     }
 }

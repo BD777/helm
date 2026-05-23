@@ -141,9 +141,12 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
     }
 
     func cancel() {
-        lock.lock(); let p = process; lock.unlock()
-        guard let p, p.isRunning else { return }
-        p.terminate()
+        lock.lock()
+        let p = process
+        process = nil
+        lock.unlock()
+        guard let p else { return }
+        ProcessTreeTerminator.terminate(p)
     }
 
     private func resolveCommand(_ path: String, vendorDefault: String) throws -> String {
@@ -315,19 +318,31 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
     func cancel() {
         let threadId: String?
         let turnId: String?
-        let p: Process?
         lock.lock()
         threadId = activeThreadId
         turnId = activeTurnId
-        p = process
         lock.unlock()
 
         if let threadId, let turnId {
             _ = sendRequest(method: "turn/interrupt",
                             params: ["threadId": threadId, "turnId": turnId])
         }
-        guard let p, p.isRunning else { return }
-        p.terminate()
+
+        let p: Process?
+        let stdin: FileHandle?
+        lock.lock()
+        p = process
+        stdin = stdinHandle
+        process = nil
+        stdinHandle = nil
+        activeTurnId = nil
+        lock.unlock()
+
+        guard let p else {
+            try? stdin?.close()
+            return
+        }
+        ProcessTreeTerminator.terminate(p, closing: stdin)
     }
 
     func respondToApproval(id: String, decision: AgentApprovalDecision) {
@@ -338,35 +353,10 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         lock.unlock()
 
         guard let method, let requestId else { return }
-        let result: Any
-        switch method {
-        case "item/commandExecution/requestApproval":
-            result = ["decision": decision.commandExecutionValue]
-        case "item/fileChange/requestApproval":
-            result = ["decision": decision.commandExecutionValue]
-        case "execCommandApproval", "applyPatchApproval":
-            result = ["decision": decision.legacyApprovalValue]
-        case "mcpServer/elicitation/request":
-            result = [
-                "action": decision.elicitationValue,
-                "content": NSNull(),
-            ]
-        case "item/permissions/requestApproval":
-            let requested = params?["permissions"] as? [String: Any] ?? [:]
-            switch decision {
-            case .accept:
-                result = ["permissions": requested, "scope": "turn"]
-            case .acceptForSession:
-                result = ["permissions": requested, "scope": "session"]
-            case .decline, .cancel:
-                result = ["permissions": [:], "scope": "turn"]
-            }
-        case "item/tool/requestUserInput":
-            result = ["answers": [:]]
-        default:
-            result = ["decision": decision.commandExecutionValue]
-        }
-        sendResponse(id: requestId, result: result)
+        sendResponse(id: requestId,
+                     result: approvalResult(method: method,
+                                            params: params,
+                                            decision: decision))
     }
 
     private func handleServerObject(_ object: [String: Any],
@@ -477,12 +467,72 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
                               message: "Helm does not support app-server request method '\(method)'.")
             return []
         }
+        if shouldAutoApprove(method: method, params: params) {
+            sendResponse(id: id,
+                         result: approvalResult(method: method,
+                                                params: params,
+                                                decision: .acceptForSession))
+            return [.approvalResolved(id: key)]
+        }
         lock.lock()
         pendingApprovalMethods[key] = method
         pendingApprovalRequestIds[key] = id
         pendingApprovalParams[key] = params
         lock.unlock()
         return [.approvalRequest(request)]
+    }
+
+    private func shouldAutoApprove(method: String, params: [String: Any]?) -> Bool {
+        guard sessionSnapshot?.codexApprovalMode == .never else { return false }
+        switch method {
+        case "item/commandExecution/requestApproval",
+             "item/fileChange/requestApproval",
+             "execCommandApproval",
+             "applyPatchApproval",
+             "item/permissions/requestApproval":
+            return true
+        case "mcpServer/elicitation/request":
+            return mcpServerName(from: params) == "computer-use"
+        default:
+            return false
+        }
+    }
+
+    private func approvalResult(method: String,
+                                params: [String: Any]?,
+                                decision: AgentApprovalDecision) -> Any {
+        switch method {
+        case "item/commandExecution/requestApproval":
+            return ["decision": decision.commandExecutionValue]
+        case "item/fileChange/requestApproval":
+            return ["decision": decision.commandExecutionValue]
+        case "execCommandApproval", "applyPatchApproval":
+            return ["decision": decision.legacyApprovalValue]
+        case "mcpServer/elicitation/request":
+            switch decision {
+            case .accept, .acceptForSession:
+                return [
+                    "action": decision.elicitationValue,
+                    "content": [String: Any](),
+                ]
+            case .decline, .cancel:
+                return ["action": decision.elicitationValue]
+            }
+        case "item/permissions/requestApproval":
+            let requested = params?["permissions"] as? [String: Any] ?? [:]
+            switch decision {
+            case .accept:
+                return ["permissions": requested, "scope": "turn"]
+            case .acceptForSession:
+                return ["permissions": requested, "scope": "session"]
+            case .decline, .cancel:
+                return ["permissions": [:], "scope": "turn"]
+            }
+        case "item/tool/requestUserInput":
+            return ["answers": [:]]
+        default:
+            return ["decision": decision.commandExecutionValue]
+        }
     }
 
     private func unsupportedDynamicToolResponse(_ params: [String: Any]?) -> [String: Any] {
@@ -612,7 +662,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
             )
 
         case "mcpServer/elicitation/request":
-            let server = params?["serverName"] as? String
+            let server = mcpServerName(from: params)
             let message = params?["message"] as? String ?? "An MCP server needs your approval."
             let url = params?["url"] as? String
             let detail = [server.map { "server: \($0)" }, url]
@@ -650,6 +700,12 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         default:
             return nil
         }
+    }
+
+    private func mcpServerName(from params: [String: Any]?) -> String? {
+        params?["serverName"] as? String
+            ?? params?["server"] as? String
+            ?? params?["name"] as? String
     }
 
     @discardableResult
@@ -901,7 +957,7 @@ final class CodexStreamParser {
                 ))
             }
             let status = item["status"] as? String ?? ""
-            let isError = status == "failed" || item["error"] != nil
+            let isError = status == "failed" || jsonErrorIsPresent(item["error"])
             out.append(.toolResult(id: id,
                                    output: CodexToolPresentation.resultOutput(result: item["result"],
                                                                               error: item["error"]),
@@ -1043,7 +1099,7 @@ private final class CodexAppServerEventParser {
             let isError = status == "failed"
                 || status == "declined"
                 || (item["isError"] as? Bool == true)
-                || item["error"] != nil
+                || jsonErrorIsPresent(item["error"])
             out.append(.toolResult(
                 id: id,
                 output: CodexToolPresentation.resultOutput(result: descriptor.result,
@@ -1064,7 +1120,7 @@ private final class CodexAppServerEventParser {
     func parseTurnCompleted(_ turn: [String: Any]?) -> [AgentEvent] {
         let status = turn?["status"] as? String ?? "completed"
         let error = turn?["error"]
-        let isError = status != "completed" || error != nil
+        let isError = status != "completed" || jsonErrorIsPresent(error)
         let text = isError
             ? (CodexToolPresentation.resultOutput(result: nil, error: error).isEmpty
                 ? "Codex turn failed."
@@ -1122,7 +1178,8 @@ enum CodexToolPresentation {
             return "/bin/bash -lc \(cmd)"
         }
         if isComputerUse(rawName: rawName, namespace: namespace, server: server) {
-            return serialized.isEmpty ? rawName : "\(rawName) \(serialized)"
+            let tool = computerUseToolName(from: rawName) ?? rawName
+            return serialized.isEmpty ? tool : "\(tool) \(serialized)"
         }
         return serialized
     }
@@ -1170,9 +1227,30 @@ enum CodexToolPresentation {
     ]
 
     private static func isComputerUse(rawName: String, namespace: String?, server: String?) -> Bool {
-        namespace == "mcp__computer_use__"
-            || server == "computer-use"
-            || computerUseTools.contains(rawName)
+        if let namespace,
+           namespace == "mcp__computer_use__" || namespace == "mcp__\(CodexComputerUseMCP.claudeServerName)__" {
+            return true
+        }
+        if let server,
+           server == "computer-use" || server == CodexComputerUseMCP.claudeServerName {
+            return true
+        }
+        if computerUseTools.contains(rawName) {
+            return true
+        }
+        return computerUseToolName(from: rawName).map { computerUseTools.contains($0) } ?? false
+    }
+
+    private static func computerUseToolName(from rawName: String) -> String? {
+        let claudePrefix = "mcp__\(CodexComputerUseMCP.claudeServerName)__"
+        if rawName.hasPrefix(claudePrefix) {
+            return String(rawName.dropFirst(claudePrefix.count))
+        }
+        let codexPrefix = "mcp__computer_use__"
+        if rawName.hasPrefix(codexPrefix) {
+            return String(rawName.dropFirst(codexPrefix.count))
+        }
+        return nil
     }
 
     private static func errorDescription(_ value: Any?) -> String? {
@@ -1188,6 +1266,8 @@ enum CodexToolPresentation {
             }
             let serialized = serialize(object)
             return serialized.isEmpty ? nil : serialized
+        case is NSNull:
+            return nil
         case .some(let object):
             let serialized = serialize(object)
             return serialized.isEmpty ? nil : serialized

@@ -883,11 +883,12 @@ struct ComposerView: View {
             case .claude:
                 claudePermissionChip(session: session)
                 claudeEffortChip(session: session)
+                computerUseChip(session: session)
             case .codex:
                 codexSandboxChip(session: session)
                 codexApprovalChip(session: session)
                 codexEffortChip(session: session)
-                codexComputerUseChip(session: session)
+                computerUseChip(session: session)
             }
         }
     }
@@ -1102,7 +1103,7 @@ struct ComposerView: View {
         .help(runConfigHelp(isLocked, "Codex model_reasoning_effort"))
     }
 
-    private func codexComputerUseChip(session: Session) -> some View {
+    private func computerUseChip(session: Session) -> some View {
         let isLocked = store.isSessionStreaming(session.id)
         let isRemote = store.selectedProject?.location.isSSH == true
         let current = CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic
@@ -1599,7 +1600,8 @@ private struct BuiltinActionPanel: View {
                     let computerUseMode = CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic
                     infoRow("Runtime", "\(session.codexSandboxMode.displayName), \(session.codexApprovalMode.displayName), \(session.codexEffort.displayName), \(computerUseMode.displayName) CU")
                 case .claude:
-                    infoRow("Runtime", "\(session.claudePermissionMode.displayName), \(session.claudeEffort.displayName)")
+                    let computerUseMode = CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic
+                    infoRow("Runtime", "\(session.claudePermissionMode.displayName), \(session.claudeEffort.displayName), \(computerUseMode.displayName) CU")
                 }
             }
         }
