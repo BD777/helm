@@ -7,6 +7,7 @@ struct ProfilesSheet: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @AppStorage("helmAppearance") private var appearanceRawValue = HelmAppearance.system.rawValue
+    @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
     @State private var selection: Selection? = nil
     /// Set when the user clicks a provider's [+] — drives the AddModelsSheet
     /// presentation. Cleared on dismiss.
@@ -17,6 +18,7 @@ struct ProfilesSheet: View {
 
     enum Selection: Hashable {
         case appearance
+        case computerUse
         case provider(UUID)
         case model(UUID)
         case profile(UUID)
@@ -31,6 +33,8 @@ struct ProfilesSheet: View {
                 switch selection {
                 case .appearance:
                     AppearanceSettingsView(appearanceRawValue: $appearanceRawValue)
+                case .computerUse:
+                    ComputerUseSettingsView(modeRawValue: $computerUseModeRawValue)
                 case .provider(let id):
                     if let binding = providerBinding(id) {
                         ProviderEditor(provider: binding,
@@ -85,6 +89,12 @@ struct ProfilesSheet: View {
                         symbolName: HelmAppearance.normalized(appearanceRawValue).symbolName,
                         title: "Appearance",
                         subtitle: HelmAppearance.normalized(appearanceRawValue).title
+                    )
+                    settingsRow(
+                        selection: .computerUse,
+                        symbolName: "cursorarrow.motionlines",
+                        title: "Computer Use",
+                        subtitle: (CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic).displayName
                     )
 
                     section(
@@ -436,6 +446,184 @@ struct ProfilesSheet: View {
             }
             .padding(14)
             .frame(maxWidth: 420, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                    .fill(Color.helmCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                            .stroke(Color.helmBorder, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private struct ComputerUseSettingsView: View {
+        @Binding var modeRawValue: String
+        @State private var diagnostic = CodexComputerUseMCP.diagnose()
+        @State private var isChecking = false
+
+        private var mode: CodexComputerUseMode {
+            CodexComputerUseMode(rawValue: modeRawValue) ?? .automatic
+        }
+
+        private var modeBinding: Binding<CodexComputerUseMode> {
+            Binding(
+                get: { mode },
+                set: { modeRawValue = $0.rawValue }
+            )
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                section("Local MCP") {
+                    Picker("", selection: modeBinding) {
+                        ForEach(CodexComputerUseMode.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360)
+
+                    Text(mode.helpText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: statusIcon)
+                            .foregroundStyle(statusColor)
+                            .frame(width: 14)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(diagnostic.title)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(diagnostic.detail)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if let command = diagnostic.command {
+                        infoRow("Command", command)
+                    }
+                    if let cwd = diagnostic.cwd {
+                        infoRow("Cwd", cwd)
+                    }
+
+                    Button {
+                        refresh(force: true)
+                    } label: {
+                        if isChecking {
+                            Label("Checking", systemImage: "arrow.clockwise")
+                        } else {
+                            Label("Check", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(isChecking)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.helmChatBg)
+            .onAppear { refresh(force: false) }
+            .onChange(of: modeRawValue) { _, _ in refresh(force: true) }
+        }
+
+        private var header: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "cursorarrow.motionlines")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Computer Use")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Codex App MCP")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+
+        private var statusIcon: String {
+            switch diagnostic.state {
+            case .ready: return "checkmark.circle.fill"
+            case .disabled, .unsupportedRemote: return "minus.circle"
+            case .found: return "checkmark.circle"
+            case .checking: return "arrow.clockwise.circle"
+            case .missing, .failed: return "exclamationmark.triangle.fill"
+            }
+        }
+
+        private var statusColor: Color {
+            switch diagnostic.state {
+            case .ready: return .green
+            case .disabled, .unsupportedRemote: return .secondary
+            case .found, .checking: return .blue
+            case .missing, .failed: return .orange
+            }
+        }
+
+        private func refresh(force: Bool) {
+            let currentMode = mode
+            if !force {
+                diagnostic = CodexComputerUseMCP.diagnose(mode: currentMode, refresh: false)
+                return
+            }
+
+            let current = CodexComputerUseMCP.diagnose(mode: currentMode, refresh: false)
+            diagnostic = CodexComputerUseDiagnostic(
+                state: .checking,
+                title: "Checking",
+                detail: "Starting Computer Use MCP and reading its tool list on this device.",
+                command: current.command,
+                cwd: current.cwd
+            )
+            isChecking = true
+            Task {
+                let result = await Task.detached(priority: .userInitiated) {
+                    CodexComputerUseMCP.diagnose(mode: currentMode, refresh: true)
+                }.value
+                guard !Task.isCancelled else { return }
+                if mode == currentMode {
+                    diagnostic = result
+                }
+                isChecking = false
+            }
+        }
+
+        private func infoRow(_ label: String, _ value: String) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Text(value)
+                    .font(DS.monoFontSmall)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+
+        private func section<Content: View>(_ title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                content()
+            }
+            .padding(14)
+            .frame(maxWidth: 520, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
                     .fill(Color.helmCard)

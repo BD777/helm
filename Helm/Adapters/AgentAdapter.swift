@@ -154,6 +154,12 @@ enum AgentEvent: Sendable {
     /// Result of a tool call (from the agent's own tool runner — not Helm's).
     case toolResult(id: String, output: String, isError: Bool)
 
+    /// The agent runtime needs a user decision before it can continue.
+    case approvalRequest(AgentApprovalRequest)
+
+    /// A previously-surfaced approval request has been resolved elsewhere.
+    case approvalResolved(id: String)
+
     /// One assistant message completes.
     case messageStop
 
@@ -162,6 +168,31 @@ enum AgentEvent: Sendable {
 
     /// Surfaced when the adapter or child process errors out.
     case error(String)
+}
+
+struct AgentApprovalRequest: Identifiable, Equatable, Sendable {
+    enum Kind: String, Sendable {
+        case command
+        case fileChange
+        case mcpElicitation
+        case permissions
+        case userInput
+        case other
+    }
+
+    let id: String
+    let kind: Kind
+    let title: String
+    let message: String
+    let detail: String?
+    let allowsSessionApproval: Bool
+}
+
+enum AgentApprovalDecision: Sendable {
+    case accept
+    case acceptForSession
+    case decline
+    case cancel
 }
 
 protocol AgentAdapter: AnyObject {
@@ -181,4 +212,13 @@ protocol AgentAdapter: AnyObject {
     /// Best-effort cancellation. Adapters should SIGTERM the child and let
     /// the stream finish with `.error("cancelled")` or similar.
     func cancel()
+
+    /// Respond to an in-flight approval request previously emitted as
+    /// `.approvalRequest`. Adapters that do not have a bidirectional protocol can
+    /// ignore this; app-server based adapters should send a JSON-RPC response.
+    func respondToApproval(id: String, decision: AgentApprovalDecision)
+}
+
+extension AgentAdapter {
+    func respondToApproval(id: String, decision: AgentApprovalDecision) {}
 }

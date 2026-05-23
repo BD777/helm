@@ -299,6 +299,7 @@ struct CodexSessionLogParser {
         case "function_call":
             let callId = payload["call_id"] as? String ?? UUID().uuidString
             let rawName = payload["name"] as? String ?? "tool"
+            let namespace = payload["namespace"] as? String
             let arguments = payload["arguments"] as? String ?? ""
             let toolCallId = UUID()
             items.append(.message(Message(
@@ -308,11 +309,70 @@ struct CodexSessionLogParser {
                 meta: nil,
                 parts: [.toolCall(ToolCall(
                     id: toolCallId,
-                    name: toolName(rawName),
-                    arg: toolArgument(rawName: rawName, arguments: arguments),
+                    name: CodexToolPresentation.name(rawName: rawName, namespace: namespace),
+                    arg: CodexToolPresentation.argument(rawName: rawName,
+                                                        namespace: namespace,
+                                                        arguments: arguments),
                     status: .running,
                     meta: nil,
                     body: nil))])))
+            toolIndex[callId] = (items.count - 1, toolCallId)
+
+        case "mcp_tool_call", "mcpToolCall":
+            let callId = payload["id"] as? String
+                ?? payload["call_id"] as? String
+                ?? payload["callId"] as? String
+                ?? UUID().uuidString
+            let rawName = payload["tool"] as? String
+                ?? payload["toolName"] as? String
+                ?? "tool"
+            let server = payload["server"] as? String
+                ?? payload["serverName"] as? String
+            let status = payload["status"] as? String ?? ""
+            let hasResult = payload["result"] != nil || payload["error"] != nil
+            let body = hasResult
+                ? CodexToolPresentation.resultOutput(result: payload["result"],
+                                                     error: payload["error"])
+                : nil
+            let isError = status == "failed" || payload["error"] != nil
+            let renderedStatus: ToolCall.Status = hasResult
+                ? (isError ? .error(exit: 1) : .ok(exit: 0))
+                : .running
+            if let mapping = toolIndex[callId],
+               mapping.itemIdx < items.count,
+               case .message(var msg) = items[mapping.itemIdx],
+               let partIdx = msg.parts.firstIndex(where: {
+                   if case .toolCall(let call) = $0 {
+                       return call.id == mapping.callId
+                   }
+                   return false
+               }),
+               case .toolCall(var call) = msg.parts[partIdx] {
+                call.body = body ?? call.body
+                call.status = renderedStatus
+                msg.parts[partIdx] = .toolCall(call)
+                items[mapping.itemIdx] = .message(msg)
+                return
+            }
+
+            let toolCallId = UUID()
+            items.append(.message(Message(
+                id: UUID(),
+                role: .assistant(meta: "done"),
+                who: "codex",
+                meta: nil,
+                parts: [.toolCall(ToolCall(
+                    id: toolCallId,
+                    name: CodexToolPresentation.name(rawName: rawName,
+                                                     namespace: nil,
+                                                     server: server),
+                    arg: CodexToolPresentation.argument(rawName: rawName,
+                                                        namespace: nil,
+                                                        server: server,
+                                                        arguments: payload["arguments"]),
+                    status: renderedStatus,
+                    meta: nil,
+                    body: body))])))
             toolIndex[callId] = (items.count - 1, toolCallId)
 
         case "function_call_output":
@@ -330,7 +390,9 @@ struct CodexSessionLogParser {
             else { return }
             let output = payload["output"] as? String ?? ""
             call.body = output
-            if let exit = exitCode(from: output) {
+            if payload["is_error"] as? Bool == true {
+                call.status = .error(exit: 1)
+            } else if let exit = exitCode(from: output) {
                 call.status = exit == 0 ? .ok(exit: exit) : .error(exit: exit)
             } else {
                 call.status = .ok(exit: 0)
@@ -373,24 +435,6 @@ struct CodexSessionLogParser {
                 items[idx] = .message(msg)
             }
         }
-    }
-
-    private func toolName(_ rawName: String) -> String {
-        switch rawName {
-        case "exec_command": return "Shell"
-        case "apply_patch": return "Apply Patch"
-        default: return rawName
-        }
-    }
-
-    private func toolArgument(rawName: String, arguments: String) -> String {
-        guard rawName == "exec_command",
-              let data = arguments.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cmd = obj["cmd"] as? String,
-              !cmd.isEmpty
-        else { return arguments }
-        return "/bin/bash -lc \(cmd)"
     }
 
     private func outputText(_ raw: Any?) -> String? {

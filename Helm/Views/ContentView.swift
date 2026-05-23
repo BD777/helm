@@ -33,8 +33,18 @@ struct ContentView: View {
                         .zIndex(30)
                 }
             }
+            .overlay {
+                if let approval = store.pendingApproval {
+                    ApprovalRequestOverlay(request: approval) { decision in
+                        store.respondToApproval(decision)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                    .zIndex(40)
+                }
+            }
             .animation(.easeOut(duration: 0.14), value: store.imagePreviewURL)
             .animation(.easeOut(duration: 0.12), value: store.showQuickSwitcher)
+            .animation(.easeOut(duration: 0.12), value: store.pendingApproval?.id)
             .onAppear {
                 HelmCommandCenter.shared.bind(store: store)
             }
@@ -120,6 +130,112 @@ struct ContentView: View {
             insertion: .move(edge: .leading).combined(with: .opacity),
             removal: .move(edge: .leading).combined(with: .opacity)
         )
+}
+
+private struct ApprovalRequestOverlay: View {
+    let request: AgentApprovalRequest
+    let respond: (AgentApprovalDecision) -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.14)
+                .ignoresSafeArea()
+
+            panel
+        }
+        .onExitCommand {
+            respond(.cancel)
+        }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: iconName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(request.title)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(request.message)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if let detail = request.detail, !detail.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(detail)
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+                .padding(10)
+                .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    respond(.cancel)
+                } label: {
+                    Label("Cancel", systemImage: "xmark")
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button {
+                    respond(.decline)
+                } label: {
+                    Label("Deny", systemImage: "hand.raised")
+                }
+
+                Spacer(minLength: 12)
+
+                if request.allowsSessionApproval {
+                    Button {
+                        respond(.acceptForSession)
+                    } label: {
+                        Label("Session", systemImage: "checkmark.seal")
+                    }
+                }
+
+                Button {
+                    respond(.accept)
+                } label: {
+                    Label("Approve", systemImage: "checkmark")
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .controlSize(.small)
+        }
+        .padding(18)
+        .frame(width: 520)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 24, x: 0, y: 12)
+        .padding(.horizontal, 28)
+    }
+
+    private var iconName: String {
+        switch request.kind {
+        case .command: return "terminal"
+        case .fileChange: return "doc.text"
+        case .mcpElicitation: return "app.connected.to.app.below.fill"
+        case .permissions: return "lock.shield"
+        case .userInput: return "questionmark.bubble"
+        case .other: return "checkmark.shield"
+        }
+    }
 }
 
 private struct QuickSwitcherView: View {

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ComposerView: View {
     @Environment(AppStore.self) private var store
+    @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
     var externalFocusRequest: Int = 0
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
@@ -886,6 +887,7 @@ struct ComposerView: View {
                 codexSandboxChip(session: session)
                 codexApprovalChip(session: session)
                 codexEffortChip(session: session)
+                codexComputerUseChip(session: session)
             }
         }
     }
@@ -924,6 +926,26 @@ struct ComposerView: View {
 
     private func runConfigHelp(_ isLocked: Bool, _ unlockedHelp: String) -> String {
         isLocked ? "Cannot change while response is running" : unlockedHelp
+    }
+
+    private func computerUseChipText(_ mode: CodexComputerUseMode) -> String {
+        switch mode {
+        case .automatic: return "CU auto"
+        case .enabled: return "CU on"
+        case .disabled: return "CU off"
+        }
+    }
+
+    private func computerUseHelp(isLocked: Bool,
+                                 isRemote: Bool,
+                                 mode: CodexComputerUseMode) -> String {
+        if isLocked {
+            return "Cannot change while response is running"
+        }
+        if isRemote {
+            return "Computer Use is local-only and is skipped for SSH sessions."
+        }
+        return mode.helpText
     }
 
     private func sshStatusChip(_ status: SSHStatus) -> some View {
@@ -1078,6 +1100,37 @@ struct ComposerView: View {
         .fixedSize()
         .disabled(isLocked)
         .help(runConfigHelp(isLocked, "Codex model_reasoning_effort"))
+    }
+
+    private func codexComputerUseChip(session: Session) -> some View {
+        let isLocked = store.isSessionStreaming(session.id)
+        let isRemote = store.selectedProject?.location.isSSH == true
+        let current = CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic
+        return Menu {
+            ForEach(CodexComputerUseMode.allCases) { mode in
+                Button {
+                    computerUseModeRawValue = mode.rawValue
+                    refocusComposerAfterMenuSelection()
+                } label: {
+                    menuSelectionLabel(mode.displayName,
+                                       selected: mode == current)
+                }
+            }
+            Divider()
+            if isRemote {
+                Text("SSH sessions skip local Computer Use")
+            } else {
+                Text(CodexComputerUseMCP.diagnose(mode: current).title)
+            }
+        } label: {
+            chipLabel(icon: "cursorarrow.motionlines",
+                      text: isRemote ? "CU off" : computerUseChipText(current))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(isLocked)
+        .help(computerUseHelp(isLocked: isLocked, isRemote: isRemote, mode: current))
     }
 
     private func chipLabel(icon: String, text: String) -> some View {
@@ -1450,6 +1503,7 @@ private struct BuiltinAction: Identifiable, Hashable {
 
 private struct BuiltinActionPanel: View {
     @Environment(AppStore.self) private var store
+    @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
 
     let kind: BuiltinAction.Kind
     let onClose: () -> Void
@@ -1542,7 +1596,8 @@ private struct BuiltinActionPanel: View {
             if let session, let profile {
                 switch profile.vendor {
                 case .codex:
-                    infoRow("Runtime", "\(session.codexSandboxMode.displayName), \(session.codexApprovalMode.displayName), \(session.codexEffort.displayName)")
+                    let computerUseMode = CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic
+                    infoRow("Runtime", "\(session.codexSandboxMode.displayName), \(session.codexApprovalMode.displayName), \(session.codexEffort.displayName), \(computerUseMode.displayName) CU")
                 case .claude:
                     infoRow("Runtime", "\(session.claudePermissionMode.displayName), \(session.claudeEffort.displayName)")
                 }

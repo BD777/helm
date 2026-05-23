@@ -43,6 +43,7 @@ final class AppStore {
     var showSSHProjectSheet: Bool = false
     var showQuickSwitcher: Bool = false
     var imagePreviewURL: URL?
+    var pendingApproval: AgentApprovalRequest?
     var composerFocusTick: Int = 0
 
     /// Bumped each time the user sends a message. The chat list watches this
@@ -742,7 +743,10 @@ final class AppStore {
         let adapter: AgentAdapter
         switch profile.vendor {
         case .claude: adapter = ClaudeLocalAdapter()
-        case .codex:  adapter = CodexLocalAdapter()
+        case .codex:
+            adapter = project.location.isSSH
+                ? CodexLocalAdapter()
+                : CodexAppServerAdapter()
         }
         currentAdapter = adapter
 
@@ -770,6 +774,7 @@ final class AppStore {
         guard isStreaming else { return }
         let adapter = currentAdapter
         let task = streamTask
+        pendingApproval = nil
         if let sessionId = activeSessionId,
            let assistantId = activeAssistantId {
             markRunStopped(sessionId: sessionId, assistantId: assistantId)
@@ -792,6 +797,13 @@ final class AppStore {
         activeAssistantId = nil
         activeRunStartedAt = nil
         toolMap = [:]
+        pendingApproval = nil
+    }
+
+    func respondToApproval(_ decision: AgentApprovalDecision) {
+        guard let request = pendingApproval else { return }
+        currentAdapter?.respondToApproval(id: request.id, decision: decision)
+        pendingApproval = nil
     }
 
     private func consumeAgentStream(_ stream: AsyncThrowingStream<AgentEvent, Error>,
@@ -969,6 +981,14 @@ final class AppStore {
                 call.body = output
                 call.status = isError ? .error(exit: 1) : .ok(exit: 0)
                 msg.parts[pIdx] = .toolCall(call)
+            }
+
+        case .approvalRequest(let request):
+            pendingApproval = request
+
+        case .approvalResolved(let id):
+            if pendingApproval?.id == id {
+                pendingApproval = nil
             }
 
         case .messageStop:

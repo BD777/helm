@@ -242,6 +242,44 @@ enum CodexApprovalMode: String, CaseIterable, Hashable, Codable {
     }
 }
 
+/// Device-level Computer Use setting. The MCP server is a local macOS capability,
+/// so it follows the machine, not a profile that may also run over SSH.
+enum CodexComputerUseMode: String, CaseIterable, Hashable, Codable, Identifiable {
+    case automatic
+    case enabled
+    case disabled
+
+    static let userDefaultsKey = "codexComputerUseMCPMode"
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .enabled: return "Enabled"
+        case .disabled: return "Disabled"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .automatic:
+            return "Use Codex App's bundled Computer Use MCP for local Codex sessions when it is installed and startable."
+        case .enabled:
+            return "Require Computer Use MCP for local Codex sessions; sending fails if the local bundle is missing or cannot start."
+        case .disabled:
+            return "Do not attach Computer Use MCP to Helm-launched Codex sessions."
+        }
+    }
+
+    static func stored(in defaults: UserDefaults = .standard) -> Self {
+        guard let raw = defaults.string(forKey: userDefaultsKey),
+              let mode = Self(rawValue: raw)
+        else { return .automatic }
+        return mode
+    }
+}
+
 /// Claude's `--effort` flag. Five levels — `max` is unique to Claude; Codex's
 /// `model_reasoning_effort` tops out at `xhigh`.
 enum ClaudeEffort: String, CaseIterable, Hashable, Codable {
