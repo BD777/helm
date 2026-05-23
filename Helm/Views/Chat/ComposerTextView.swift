@@ -424,6 +424,7 @@ private final class ComposerSkillTextAttachment: NSTextAttachment {
 private enum ComposerSkillChipRenderer {
     private static let height: CGFloat = 18
     private static let iconSize: CGFloat = 13
+    private static let iconTextGap: CGFloat = 2
 
     static func image(for skill: ComposerSkill) -> NSImage {
         let accent = NSColor.controlAccentColor
@@ -434,7 +435,8 @@ private enum ComposerSkillChipRenderer {
 
         let name = skill.name as NSString
         let nameSize = name.size(withAttributes: nameAttributes)
-        let width = min(260, iconSize + 6 + ceil(nameSize.width))
+        let textX = iconSize + iconTextGap
+        let width = min(260, textX + ceil(nameSize.width))
         let image = NSImage(size: NSSize(width: width, height: height))
 
         image.lockFocus()
@@ -453,9 +455,9 @@ private enum ComposerSkillChipRenderer {
                       fraction: 1)
         }
 
-        name.draw(with: NSRect(x: iconSize + 6,
+        name.draw(with: NSRect(x: textX,
                                y: (height - nameSize.height) / 2 - 0.7,
-                               width: max(0, width - iconSize - 6),
+                               width: max(0, width - textX),
                                height: nameSize.height),
                   options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
                   attributes: nameAttributes)
