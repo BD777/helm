@@ -1427,14 +1427,17 @@ private enum ComposerSkillCatalog {
                                           component: String,
                                           label: String,
                                           fileManager: FileManager) -> [(label: String, url: URL, depth: Int)] {
-        let root = project.standardizedFileURL
-        var roots: [(label: String, url: URL, depth: Int)] = [
-            (label, root.appendingPathComponent(component, isDirectory: true), 3),
-        ]
+        let start = project.standardizedFileURL
+        let stop = nearestGitRoot(from: start, fileManager: fileManager) ?? start
+        var cursor = start
+        var roots: [(label: String, url: URL, depth: Int)] = []
 
-        if let gitRoot = nearestGitRoot(from: root, fileManager: fileManager),
-           gitRoot != root {
-            roots.append((label, gitRoot.appendingPathComponent(component, isDirectory: true), 3))
+        while true {
+            roots.append((label, cursor.appendingPathComponent(component, isDirectory: true), 3))
+            if cursor.path == stop.path { break }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path { break }
+            cursor = parent
         }
         return roots
     }
@@ -1526,41 +1529,40 @@ home = os.path.expanduser("~")
 def root(path):
     return os.path.abspath(os.path.expanduser(path))
 
+def git_root(path):
+    cursor = root(path)
+    while True:
+        if os.path.exists(os.path.join(cursor, ".git")):
+            return cursor
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            return None
+        cursor = parent
+
+def parent_project_roots(path, components):
+    cursor = root(path)
+    stop = git_root(cursor) or cursor
+    out = []
+    while True:
+        out.append(("Project", root(os.path.join(cursor, *components)), 3))
+        if cursor == stop:
+            break
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    return out
+
 if vendor == "claude":
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude")
-    roots = [
-        ("Project", root(os.path.join(project, ".claude", "skills")), 3),
+    roots = parent_project_roots(project, [".claude", "skills"]) + [
         ("Claude", root(os.path.join(config, "skills")), 2),
     ]
 else:
     config = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
     agents_home = root(os.path.join(home, ".agents"))
 
-    def git_root(path):
-        cursor = root(path)
-        while True:
-            if os.path.exists(os.path.join(cursor, ".git")):
-                return cursor
-            parent = os.path.dirname(cursor)
-            if parent == cursor:
-                return None
-            cursor = parent
-
-    def codex_project_roots(path):
-        cursor = root(path)
-        stop = git_root(cursor) or cursor
-        out = []
-        while True:
-            out.append(("Project", root(os.path.join(cursor, ".agents", "skills")), 3))
-            if cursor == stop:
-                break
-            parent = os.path.dirname(cursor)
-            if parent == cursor:
-                break
-            cursor = parent
-        return out
-
-    roots = codex_project_roots(project) + [
+    roots = parent_project_roots(project, [".agents", "skills"]) + [
         ("User", root(os.path.join(agents_home, "skills")), 3),
         ("Codex", root(os.path.join(config, "skills")), 3),
         ("Admin", "/etc/codex/skills", 3),
