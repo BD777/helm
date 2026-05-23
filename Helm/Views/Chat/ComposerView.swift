@@ -1050,23 +1050,12 @@ private enum ComposerSkillCatalog {
         var description = ""
 
         if raw.hasPrefix("---") {
-            let lines = raw.components(separatedBy: .newlines)
-            for line in lines.dropFirst() {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed == "---" {
-                    break
-                }
-                guard let colon = trimmed.firstIndex(of: ":") else { continue }
-                let key = trimmed[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                let value = trimmed[trimmed.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
-                switch key {
-                case "name":
-                    name = cleanYAMLScalar(String(value))
-                case "description":
-                    description = cleanYAMLScalar(String(value))
-                default:
-                    break
-                }
+            let frontmatter = frontmatterValues(in: raw)
+            if let frontmatterName = frontmatter["name"] {
+                name = frontmatterName
+            }
+            if let frontmatterDescription = frontmatter["description"] {
+                description = frontmatterDescription
             }
         }
 
@@ -1114,6 +1103,88 @@ private enum ComposerSkillCatalog {
             return String(trimmed.dropFirst().dropLast())
         }
         return trimmed
+    }
+
+    private static func frontmatterValues(in raw: String) -> [String: String] {
+        let lines = raw.components(separatedBy: .newlines)
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else {
+            return [:]
+        }
+
+        var values: [String: String] = [:]
+        var index = 1
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == "---" { break }
+            guard !trimmed.isEmpty,
+                  !trimmed.hasPrefix("#"),
+                  let colon = trimmed.firstIndex(of: ":")
+            else {
+                index += 1
+                continue
+            }
+
+            let key = trimmed[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let rawValue = trimmed[trimmed.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if isYAMLBlockScalar(String(rawValue)) {
+                var blockLines: [String] = []
+                index += 1
+                while index < lines.count {
+                    let next = lines[index]
+                    let nextTrimmed = next.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if nextTrimmed == "---" { break }
+                    if !nextTrimmed.isEmpty && !startsWithWhitespace(next) {
+                        break
+                    }
+                    blockLines.append(next)
+                    index += 1
+                }
+                values[key] = cleanYAMLBlockScalar(blockLines)
+                continue
+            }
+
+            values[key] = cleanYAMLScalar(String(rawValue))
+            index += 1
+        }
+        return values
+    }
+
+    private static func isYAMLBlockScalar(_ raw: String) -> Bool {
+        guard let first = raw.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return false
+        }
+        return first == "|" || first == ">"
+    }
+
+    private static func startsWithWhitespace(_ raw: String) -> Bool {
+        guard let first = raw.unicodeScalars.first else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(first)
+    }
+
+    private static func cleanYAMLBlockScalar(_ lines: [String]) -> String {
+        let nonEmptyLines = lines.filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let commonIndent = nonEmptyLines
+            .map(leadingWhitespaceCount)
+            .min() ?? 0
+        return lines
+            .map { line in
+                String(line.dropFirst(min(commonIndent, line.count)))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func leadingWhitespaceCount(_ raw: String) -> Int {
+        var count = 0
+        for scalar in raw.unicodeScalars {
+            guard CharacterSet.whitespaces.contains(scalar) else { break }
+            count += 1
+        }
+        return count
     }
 
     private static func firstBodySummary(_ raw: String) -> String {
