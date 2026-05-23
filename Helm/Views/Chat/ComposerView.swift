@@ -298,6 +298,10 @@ struct ComposerView: View {
     private func handleSlashContextChange(_ context: ComposerSlashContext?) {
         let oldContext = slashContext
         slashContext = context
+        if oldContext?.signature != context?.signature {
+            slashHighlightedId = nil
+            slashScrollTargetId = nil
+        }
         if slashSuppressedSignature != context?.signature {
             slashSuppressedSignature = nil
         }

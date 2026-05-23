@@ -64,9 +64,7 @@ struct ComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let tv = scroll.documentView as? PlaceholderTextView else { return }
-        if tv.string != text || tv.skillChips() != skillChips {
-            tv.setComposerText(text, skillChips: skillChips)
-        }
+        context.coordinator.parent = self
         tv.placeholder = placeholder
         tv.onKeyDown = onKeyDown
         tv.onTextCommand = onTextCommand
@@ -77,6 +75,11 @@ struct ComposerTextView: NSViewRepresentable {
            context.coordinator.consumeSkillInsertionRequest(skillInsertionRequest.id) {
             tv.insertSkillChip(skillInsertionRequest.skill)
             insertedSkill = true
+        } else if !context.coordinator.shouldDeferExternalSync(text: text,
+                                                               skillChips: skillChips,
+                                                               textView: tv),
+                  tv.string != text || tv.skillChips() != skillChips {
+            tv.setComposerText(text, skillChips: skillChips)
         }
         if context.coordinator.consumeFocusRequest(focusRequest) {
             context.coordinator.focus(tv, moveCursorToEnd: !insertedSkill)
@@ -114,6 +117,11 @@ struct ComposerTextView: NSViewRepresentable {
         var parent: ComposerTextView
         private var lastFocusRequest: Int
         private var lastSkillInsertionRequest: UUID?
+        private var pendingLocalText: String?
+        private var pendingLocalSkillChips: [ComposerSkill]?
+        private var pendingExternalTextBeforeLocalEdit: String?
+        private var pendingExternalSkillChipsBeforeLocalEdit: [ComposerSkill]?
+        private var pendingLocalEditDeadline: Date?
 
         init(_ p: ComposerTextView) {
             self.parent = p
@@ -123,8 +131,16 @@ struct ComposerTextView: NSViewRepresentable {
         func textDidChange(_ note: Notification) {
             guard let tv = note.object as? PlaceholderTextView else { return }
             tv.typingAttributes = ComposerTextView.plainTextAttributes
-            parent.text = tv.string
-            parent.skillChips = tv.skillChips()
+            let localText = tv.string
+            let localSkillChips = tv.skillChips()
+            let externalTextBeforeLocalEdit = parent.text
+            let externalSkillChipsBeforeLocalEdit = parent.skillChips
+            parent.text = localText
+            parent.skillChips = localSkillChips
+            markPendingLocalEdit(text: localText,
+                                 skillChips: localSkillChips,
+                                 externalText: externalTextBeforeLocalEdit,
+                                 externalSkillChips: externalSkillChipsBeforeLocalEdit)
             parent.onSlashContextChange(tv.currentSlashContext())
         }
 
@@ -143,6 +159,57 @@ struct ComposerTextView: NSViewRepresentable {
             guard request != lastSkillInsertionRequest else { return false }
             lastSkillInsertionRequest = request
             return true
+        }
+
+        func shouldDeferExternalSync(text: String,
+                                     skillChips: [ComposerSkill],
+                                     textView: PlaceholderTextView) -> Bool {
+            guard let pendingLocalText,
+                  let pendingLocalSkillChips,
+                  let pendingExternalTextBeforeLocalEdit,
+                  let pendingExternalSkillChipsBeforeLocalEdit,
+                  let deadline = pendingLocalEditDeadline
+            else { return false }
+
+            if text == pendingLocalText && skillChips == pendingLocalSkillChips {
+                clearPendingLocalEdit()
+                return false
+            }
+            guard Date() < deadline else {
+                clearPendingLocalEdit()
+                return false
+            }
+            guard text == pendingExternalTextBeforeLocalEdit &&
+                skillChips == pendingExternalSkillChipsBeforeLocalEdit
+            else {
+                clearPendingLocalEdit()
+                return false
+            }
+            if textView.string == pendingLocalText &&
+                textView.skillChips() == pendingLocalSkillChips {
+                return true
+            }
+            clearPendingLocalEdit()
+            return false
+        }
+
+        private func markPendingLocalEdit(text: String,
+                                          skillChips: [ComposerSkill],
+                                          externalText: String,
+                                          externalSkillChips: [ComposerSkill]) {
+            pendingLocalText = text
+            pendingLocalSkillChips = skillChips
+            pendingExternalTextBeforeLocalEdit = externalText
+            pendingExternalSkillChipsBeforeLocalEdit = externalSkillChips
+            pendingLocalEditDeadline = Date().addingTimeInterval(0.35)
+        }
+
+        private func clearPendingLocalEdit() {
+            pendingLocalText = nil
+            pendingLocalSkillChips = nil
+            pendingExternalTextBeforeLocalEdit = nil
+            pendingExternalSkillChipsBeforeLocalEdit = nil
+            pendingLocalEditDeadline = nil
         }
 
         func focus(_ tv: NSTextView, moveCursorToEnd: Bool) {
@@ -410,7 +477,10 @@ private final class ComposerSkillTextAttachment: NSTextAttachment {
         super.init(data: nil, ofType: nil)
         let image = ComposerSkillChipRenderer.image(for: skill)
         self.image = image
-        self.bounds = NSRect(x: 0, y: -3.5, width: image.size.width, height: image.size.height)
+        self.bounds = NSRect(x: 0,
+                             y: ComposerSkillChipRenderer.baselineOffset,
+                             width: image.size.width,
+                             height: image.size.height)
     }
 
     @available(*, unavailable)
@@ -423,6 +493,10 @@ private enum ComposerSkillChipRenderer {
     private static let height: CGFloat = 18
     private static let iconSize: CGFloat = 13
     private static let iconTextGap: CGFloat = 2
+    static var baselineOffset: CGFloat {
+        let font = ComposerTextView.font
+        return (font.ascender + font.descender - height) / 2
+    }
 
     static func image(for skill: ComposerSkill) -> NSImage {
         let accent = NSColor.controlAccentColor
