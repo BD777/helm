@@ -25,9 +25,7 @@ struct ComposerView: View {
     @State private var slashContext: ComposerSlashContext?
     @State private var slashSuppressedSignature: String?
     @State private var activeBuiltinAction: BuiltinAction.Kind?
-    @State private var goalPanelVisible = false
-    @State private var goalDraftText = ""
-    @State private var goalBudgetDraft = ""
+    @State private var goalActionActive = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,7 +50,6 @@ struct ComposerView: View {
             loadDraft(for: newSessionId)
             refreshSkillsAsync(force: true)
             activeBuiltinAction = nil
-            goalPanelVisible = false
             requestComposerFocus()
         }
         .onChange(of: pickerOpen) { _, isOpen in
@@ -143,29 +140,10 @@ struct ComposerView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
                 .zIndex(9)
             }
-            if let session = store.selectedSession,
-               goalPanelVisible,
-               !slashMenuVisible,
-               activeBuiltinAction == nil {
-                GoalPanel(
-                    session: session,
-                    vendor: selectedVendor,
-                    goalText: $goalDraftText,
-                    tokenBudgetText: $goalBudgetDraft,
-                    onClose: closeGoalPanel,
-                    onSave: { saveGoalDraft(for: session) },
-                    onClear: { clearGoal(for: session) },
-                    onComplete: { completeGoal(for: session) }
-                )
-                .frame(width: goalPanelWidth, height: goalPanelHeight)
-                .offset(x: 0, y: -(goalPanelHeight + 8))
-                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
-                .zIndex(8)
-            }
         }
         .animation(.easeOut(duration: 0.10), value: slashMenuVisible)
         .animation(.easeOut(duration: 0.10), value: activeBuiltinAction)
-        .animation(.easeOut(duration: 0.10), value: goalPanelVisible)
+        .animation(.easeOut(duration: 0.10), value: goalActionActive)
     }
 
     private var hasComposerContent: Bool {
@@ -239,17 +217,28 @@ struct ComposerView: View {
             return
         }
         let toSend = composedPrompt()
+        let agentPrompt = goalActionActive ? Self.promptWithGoalAction(toSend) : toSend
         let displayParts = composerDisplayParts()
         let toSendAttachments = attachments
+        let goalEvent: SessionEvent? = goalActionActive
+            ? .goalApplied(id: UUID(),
+                           goal: toSend,
+                           vendor: selectedVendor,
+                           appliedAt: Date())
+            : nil
         text = ""
         selectedSkills = []
         attachments = []
         activeBuiltinAction = nil
-        goalPanelVisible = false
+        goalActionActive = false
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
         }
-        store.send(toSend, displayParts: displayParts, attachments: toSendAttachments)
+        store.send(toSend,
+                   displayParts: displayParts,
+                   attachments: toSendAttachments,
+                   agentPrompt: agentPrompt,
+                   preUserEvents: goalEvent.map { [$0] } ?? [])
     }
 
     private func composedPrompt() -> String {
@@ -320,6 +309,12 @@ struct ComposerView: View {
         case .codex:
             return "$\(skill.name)"
         }
+    }
+
+    private static func promptWithGoalAction(_ prompt: String) -> String {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "/goal" }
+        return "/goal \(trimmed)"
     }
 
     private static func displayPartsForComposerText(_ text: String,
@@ -454,7 +449,6 @@ struct ComposerView: View {
         slashContext = context
         if context != nil {
             activeBuiltinAction = nil
-            goalPanelVisible = false
         }
         if oldContext?.signature != context?.signature {
             slashHighlightedId = nil
@@ -612,19 +606,13 @@ struct ComposerView: View {
         return min(680, max(320, footerWidth))
     }
 
-    private var goalPanelWidth: CGFloat {
-        builtinActionPanelWidth
-    }
-
-    private var goalPanelHeight: CGFloat {
-        244
-    }
-
     private func builtinActionPanelHeight(for kind: BuiltinAction.Kind) -> CGFloat {
         switch kind {
         case .status:
-            return 274
+            return 246
         case .compact:
+            return 156
+        case .goal:
             return 156
         case .help:
             return 286
@@ -657,8 +645,16 @@ struct ComposerView: View {
 
     private func selectBuiltinAction(_ kind: BuiltinAction.Kind) {
         resetSlashPickerState()
-        goalPanelVisible = false
-        activeBuiltinAction = kind
+        switch kind {
+        case .compact:
+            sendBuiltinCommand(BuiltinAction.definition(for: kind, vendor: selectedVendor).commandName)
+        case .goal:
+            goalActionActive = true
+            activeBuiltinAction = nil
+            refocusComposerAfterMenuSelection()
+        case .status, .help:
+            activeBuiltinAction = kind
+        }
     }
 
     private func closeBuiltinActionPanel() {
@@ -666,111 +662,59 @@ struct ComposerView: View {
         requestComposerFocus()
     }
 
+    private func sendBuiltinCommand(_ command: String) {
+        guard !store.isStreaming,
+              selectedSSHSendBlockReason == nil
+        else {
+            requestComposerFocus()
+            return
+        }
+        activeBuiltinAction = nil
+        store.send(command, displayParts: [.text(command)], attachments: [])
+        refocusComposerAfterMenuSelection()
+    }
+
     // MARK: - Goal
 
     @ViewBuilder
-    private func goalChip(session: Session?, profile: Profile?) -> some View {
-        if let session {
-            let goal = session.goal
-            let isActive = goal?.isActive == true
-            let isComplete = goal?.isComplete == true
-            Button {
-                toggleGoalPanel(for: session)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "target")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
-                    Text("Goal")
-                        .font(.system(size: 12))
-                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
-                    if isActive || isComplete {
-                        Image(systemName: isActive ? "checkmark.circle.fill" : "checkmark.circle")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
-                    }
-                    Image(systemName: goalPanelVisible ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.tertiary)
+    private var goalActionChip: some View {
+        if goalActionActive {
+            HStack(spacing: 6) {
+                Image(systemName: "target")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                Text("Goal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                Button {
+                    goalActionActive = false
+                    requestComposerFocus()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                        .fill(isActive ? Color.accentColor.opacity(0.12) : Color.helmCard)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                                .stroke(isActive ? Color.accentColor.opacity(0.35) : Color.helmBorder,
-                                        lineWidth: 1)
-                        )
-                )
+                .buttonStyle(.plain)
+                .help("Remove goal action")
+                .accessibilityLabel("Remove goal action")
             }
-            .buttonStyle(.plain)
+            .padding(.leading, 8)
+            .padding(.trailing, 4)
+            .frame(height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(Color.accentColor.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                            .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    )
+            )
             .fixedSize()
-            .help(goalHelp(goal, vendor: profile?.vendor ?? selectedVendor))
-            .accessibilityLabel("Goal")
+            .help("Send the next prompt to \(selectedVendor.displayName) as /goal")
+            .accessibilityLabel("Goal action active")
         }
-    }
-
-    private func toggleGoalPanel(for session: Session) {
-        if goalPanelVisible {
-            closeGoalPanel()
-        } else {
-            openGoalPanel(for: session)
-        }
-    }
-
-    private func openGoalPanel(for session: Session) {
-        resetSlashPickerState()
-        activeBuiltinAction = nil
-        goalDraftText = session.goal?.trimmedText ?? ""
-        goalBudgetDraft = session.goal?.tokenBudget.map { String($0) } ?? ""
-        goalPanelVisible = true
-    }
-
-    private func closeGoalPanel() {
-        goalPanelVisible = false
-        requestComposerFocus()
-    }
-
-    private func saveGoalDraft(for session: Session) {
-        let trimmed = goalDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let budget = parsedGoalBudget
-        if trimmed.isEmpty {
-            store.setGoal(nil, on: session.id)
-        } else {
-            store.setGoal(SessionGoal(text: trimmed, tokenBudget: budget), on: session.id)
-        }
-        closeGoalPanel()
-    }
-
-    private func clearGoal(for session: Session) {
-        goalDraftText = ""
-        goalBudgetDraft = ""
-        store.setGoal(nil, on: session.id)
-        closeGoalPanel()
-    }
-
-    private func completeGoal(for session: Session) {
-        store.markGoalComplete(on: session.id)
-        closeGoalPanel()
-    }
-
-    private var parsedGoalBudget: Int? {
-        let trimmed = goalBudgetDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Int(trimmed), value > 0 else { return nil }
-        return value
-    }
-
-    private func goalHelp(_ goal: SessionGoal?, vendor: Vendor) -> String {
-        guard let goal else { return "Set session goal" }
-        if goal.isActive {
-            return "Active goal for \(vendor.displayName): \(goal.trimmedText)"
-        }
-        if goal.isComplete {
-            return "Goal complete"
-        }
-        return "Set session goal"
     }
 
     private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
@@ -864,7 +808,7 @@ struct ComposerView: View {
                             configLocked: Bool) -> some View {
         HStack(spacing: 8) {
             builtinActionButton(profile: profile)
-            goalChip(session: session, profile: profile)
+            goalActionChip
             modelPickerButton(profile: profile,
                               modelLabel: modelLabel,
                               configLocked: configLocked,
@@ -884,7 +828,7 @@ struct ComposerView: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 builtinActionButton(profile: profile)
-                goalChip(session: session, profile: profile)
+                goalActionChip
                 modelPickerButton(profile: profile,
                                   modelLabel: modelLabel,
                                   configLocked: configLocked,
@@ -1254,12 +1198,14 @@ struct ComposerView: View {
         guard let sessionId = draftSessionId else { return }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && attachments.isEmpty
-            && selectedSkills.isEmpty {
+            && selectedSkills.isEmpty
+            && !goalActionActive {
             drafts[sessionId] = nil
         } else {
             drafts[sessionId] = ComposerDraft(text: text,
                                               attachments: attachments,
-                                              selectedSkills: selectedSkills)
+                                              selectedSkills: selectedSkills,
+                                              goalActionActive: goalActionActive)
         }
     }
 
@@ -1270,12 +1216,14 @@ struct ComposerView: View {
             text = ""
             attachments = []
             selectedSkills = []
+            goalActionActive = false
             updateSlashResults()
             return
         }
         text = draft.text
         attachments = draft.attachments
         selectedSkills = draft.selectedSkills
+        goalActionActive = draft.goalActionActive
         updateSlashResults()
     }
 }
@@ -1423,177 +1371,11 @@ private struct SlashSkillRow: View {
     }
 }
 
-private struct GoalPanel: View {
-    let session: Session
-    let vendor: Vendor
-    @Binding var goalText: String
-    @Binding var tokenBudgetText: String
-    let onClose: () -> Void
-    let onSave: () -> Void
-    let onClear: () -> Void
-    let onComplete: () -> Void
-
-    private var goal: SessionGoal? {
-        session.goal
-    }
-
-    private var trimmedDraft: String {
-        goalText.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var canSave: Bool {
-        !trimmedDraft.isEmpty
-    }
-
-    private var canClear: Bool {
-        goal != nil || !trimmedDraft.isEmpty || !tokenBudgetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var canComplete: Bool {
-        goal?.isActive == true
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Rectangle()
-                .fill(Color.helmBorder)
-                .frame(height: 1)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text("Objective")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    goalStateLabel
-                }
-
-                TextEditor(text: $goalText)
-                    .font(.system(size: 12.5))
-                    .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(height: 72)
-                    .background(
-                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                            .fill(Color.helmCard.opacity(0.72))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                                    .stroke(Color.helmBorder, lineWidth: 1)
-                            )
-                    )
-
-                HStack(spacing: 8) {
-                    Text("Budget")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("optional", text: $tokenBudgetText)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
-                        .frame(width: 104)
-                    Text(statusText)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
-                }
-
-                HStack(spacing: 8) {
-                    Button("Clear", action: onClear)
-                        .disabled(!canClear)
-                    Button("Complete", action: onComplete)
-                        .disabled(!canComplete)
-                    Spacer()
-                    Button("Save", action: onSave)
-                        .keyboardShortcut(.defaultAction)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canSave)
-                }
-                .controlSize(.small)
-            }
-            .padding(14)
-        }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge, style: .continuous)
-                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-        )
-        .shadow(color: Color.black.opacity(0.16), radius: 18, x: 0, y: 10)
-    }
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "target")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-            Text("Goal")
-                .font(.system(size: 13.5, weight: .semibold))
-            Text(vendor.displayName)
-                .font(DS.monoFontSmall)
-                .foregroundStyle(.tertiary)
-            Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
-            .help("Close")
-            .accessibilityLabel("Close goal panel")
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 42)
-    }
-
-    private var goalStateLabel: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(goalColor)
-                .frame(width: 6, height: 6)
-            Text(goalStateText)
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var goalStateText: String {
-        if goal?.isActive == true { return "Active" }
-        if goal?.isComplete == true { return "Complete" }
-        return "Not set"
-    }
-
-    private var goalColor: Color {
-        if goal?.isActive == true { return .accentColor }
-        if goal?.isComplete == true { return .green }
-        return .secondary.opacity(0.45)
-    }
-
-    private var statusText: String {
-        guard let goal else { return "No active goal" }
-        if goal.isComplete { return "Marked complete" }
-        if let lastAppliedAt = goal.lastAppliedAt {
-            return "Attached to last \(vendor.displayName) turn at \(Self.format(lastAppliedAt))"
-        }
-        if goal.isActive { return "Ready for next \(vendor.displayName) turn" }
-        return "No active goal"
-    }
-
-    private static func format(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
-    }
-}
-
 private struct BuiltinAction: Identifiable, Hashable {
     enum Kind: String, Hashable {
         case status
         case compact
+        case goal
         case help
     }
 
@@ -1617,8 +1399,13 @@ private struct BuiltinAction: Identifiable, Hashable {
                 BuiltinAction(kind: .compact,
                               title: "Compact",
                               commandName: "/compact",
-                              summary: "Compact conversation context when the vendor adapter supports it.",
+                              summary: "Ask Codex to compact the current conversation context.",
                               symbolName: "rectangle.compress.vertical"),
+                BuiltinAction(kind: .goal,
+                              title: "Goal",
+                              commandName: "/goal",
+                              summary: "Send the next prompt as a Codex goal.",
+                              symbolName: "target"),
                 BuiltinAction(kind: .help,
                               title: "Help",
                               commandName: "/help",
@@ -1635,8 +1422,13 @@ private struct BuiltinAction: Identifiable, Hashable {
                 BuiltinAction(kind: .compact,
                               title: "Compact",
                               commandName: "/compact",
-                              summary: "Compact conversation context when the vendor adapter supports it.",
+                              summary: "Ask Claude to compact the current conversation context.",
                               symbolName: "rectangle.compress.vertical"),
+                BuiltinAction(kind: .goal,
+                              title: "Goal",
+                              commandName: "/goal",
+                              summary: "Send the next prompt as a Claude goal.",
+                              symbolName: "target"),
                 BuiltinAction(kind: .help,
                               title: "Help",
                               commandName: "/help",
@@ -1732,6 +1524,8 @@ private struct BuiltinActionPanel: View {
             statusBody
         case .compact:
             compactBody
+        case .goal:
+            goalBody
         case .help:
             helpBody
         }
@@ -1743,7 +1537,6 @@ private struct BuiltinActionPanel: View {
             infoRow("Model", model?.label ?? "No model")
             infoRow("Profile", profile?.name ?? "No profile")
             infoRow("Project", projectDisplayPath, mono: true)
-            infoRow("Goal", goalStatusText)
             infoRow("Context", estimatedContextText)
             infoRow("Quota", "Unavailable")
             if let session, let profile {
@@ -1760,7 +1553,14 @@ private struct BuiltinActionPanel: View {
     private var compactBody: some View {
         VStack(alignment: .leading, spacing: 9) {
             infoRow("Command", action.commandName, mono: true)
-            emptyPanelText("Compaction is vendor-owned in the interactive CLIs. Helm shows the action here now; wiring a real compact turn needs adapter support so it does not get sent as ordinary chat text.")
+            emptyPanelText("Compact runs immediately from the action menu and sends /compact to \(vendor.displayName).")
+        }
+    }
+
+    private var goalBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            infoRow("Command", action.commandName, mono: true)
+            emptyPanelText("Goal marks the next composer send as /goal. Write the goal in the main input, then send normally.")
         }
     }
 
@@ -1868,12 +1668,6 @@ private struct BuiltinActionPanel: View {
         return "\(tokens) tokens estimated"
     }
 
-    private var goalStatusText: String {
-        guard let goal = session?.goal else { return "Not set" }
-        if goal.isActive { return goal.trimmedText }
-        if goal.isComplete { return "Complete" }
-        return "Not set"
-    }
 }
 
 struct ComposerSkill: Identifiable, Hashable {
@@ -2586,6 +2380,7 @@ private struct ComposerDraft {
     var text: String
     var attachments: [ImageAttachment]
     var selectedSkills: [ComposerSkill]
+    var goalActionActive: Bool
 }
 
 private struct ComposerWidthReader: View {

@@ -258,31 +258,6 @@ enum ClaudeEffort: String, CaseIterable, Hashable, Codable {
     }
 }
 
-struct SessionGoal: Hashable, Codable {
-    var text: String
-    var tokenBudget: Int?
-    var isComplete: Bool
-    var lastAppliedAt: Date?
-
-    init(text: String,
-         tokenBudget: Int? = nil,
-         isComplete: Bool = false,
-         lastAppliedAt: Date? = nil) {
-        self.text = text
-        self.tokenBudget = tokenBudget
-        self.isComplete = isComplete
-        self.lastAppliedAt = lastAppliedAt
-    }
-
-    var trimmedText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var isActive: Bool {
-        !isComplete && !trimmedText.isEmpty
-    }
-}
-
 struct Session: Identifiable, Hashable, Codable {
     let id: UUID
     var projectId: UUID
@@ -303,10 +278,6 @@ struct Session: Identifiable, Hashable, Codable {
     /// Codex reasoning effort (`model_reasoning_effort`). Reuses
     /// `Profile.ReasoningEffort` since the values are the same set.
     var codexEffort: Profile.ReasoningEffort = .medium
-    /// Helm-owned objective for the thread. When active, AppStore injects it
-    /// into the next vendor prompt using an explicit envelope so both Claude
-    /// and Codex receive the same instruction.
-    var goal: SessionGoal? = nil
     var lastUpdate: String
     /// Ordered transcript: real dialog turns (`.message`) interleaved with
     /// runtime events (`.event` — compact summaries, etc). See [[TranscriptItem]].
@@ -326,7 +297,7 @@ struct Session: Identifiable, Hashable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, projectId, title, profileId, lastUpdate, vendorSessionId,
              claudePermissionMode, codexSandboxMode, codexApprovalMode,
-             claudeEffort, codexEffort, goal
+             claudeEffort, codexEffort
     }
 
     init(id: UUID, projectId: UUID, title: String, profileId: UUID,
@@ -335,7 +306,6 @@ struct Session: Identifiable, Hashable, Codable {
          codexApprovalMode: CodexApprovalMode = .onRequest,
          claudeEffort: ClaudeEffort = .medium,
          codexEffort: Profile.ReasoningEffort = .medium,
-         goal: SessionGoal? = nil,
          lastUpdate: String,
          transcript: [TranscriptItem] = [], vendorSessionId: String? = nil,
          isDraft: Bool = false) {
@@ -348,7 +318,6 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = codexApprovalMode
         self.claudeEffort = claudeEffort
         self.codexEffort = codexEffort
-        self.goal = goal
         self.lastUpdate = lastUpdate
         self.transcript = transcript
         self.vendorSessionId = vendorSessionId
@@ -368,7 +337,6 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = try c.decodeIfPresent(CodexApprovalMode.self, forKey: .codexApprovalMode) ?? .onRequest
         self.claudeEffort = try c.decodeIfPresent(ClaudeEffort.self, forKey: .claudeEffort) ?? .medium
         self.codexEffort = try c.decodeIfPresent(Profile.ReasoningEffort.self, forKey: .codexEffort) ?? .medium
-        self.goal = try c.decodeIfPresent(SessionGoal.self, forKey: .goal)
         self.transcript = []
         self.isDraft = false
     }
@@ -386,7 +354,6 @@ struct Session: Identifiable, Hashable, Codable {
         try c.encode(codexApprovalMode, forKey: .codexApprovalMode)
         try c.encode(claudeEffort, forKey: .claudeEffort)
         try c.encode(codexEffort, forKey: .codexEffort)
-        try c.encodeIfPresent(goal, forKey: .goal)
     }
 }
 
@@ -431,7 +398,7 @@ enum SessionEvent: Identifiable, Hashable, Codable {
     /// limit and the prior conversation was summarized." `summary` is the
     /// raw text Claude generated — useful if the user wants to inspect it.
     case compactSummary(id: UUID, summary: String)
-    /// Helm attached the current thread goal to a vendor turn. This is a
+    /// Helm sent a composer turn through the Goal action. This is a
     /// deterministic UI acknowledgement, not a model-generated message.
     case goalApplied(id: UUID, goal: String, vendor: Vendor, appliedAt: Date)
 

@@ -1,4 +1,5 @@
 import AppKit
+import MarkdownUI
 import SwiftUI
 
 struct MessageListView: View {
@@ -1034,38 +1035,282 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
     }
 }
 
-/// Minimal Markdown renderer for v1: uses SwiftUI built-in inline markdown,
-/// with backtick code styling. Full code-block & syntax highlighting later.
+/// Full block-level Markdown renderer for chat content.
 struct MarkdownishText: View {
     let raw: String
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        if shouldParseMarkdown,
-           let attr = try? AttributedString(
-            markdown: raw,
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace
-            )
-        ) {
-            Text(attr)
-                .font(.system(size: 13.5))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            Text(raw)
-                .font(.system(size: 13.5))
-                .textSelection(.enabled)
+        Markdown(raw)
+            .markdownTheme(.helmChat)
+            .markdownImageProvider(HelmMarkdownImageProvider())
+            .markdownInlineImageProvider(HelmMarkdownInlineImageProvider())
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct HelmMarkdownImageProvider: ImageProvider {
+    func makeImage(url: URL?) -> some View {
+        HelmMarkdownImageView(url: url)
+    }
+}
+
+private struct HelmMarkdownImageView: View {
+    let url: URL?
+    @State private var image: NSImage?
+    @State private var didFail = false
+
+    var body: some View {
+        Group {
+            if let image {
+                let size = fittedDisplaySize(for: image)
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size.width, height: size.height)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+                    )
+            } else if didFail {
+                imageUnavailableView
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 36, height: 28)
+            }
+        }
+        .task(id: url?.absoluteString ?? "") {
+            await loadImage()
         }
     }
 
-    private var shouldParseMarkdown: Bool {
-        raw.contains("`") ||
-        raw.contains("*") ||
-        raw.contains("_") ||
-        raw.contains("[") ||
-        raw.contains("#") ||
-        raw.contains(">") ||
-        raw.contains("!")
+    private var imageUnavailableView: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "photo")
+                .foregroundStyle(.tertiary)
+            Text("image unavailable")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.1))
+        )
     }
+
+    @MainActor
+    private func loadImage() async {
+        image = nil
+        didFail = false
+
+        guard let url else {
+            didFail = true
+            return
+        }
+
+        if let fileURL = HelmMarkdownImageURL.localFileURL(from: url) {
+            image = NSImage(contentsOf: fileURL)
+            didFail = image == nil
+            return
+        }
+
+        guard HelmMarkdownImageURL.isNetworkURL(url) else {
+            didFail = true
+            return
+        }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            image = NSImage(data: data)
+            didFail = image == nil
+        } catch {
+            didFail = true
+        }
+    }
+
+    private func fittedDisplaySize(for image: NSImage) -> CGSize {
+        let rawSize = bitmapSize(for: image)
+        guard rawSize.width > 0, rawSize.height > 0 else {
+            return CGSize(width: 240, height: 160)
+        }
+
+        let maxSize = CGSize(width: 420, height: 320)
+        let scale = min(maxSize.width / rawSize.width,
+                        maxSize.height / rawSize.height,
+                        1)
+
+        return CGSize(width: max(1, floor(rawSize.width * scale)),
+                      height: max(1, floor(rawSize.height * scale)))
+    }
+
+    private func bitmapSize(for image: NSImage) -> CGSize {
+        if let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first {
+            return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+        }
+        return image.size
+    }
+}
+
+private struct HelmMarkdownInlineImageProvider: InlineImageProvider {
+    func image(with url: URL, label: String) async throws -> Image {
+        if let fileURL = HelmMarkdownImageURL.localFileURL(from: url),
+           let image = NSImage(contentsOf: fileURL) {
+            return Image(nsImage: image)
+        }
+
+        guard HelmMarkdownImageURL.isNetworkURL(url) else {
+            throw URLError(.unsupportedURL)
+        }
+
+        let (data, _) = try await URLSession.shared.data(from: url)
+        guard let image = NSImage(data: data) else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        return Image(nsImage: image)
+    }
+}
+
+private enum HelmMarkdownImageURL {
+    static func localFileURL(from url: URL) -> URL? {
+        if url.isFileURL {
+            return url
+        }
+        if url.scheme == nil, url.path.hasPrefix("/") {
+            return URL(fileURLWithPath: url.path)
+        }
+        return nil
+    }
+
+    static func isNetworkURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+}
+
+private extension Theme {
+    static let helmChat = Theme.gitHub
+        .text {
+            ForegroundColor(.primary)
+            BackgroundColor(nil)
+            FontSize(13.5)
+        }
+        .code {
+            FontFamilyVariant(.monospaced)
+            FontSize(.em(0.88))
+            ForegroundColor(.primary)
+            BackgroundColor(Color.secondary.opacity(0.12))
+        }
+        .strong {
+            FontWeight(.semibold)
+        }
+        .link {
+            ForegroundColor(.accentColor)
+        }
+        .heading1 { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.35))
+                }
+                .markdownMargin(top: 12, bottom: 8)
+        }
+        .heading2 { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.2))
+                }
+                .markdownMargin(top: 12, bottom: 8)
+        }
+        .heading3 { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.08))
+                }
+                .markdownMargin(top: 10, bottom: 6)
+        }
+        .heading4 { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                }
+                .markdownMargin(top: 8, bottom: 5)
+        }
+        .paragraph { configuration in
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.18))
+                .markdownMargin(top: 0, bottom: 8)
+        }
+        .blockquote { configuration in
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.helmBorderStrong.opacity(0.75))
+                    .relativeFrame(width: .em(0.18))
+                configuration.label
+                    .markdownTextStyle {
+                        ForegroundColor(.secondary)
+                    }
+                    .relativePadding(.leading, length: .em(0.75))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .markdownMargin(top: 2, bottom: 8)
+        }
+        .codeBlock { configuration in
+            ScrollView(.horizontal, showsIndicators: false) {
+                configuration.label
+                    .fixedSize(horizontal: true, vertical: true)
+                    .relativeLineSpacing(.em(0.18))
+                    .markdownTextStyle {
+                        FontFamilyVariant(.monospaced)
+                        FontSize(.em(0.88))
+                        ForegroundColor(.primary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .stroke(Color.helmBorder, lineWidth: 1)
+            )
+            .markdownMargin(top: 2, bottom: 10)
+        }
+        .listItem { configuration in
+            configuration.label
+                .markdownMargin(top: .em(0.18))
+        }
+        .table { configuration in
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
+                .markdownTableBorderStyle(.init(color: Color.helmBorderStrong.opacity(0.75)))
+                .markdownTableBackgroundStyle(
+                    .alternatingRows(Color.clear, Color.secondary.opacity(0.06))
+                )
+                .markdownMargin(top: 2, bottom: 10)
+        }
+        .tableCell { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    if configuration.row == 0 {
+                        FontWeight(.semibold)
+                    }
+                    BackgroundColor(nil)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 5)
+                .padding(.horizontal, 10)
+        }
+        .image { configuration in
+            configuration.label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .markdownMargin(top: 4, bottom: 10)
+        }
 }

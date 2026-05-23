@@ -2,7 +2,7 @@ name: Helm
 options:
   bundleIdPrefix: dev.deng
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   developmentLanguage: en
   createIntermediateGroups: true
 settings:
@@ -12,6 +12,10 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_PREVIEWS: "YES"
     SWIFT_STRICT_CONCURRENCY: minimal
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui.git
+    from: 2.4.1
 targets:
   Helm:
     type: application
@@ -30,4 +34,6 @@ targets:
         ENABLE_HARDENED_RUNTIME: "YES"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "-"
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+    dependencies:
+      - package: MarkdownUI

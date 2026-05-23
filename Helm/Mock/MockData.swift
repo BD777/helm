@@ -537,34 +537,6 @@ final class AppStore {
         scheduleStateSave()
     }
 
-    func setGoal(_ goal: SessionGoal?, on sessionId: UUID) {
-        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
-        guard let goal else {
-            sessions[idx].goal = nil
-            scheduleStateSave()
-            return
-        }
-        let trimmed = goal.trimmedText
-        guard !trimmed.isEmpty else {
-            sessions[idx].goal = nil
-            scheduleStateSave()
-            return
-        }
-        sessions[idx].goal = SessionGoal(text: trimmed,
-                                         tokenBudget: goal.tokenBudget,
-                                         isComplete: goal.isComplete,
-                                         lastAppliedAt: goal.lastAppliedAt)
-        scheduleStateSave()
-    }
-
-    func markGoalComplete(on sessionId: UUID) {
-        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }),
-              sessions[idx].goal != nil
-        else { return }
-        sessions[idx].goal?.isComplete = true
-        scheduleStateSave()
-    }
-
     /// Update the session's Claude permission mode. No-op for non-Claude
     /// sessions (the field is still stored, just unused at spawn time).
     func setClaudePermission(_ mode: ClaudePermissionMode, on sessionId: UUID) {
@@ -683,9 +655,12 @@ final class AppStore {
 
     func send(_ prompt: String,
               displayParts: [Part]? = nil,
-              attachments: [ImageAttachment] = []) {
+              attachments: [ImageAttachment] = [],
+              agentPrompt: String? = nil,
+              preUserEvents: [SessionEvent] = []) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isStreaming, !trimmed.isEmpty || !attachments.isEmpty else { return }
+        let promptForAgent = (agentPrompt ?? prompt).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isStreaming, !promptForAgent.isEmpty || !attachments.isEmpty else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
         // Promote a draft to a real session — first send is what makes the
         // sidebar row appear.
@@ -704,7 +679,6 @@ final class AppStore {
             appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return
         }
 
-        let activeGoal = sessions[sIdx].goal?.isActive == true ? sessions[sIdx].goal : nil
         let session = sessions[sIdx]
 
         let runConfig: RunConfig
@@ -717,24 +691,6 @@ final class AppStore {
         } catch {
             appendError(to: sIdx, error.localizedDescription)
             return
-        }
-
-        let agentPrompt: String
-        if let activeGoal {
-            let appliedAt = Date()
-            sessions[sIdx].goal?.lastAppliedAt = appliedAt
-            sessions[sIdx].transcript.append(.event(.goalApplied(
-                id: UUID(),
-                goal: activeGoal.trimmedText,
-                vendor: profile.vendor,
-                appliedAt: appliedAt
-            )))
-            scheduleStateSave()
-            agentPrompt = Self.promptWithGoal(trimmed,
-                                              goal: activeGoal,
-                                              vendor: profile.vendor)
-        } else {
-            agentPrompt = trimmed
         }
 
         var userParts: [Part] = displayParts ?? []
@@ -753,6 +709,9 @@ final class AppStore {
             meta: "thinking…",
             parts: []
         )
+        for event in preUserEvents {
+            sessions[sIdx].transcript.append(.event(event))
+        }
         sessions[sIdx].transcript.append(.message(userMsg))
         sessions[sIdx].transcript.append(.message(assistantMsg))
         let sessionId = session.id
@@ -788,13 +747,13 @@ final class AppStore {
         currentAdapter = adapter
 
         do {
-            let stream = try adapter.start(prompt: agentPrompt, attachments: attachments, session: session, run: runConfig, project: project)
+            let stream = try adapter.start(prompt: promptForAgent, attachments: attachments, session: session, run: runConfig, project: project)
             streamTask = Task { [weak self] in
                 await self?.consumeAgentStream(stream,
                                                runId: runId,
                                                sessionId: sessionId,
                                                assistantId: assistantId,
-                                               prompt: agentPrompt,
+                                               prompt: promptForAgent,
                                                attachments: attachments,
                                                project: project,
                                                profile: profile,
@@ -1192,28 +1151,6 @@ final class AppStore {
         return String(base.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
-    private static func promptWithGoal(_ prompt: String,
-                                       goal: SessionGoal,
-                                       vendor: Vendor) -> String {
-        let budgetLine = goal.tokenBudget.map {
-            "Token budget: \($0)"
-        } ?? "Token budget: not set"
-        return """
-        <helm_session_goal>
-        Status: active
-        Vendor: \(vendor.displayName)
-        \(budgetLine)
-        Objective: \(goal.trimmedText)
-
-        This block is emitted by Helm and is intended for the real \(vendor.displayName) executor.
-        Treat it as the active objective for the current conversation. Use the user's message below as the next step toward this objective. Do not ask the user to restate it. If the objective is already satisfied, say so clearly and explain the evidence.
-        </helm_session_goal>
-
-        <user_message>
-        \(prompt)
-        </user_message>
-        """
-    }
 }
 
 enum SSHProbe {

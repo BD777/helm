@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Inline marker rendered between dialog turns when the agent did something
 /// the user didn't directly author, such as Claude's auto-compact summary
-/// or Helm attaching a session goal to a vendor turn.
+/// or Helm attaching a built-in action to a vendor turn.
 ///
 /// Click expands the captured summary text. We keep it collapsed by default
 /// because the summary is verbose and almost always uninteresting once the
@@ -18,9 +18,9 @@ struct SessionEventView: View {
                     icon: "arrow.triangle.merge",
                     detail: summary)
         case .goalApplied(_, let goal, let vendor, let appliedAt):
-            divider(label: "Goal attached to \(vendor.displayName) turn",
+            divider(label: "Goal enabled for \(vendor.displayName) turn",
                     icon: "target",
-                    detail: "Helm attached this active goal to the prompt sent to \(vendor.displayName) at \(Self.format(appliedAt)):\n\n\(goal)")
+                    detail: Self.goalDetail(goal: goal, vendor: vendor, appliedAt: appliedAt))
         }
     }
 
@@ -73,5 +73,11 @@ struct SessionEventView: View {
         formatter.dateStyle = .none
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private static func goalDetail(goal: String, vendor: Vendor, appliedAt: Date) -> String {
+        let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = trimmed.isEmpty ? "" : ":\n\n\(trimmed)"
+        return "Helm sent this turn to \(vendor.displayName) with /goal at \(Self.format(appliedAt))\(suffix)"
     }
 }
