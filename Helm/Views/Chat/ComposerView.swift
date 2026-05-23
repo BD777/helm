@@ -8,13 +8,15 @@ struct ComposerView: View {
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
-    @State private var selectedSkill: ComposerSkill?
+    @State private var selectedSkills: [ComposerSkill] = []
     @State private var draftSessionId: UUID?
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
     @State private var footerWidth: CGFloat = 0
     @State private var skills: [ComposerSkill] = []
+    @State private var isRefreshingSkills = false
+    @State private var skillRefreshToken = 0
     @State private var slashFilteredSkills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
     @State private var slashScrollTargetId: String?
@@ -34,7 +36,7 @@ struct ComposerView: View {
         .background(Color.helmChatBg)
         .onAppear {
             loadDraft(for: store.selectedSessionId)
-            refreshSkills()
+            refreshSkillsAsync()
             installPasteMonitor()
             requestComposerFocus()
         }
@@ -76,8 +78,8 @@ struct ComposerView: View {
 
     private var box: some View {
         VStack(spacing: 0) {
-            if let selectedSkill {
-                selectedSkillRow(selectedSkill)
+            if !selectedSkills.isEmpty {
+                selectedSkillsRow(selectedSkills)
             }
             if !attachments.isEmpty {
                 attachmentRow
@@ -108,6 +110,7 @@ struct ComposerView: View {
             if slashMenuVisible {
                 SlashSkillMenu(
                     skills: slashFilteredSkills,
+                    isLoading: isRefreshingSkills && slashFilteredSkills.isEmpty,
                     highlightedId: currentSlashHighlight,
                     scrollTargetId: slashScrollTargetId,
                     query: slashQuery ?? "",
@@ -124,7 +127,7 @@ struct ComposerView: View {
     }
 
     private var hasComposerContent: Bool {
-        selectedSkill != nil
+        !selectedSkills.isEmpty
             || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
     }
@@ -196,7 +199,7 @@ struct ComposerView: View {
         let toSend = composedPrompt()
         let toSendAttachments = attachments
         text = ""
-        selectedSkill = nil
+        selectedSkills = []
         attachments = []
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
@@ -205,16 +208,16 @@ struct ComposerView: View {
     }
 
     private func composedPrompt() -> String {
-        guard let selectedSkill else { return text }
+        guard !selectedSkills.isEmpty else { return text }
+        let commands = selectedSkills.map { "/\($0.name)" }.joined(separator: " ")
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty else { return "/\(selectedSkill.name)" }
-        return "/\(selectedSkill.name) \(body)"
+        guard !body.isEmpty else { return commands }
+        return "\(commands) \(body)"
     }
 
     // MARK: - Slash skill picker
 
     private var slashQuery: String? {
-        guard selectedSkill == nil else { return nil }
         return Self.slashQuery(in: text)
     }
 
@@ -228,7 +231,7 @@ struct ComposerView: View {
     }
 
     private var slashMenuVisible: Bool {
-        slashQuery != nil && slashSuppressedText != text && !skills.isEmpty
+        slashQuery != nil && slashSuppressedText != text
     }
 
     private var currentSlashHighlight: String? {
@@ -249,9 +252,26 @@ struct ComposerView: View {
         return CGFloat(visibleRows * 54 + 41)
     }
 
-    private func refreshSkills() {
-        skills = ComposerSkillCatalog.load()
-        updateSlashResults()
+    private func refreshSkillsAsync() {
+        guard !isRefreshingSkills else { return }
+        skillRefreshToken += 1
+        let token = skillRefreshToken
+        isRefreshingSkills = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loadedSkills = ComposerSkillCatalog.load()
+            DispatchQueue.main.async {
+                guard token == skillRefreshToken else { return }
+                skills = loadedSkills
+                isRefreshingSkills = false
+
+                if let split = splitLeadingSkillCommand(in: text) {
+                    selectSkill(split.skill, remainingText: split.remainingText)
+                } else {
+                    updateSlashResults()
+                }
+            }
+        }
     }
 
     private func handleTextChange(oldText: String, newText: String) {
@@ -263,13 +283,12 @@ struct ComposerView: View {
             return
         }
 
-        let wasSlashCommand = selectedSkill == nil && Self.slashQuery(in: oldText) != nil
+        let wasSlashCommand = Self.slashQuery(in: oldText) != nil
         let isSlashCommand = slashQuery != nil
         if isSlashCommand && !wasSlashCommand {
-            refreshSkills()
-        } else {
-            updateSlashResults()
+            refreshSkillsAsync()
         }
+        updateSlashResults()
     }
 
     private func updateSlashResults() {
@@ -282,10 +301,12 @@ struct ComposerView: View {
         }
 
         let filtered: [ComposerSkill]
+        let selectedSkillIds = Set(selectedSkills.map(\.id))
+        let availableSkills = skills.filter { !selectedSkillIds.contains($0.id) }
         if query.isEmpty {
-            filtered = skills
+            filtered = availableSkills
         } else {
-            filtered = skills
+            filtered = availableSkills
                 .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
                     guard let score = skill.matchScore(for: query) else { return nil }
                     return (skill, score)
@@ -324,9 +345,10 @@ struct ComposerView: View {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.isEmpty else { return false }
         if event.keyCode == 51,
-           selectedSkill != nil,
+           !selectedSkills.isEmpty,
            text.isEmpty {
-            selectedSkill = nil
+            selectedSkills.removeLast()
+            updateSlashResults()
             requestComposerFocus()
             return true
         }
@@ -395,7 +417,9 @@ struct ComposerView: View {
     }
 
     private func selectSkill(_ skill: ComposerSkill, remainingText: String) {
-        selectedSkill = skill
+        if !selectedSkills.contains(where: { $0.id == skill.id }) {
+            selectedSkills.append(skill)
+        }
         text = remainingText
         requestComposerFocus()
         resetSlashPickerState()
@@ -411,9 +435,7 @@ struct ComposerView: View {
     }
 
     private func splitLeadingSkillCommand(in candidate: String) -> (skill: ComposerSkill, remainingText: String)? {
-        guard selectedSkill == nil,
-              candidate.hasPrefix("/")
-        else { return nil }
+        guard candidate.hasPrefix("/") else { return nil }
 
         let rawCommand = candidate.dropFirst()
         guard !rawCommand.isEmpty else { return nil }
@@ -435,45 +457,52 @@ struct ComposerView: View {
         return (skill, remainingText)
     }
 
-    private func selectedSkillRow(_ skill: ComposerSkill) -> some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 7) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text("/\(skill.name)")
-                    .font(DS.monoFontSmall)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(skill.source)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                Button {
-                    selectedSkill = nil
-                    requestComposerFocus()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.tertiary)
+    private func selectedSkillsRow(_ skills: [ComposerSkill]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(skills) { skill in
+                    selectedSkillChip(skill)
                 }
-                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(
-                Capsule()
-                    .fill(Color.helmSelected.opacity(0.9))
-            )
-            .overlay(
-                Capsule()
-                    .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-            )
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
+    }
+
+    private func selectedSkillChip(_ skill: ComposerSkill) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+            Text("/\(skill.name)")
+                .font(DS.monoFontSmall)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text(skill.source)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Button {
+                selectedSkills.removeAll { $0.id == skill.id }
+                updateSlashResults()
+                requestComposerFocus()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(
+            Capsule()
+                .fill(Color.helmSelected.opacity(0.9))
+        )
+        .overlay(
+            Capsule()
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
     }
 
     private var attachmentRow: some View {
@@ -941,12 +970,12 @@ struct ComposerView: View {
         guard let sessionId = draftSessionId else { return }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && attachments.isEmpty
-            && selectedSkill == nil {
+            && selectedSkills.isEmpty {
             drafts[sessionId] = nil
         } else {
             drafts[sessionId] = ComposerDraft(text: text,
                                               attachments: attachments,
-                                              selectedSkill: selectedSkill)
+                                              selectedSkills: selectedSkills)
         }
     }
 
@@ -956,19 +985,20 @@ struct ComposerView: View {
         guard let sessionId, let draft = drafts[sessionId] else {
             text = ""
             attachments = []
-            selectedSkill = nil
+            selectedSkills = []
             updateSlashResults()
             return
         }
         text = draft.text
         attachments = draft.attachments
-        selectedSkill = draft.selectedSkill
+        selectedSkills = draft.selectedSkills
         updateSlashResults()
     }
 }
 
 private struct SlashSkillMenu: View {
     let skills: [ComposerSkill]
+    let isLoading: Bool
     let highlightedId: String?
     let scrollTargetId: String?
     let query: String
@@ -1001,7 +1031,20 @@ private struct SlashSkillMenu: View {
                 .fill(Color.helmBorder)
                 .frame(height: 1)
 
-            if skills.isEmpty {
+            if isLoading {
+                HStack(spacing: 9) {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.55)
+                        .frame(width: 14, height: 14)
+                    Text("Loading skills...")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 54)
+            } else if skills.isEmpty {
                 HStack(spacing: 9) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12))
@@ -1505,7 +1548,7 @@ private enum ComposerSkillCatalog {
 private struct ComposerDraft {
     var text: String
     var attachments: [ImageAttachment]
-    var selectedSkill: ComposerSkill?
+    var selectedSkills: [ComposerSkill]
 }
 
 private struct ComposerWidthReader: View {
