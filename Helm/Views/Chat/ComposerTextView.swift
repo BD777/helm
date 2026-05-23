@@ -142,6 +142,7 @@ enum ComposerTextCommand {
     case moveUp
     case moveDown
     case accept
+    case complete
     case cancel
 }
 
@@ -209,7 +210,7 @@ final class PlaceholderTextView: NSTextView {
     }
 
     override func insertTab(_ sender: Any?) {
-        if onTextCommand(.accept) {
+        if onTextCommand(.complete) {
             return
         }
         super.insertTab(sender)

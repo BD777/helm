@@ -291,7 +291,9 @@ struct ComposerView: View {
         case 126:
             moveSlashHighlight(by: -1)
             return true
-        case 36, 48, 76:
+        case 36, 76:
+            return insertHighlightedSkillCommand()
+        case 48:
             return insertHighlightedSkillCommand()
         case 53:
             slashSuppressedText = text
@@ -311,6 +313,8 @@ struct ComposerView: View {
             moveSlashHighlight(by: 1)
             return true
         case .accept:
+            return insertHighlightedSkillCommand()
+        case .complete:
             return insertHighlightedSkillCommand()
         case .cancel:
             slashSuppressedText = text
@@ -342,6 +346,12 @@ struct ComposerView: View {
         text = command
         slashSuppressedText = command
         requestComposerFocus()
+    }
+
+    private func resetSlashPickerState() {
+        slashHighlightedId = nil
+        slashScrollTargetId = nil
+        slashSuppressedText = nil
     }
 
     private var attachmentRow: some View {
@@ -818,13 +828,16 @@ struct ComposerView: View {
 
     private func loadDraft(for sessionId: UUID?) {
         draftSessionId = sessionId
+        resetSlashPickerState()
         guard let sessionId, let draft = drafts[sessionId] else {
             text = ""
             attachments = []
+            syncSlashHighlight()
             return
         }
         text = draft.text
         attachments = draft.attachments
+        syncSlashHighlight()
     }
 }
 
