@@ -412,7 +412,7 @@ private final class ComposerSkillTextAttachment: NSTextAttachment {
         super.init(data: nil, ofType: nil)
         let image = ComposerSkillChipRenderer.image(for: skill)
         self.image = image
-        self.bounds = NSRect(x: 0, y: -6, width: image.size.width, height: image.size.height)
+        self.bounds = NSRect(x: 0, y: -3.5, width: image.size.width, height: image.size.height)
     }
 
     @available(*, unavailable)
@@ -422,52 +422,43 @@ private final class ComposerSkillTextAttachment: NSTextAttachment {
 }
 
 private enum ComposerSkillChipRenderer {
-    private static let height: CGFloat = 26
+    private static let height: CGFloat = 18
+    private static let iconSize: CGFloat = 13
 
     static func image(for skill: ComposerSkill) -> NSImage {
+        let accent = NSColor.controlAccentColor
         let nameAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
-        ]
-        let sourceAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
-            .foregroundColor: NSColor.tertiaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 13.5, weight: .medium),
+            .foregroundColor: accent,
         ]
 
-        let name = "/\(skill.name)" as NSString
-        let source = skill.source as NSString
+        let name = skill.name as NSString
         let nameSize = name.size(withAttributes: nameAttributes)
-        let sourceSize = source.size(withAttributes: sourceAttributes)
-        let width = min(300, 10 + 13 + 7 + nameSize.width + 8 + sourceSize.width + 10)
+        let width = min(260, iconSize + 6 + ceil(nameSize.width))
         let image = NSImage(size: NSSize(width: width, height: height))
 
         image.lockFocus()
-        NSColor.controlAccentColor.withAlphaComponent(0.13).setFill()
-        NSBezierPath(roundedRect: NSRect(x: 0.5, y: 0.5, width: width - 1, height: height - 1),
-                     xRadius: height / 2,
-                     yRadius: height / 2).fill()
-        NSColor.separatorColor.withAlphaComponent(0.55).setStroke()
-        NSBezierPath(roundedRect: NSRect(x: 0.5, y: 0.5, width: width - 1, height: height - 1),
-                     xRadius: height / 2,
-                     yRadius: height / 2).stroke()
-
-        if let sparkle = NSImage(systemSymbolName: "sparkle", accessibilityDescription: nil) {
-            sparkle.withSymbolConfiguration(.init(pointSize: 11.5, weight: .semibold))?
-                .draw(in: NSRect(x: 10, y: 6.5, width: 13, height: 13),
+        if let icon = NSImage(systemSymbolName: "shippingbox", accessibilityDescription: nil)?
+            .withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: iconSize,
+                                            weight: .semibold)
+                    .applying(.init(hierarchicalColor: accent))
+            ) {
+            icon.draw(in: NSRect(x: 0,
+                                 y: (height - iconSize) / 2 + 0.2,
+                                 width: iconSize,
+                                 height: iconSize),
                       from: .zero,
                       operation: .sourceOver,
                       fraction: 1)
         }
 
-        var x: CGFloat = 30
-        name.draw(at: NSPoint(x: x, y: 5.4), withAttributes: nameAttributes)
-        x += nameSize.width + 8
-        let remaining = width - x - 10
-        if remaining > 12 {
-            source.draw(with: NSRect(x: x, y: 6.1, width: remaining, height: sourceSize.height),
-                        options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                        attributes: sourceAttributes)
-        }
+        name.draw(with: NSRect(x: iconSize + 6,
+                               y: (height - nameSize.height) / 2 - 0.7,
+                               width: max(0, width - iconSize - 6),
+                               height: nameSize.height),
+                  options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                  attributes: nameAttributes)
         image.unlockFocus()
         image.isTemplate = false
         return image
