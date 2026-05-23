@@ -1009,39 +1009,42 @@ private struct ComposerSkill: Identifiable, Hashable {
     private func subsequenceScore(query: String,
                                   in target: String,
                                   targetPriority: Int) -> ComposerSkillMatchScore? {
-        var queryIndex = query.startIndex
-        var firstMatch: Int?
-        var lastMatch: Int?
+        let queryCharacters = Array(query)
+        let targetCharacters = Array(target)
+        guard let firstQueryCharacter = queryCharacters.first else { return nil }
 
-        for (offset, character) in target.enumerated() {
-            guard queryIndex < query.endIndex,
-                  character == query[queryIndex]
-            else { continue }
+        var bestScore: ComposerSkillMatchScore?
+        for start in targetCharacters.indices where targetCharacters[start] == firstQueryCharacter {
+            var queryOffset = 0
+            var lastMatch = start
 
-            if firstMatch == nil {
-                firstMatch = offset
+            for targetOffset in start..<targetCharacters.count {
+                guard targetCharacters[targetOffset] == queryCharacters[queryOffset] else {
+                    continue
+                }
+                lastMatch = targetOffset
+                queryOffset += 1
+                if queryOffset == queryCharacters.count {
+                    break
+                }
             }
-            lastMatch = offset
-            queryIndex = query.index(after: queryIndex)
-            if queryIndex == query.endIndex {
-                break
+
+            guard queryOffset == queryCharacters.count else { continue }
+
+            let span = lastMatch - start + 1
+            let score = ComposerSkillMatchScore(
+                tier: targetPriority == 0 ? 3 : 4,
+                gaps: span - queryCharacters.count,
+                span: span,
+                start: start,
+                targetPriority: targetPriority,
+                targetLength: targetCharacters.count
+            )
+            if bestScore.map({ score < $0 }) ?? true {
+                bestScore = score
             }
         }
-
-        guard queryIndex == query.endIndex,
-              let firstMatch,
-              let lastMatch
-        else { return nil }
-
-        let span = lastMatch - firstMatch + 1
-        return ComposerSkillMatchScore(
-            tier: targetPriority == 0 ? 3 : 4,
-            gaps: span - query.count,
-            span: span,
-            start: firstMatch,
-            targetPriority: targetPriority,
-            targetLength: target.count
-        )
+        return bestScore
     }
 }
 
