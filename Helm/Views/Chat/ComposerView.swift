@@ -48,11 +48,17 @@ struct ComposerView: View {
         .onChange(of: externalFocusRequest) { _, _ in
             requestComposerFocus()
         }
-        .onChange(of: text) { _, _ in
-            if slashSuppressedText != text {
+        .onChange(of: text) { oldText, newText in
+            if slashSuppressedText != newText {
                 slashSuppressedText = nil
             }
-            syncSlashHighlight()
+            let wasSlashCommand = Self.slashQuery(in: oldText) != nil
+            let isSlashCommand = Self.slashQuery(in: newText) != nil
+            if isSlashCommand && !wasSlashCommand {
+                refreshSkills()
+            } else {
+                syncSlashHighlight()
+            }
         }
         .onDisappear { removePasteMonitor() }
     }
@@ -200,6 +206,10 @@ struct ComposerView: View {
     // MARK: - Slash skill picker
 
     private var slashQuery: String? {
+        Self.slashQuery(in: text)
+    }
+
+    private static func slashQuery(in text: String) -> String? {
         guard text.hasPrefix("/") else { return nil }
         let rawQuery = String(text.dropFirst())
         guard rawQuery.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
