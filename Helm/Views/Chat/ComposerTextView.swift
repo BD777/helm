@@ -56,9 +56,7 @@ struct ComposerTextView: NSViewRepresentable {
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.scrollerStyle = .overlay
-        scroll.autohidesScrollers = true
+        scroll.hasVerticalScroller = false
         scroll.borderType = .noBorder
         scroll.documentView = tv
         return scroll

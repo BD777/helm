@@ -10,7 +10,7 @@ struct MessageListView: View {
     var body: some View {
         let items = displayItems
 
-        ScrollView {
+        ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     displayRow(item, isLatest: index == items.count - 1)

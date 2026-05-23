@@ -84,7 +84,7 @@ struct ComposerView: View {
                 text: $text,
                 skillChips: $selectedSkills,
                 placeholder: composerPlaceholder,
-                minLines: selectedSkills.isEmpty && text.isEmpty ? 2 : 1,
+                minLines: 2,
                 maxLines: 11,
                 focusRequest: focusRequest,
                 skillInsertionRequest: skillInsertionRequest,
