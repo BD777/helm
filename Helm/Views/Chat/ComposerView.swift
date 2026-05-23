@@ -227,9 +227,18 @@ struct ComposerView: View {
     private var slashFilteredSkills: [ComposerSkill] {
         guard let query = slashQuery else { return [] }
         guard !query.isEmpty else { return skills }
-        return skills.filter { skill in
-            skill.haystack.contains(query)
-        }
+        return skills
+            .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
+                guard let score = skill.matchScore(for: query) else { return nil }
+                return (skill, score)
+            }
+            .sorted {
+                if $0.score != $1.score {
+                    return $0.score < $1.score
+                }
+                return $0.skill.name.localizedCaseInsensitiveCompare($1.skill.name) == .orderedAscending
+            }
+            .map(\.skill)
     }
 
     private var currentSlashHighlight: String? {
@@ -955,6 +964,103 @@ private struct ComposerSkill: Identifiable, Hashable {
     let source: String
     let path: String
     let haystack: String
+
+    func matchScore(for rawQuery: String) -> ComposerSkillMatchScore? {
+        let query = Self.normalizedSearchText(rawQuery)
+        guard !query.isEmpty else { return nil }
+
+        let normalizedName = Self.normalizedSearchText(name)
+        let normalizedHaystack = Self.normalizedSearchText(haystack)
+        let candidates = [
+            literalScore(query: query, in: normalizedName, targetPriority: 0),
+            literalScore(query: query, in: normalizedHaystack, targetPriority: 1),
+            subsequenceScore(query: query, in: normalizedName, targetPriority: 0),
+            subsequenceScore(query: query, in: normalizedHaystack, targetPriority: 1),
+        ]
+        return candidates.compactMap(\.self).min()
+    }
+
+    private static func normalizedSearchText(_ raw: String) -> String {
+        raw.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+            .lowercased()
+    }
+
+    private func literalScore(query: String,
+                              in target: String,
+                              targetPriority: Int) -> ComposerSkillMatchScore? {
+        guard let range = target.range(of: query) else { return nil }
+        let startsAtBeginning = range.lowerBound == target.startIndex
+        let tier: Int
+        if targetPriority == 0 {
+            tier = startsAtBeginning ? 0 : 1
+        } else {
+            tier = 2
+        }
+        return ComposerSkillMatchScore(
+            tier: tier,
+            gaps: 0,
+            span: query.count,
+            start: target.distance(from: target.startIndex, to: range.lowerBound),
+            targetPriority: targetPriority,
+            targetLength: target.count
+        )
+    }
+
+    private func subsequenceScore(query: String,
+                                  in target: String,
+                                  targetPriority: Int) -> ComposerSkillMatchScore? {
+        var queryIndex = query.startIndex
+        var firstMatch: Int?
+        var lastMatch: Int?
+
+        for (offset, character) in target.enumerated() {
+            guard queryIndex < query.endIndex,
+                  character == query[queryIndex]
+            else { continue }
+
+            if firstMatch == nil {
+                firstMatch = offset
+            }
+            lastMatch = offset
+            queryIndex = query.index(after: queryIndex)
+            if queryIndex == query.endIndex {
+                break
+            }
+        }
+
+        guard queryIndex == query.endIndex,
+              let firstMatch,
+              let lastMatch
+        else { return nil }
+
+        let span = lastMatch - firstMatch + 1
+        return ComposerSkillMatchScore(
+            tier: targetPriority == 0 ? 3 : 4,
+            gaps: span - query.count,
+            span: span,
+            start: firstMatch,
+            targetPriority: targetPriority,
+            targetLength: target.count
+        )
+    }
+}
+
+private struct ComposerSkillMatchScore: Comparable, Equatable {
+    let tier: Int
+    let gaps: Int
+    let span: Int
+    let start: Int
+    let targetPriority: Int
+    let targetLength: Int
+
+    static func < (lhs: ComposerSkillMatchScore, rhs: ComposerSkillMatchScore) -> Bool {
+        if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
+        if lhs.gaps != rhs.gaps { return lhs.gaps < rhs.gaps }
+        if lhs.span != rhs.span { return lhs.span < rhs.span }
+        if lhs.start != rhs.start { return lhs.start < rhs.start }
+        if lhs.targetPriority != rhs.targetPriority { return lhs.targetPriority < rhs.targetPriority }
+        return lhs.targetLength < rhs.targetLength
+    }
 }
 
 private enum ComposerSkillCatalog {
