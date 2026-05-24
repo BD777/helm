@@ -7,6 +7,7 @@ import Observation
 final class AppStore {
     var projects: [Project]
     var sessions: [Session]
+    var sidebarSessions: [SidebarSession]
     var providers: [Provider]
     var models: [Model]
     var profiles: [Profile]
@@ -19,6 +20,7 @@ final class AppStore {
             if let oldId = oldValue,
                let oldIdx = sessions.firstIndex(where: { $0.id == oldId }),
                sessions[oldIdx].isDraft {
+                removeSidebarSession(oldId)
                 sessions.remove(at: oldIdx)
             }
             scheduleStateSave()
@@ -31,7 +33,7 @@ final class AppStore {
         }
     }
     var isStreaming: Bool {
-        !activeRuns.isEmpty
+        !runningSessionIds.isEmpty
     }
     var selectedSessionIsStreaming: Bool {
         guard let selectedSessionId else { return false }
@@ -116,6 +118,7 @@ final class AppStore {
                 TranscriptSnapshotStore.exists(sessionId: $0.id)
             }
         self.sessions = cleanSessions
+        self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
         let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
         self.selectedSessionId = cleanSessions.contains { $0.id == restoredSelection }
             ? restoredSelection
@@ -274,15 +277,16 @@ final class AppStore {
         set {
             guard let new = newValue, let idx = sessions.firstIndex(where: { $0.id == new.id }) else { return }
             sessions[idx] = new
+            upsertSidebarSession(for: new)
         }
     }
 
     func isSessionStreaming(_ sessionId: UUID) -> Bool {
-        activeRuns[sessionId] != nil
+        runningSessionIds.contains(sessionId)
     }
 
     func activeRunStartedAt(for sessionId: UUID) -> Date? {
-        activeRuns[sessionId]?.startedAt
+        activeRunStartedAts[sessionId]
     }
 
     func project(for sessionId: UUID) -> Project? {
@@ -309,6 +313,10 @@ final class AppStore {
 
     func sessions(in projectId: UUID) -> [Session] {
         sessions.filter { $0.projectId == projectId && !$0.isDraft }
+    }
+
+    func sidebarSessions(in projectId: UUID) -> [SidebarSession] {
+        sidebarSessions.filter { $0.projectId == projectId }
     }
 
     var visibleSessions: [Session] {
@@ -370,6 +378,7 @@ final class AppStore {
         else { return }
         sessions[idx].title = trimmed
         sessions[idx].lastUpdate = "now"
+        upsertSidebarSession(for: sessions[idx])
         scheduleStateSave()
     }
 
@@ -380,6 +389,7 @@ final class AppStore {
         let projectId = sessions[idx].projectId
         let wasSelected = selectedSessionId == id
         sessions.remove(at: idx)
+        removeSidebarSession(id)
         TranscriptSnapshotStore.delete(sessionId: id)
         if wasSelected {
             selectedSessionId = sessions.first {
@@ -420,9 +430,40 @@ final class AppStore {
     /// "Claude Sonnet 4.6 · es2-relay"). Falls back gracefully if the
     /// profile / model has been deleted.
     func sessionHeadline(_ session: Session) -> String {
-        guard let p = profile(session.profileId) else { return "—" }
+        sessionHeadline(profileId: session.profileId)
+    }
+
+    func sessionHeadline(_ session: SidebarSession) -> String {
+        sessionHeadline(profileId: session.profileId)
+    }
+
+    private func sessionHeadline(profileId: UUID) -> String {
+        guard let p = profile(profileId) else { return "—" }
         guard let m = model(p.primaryModelId) else { return p.name }
         return m.label + " · " + p.name
+    }
+
+    private static func sidebarSessions(from sessions: [Session]) -> [SidebarSession] {
+        sessions.filter { !$0.isDraft }.map(SidebarSession.init)
+    }
+
+    private func upsertSidebarSession(for session: Session) {
+        if session.isDraft {
+            removeSidebarSession(session.id)
+            return
+        }
+
+        let row = SidebarSession(session)
+        if let idx = sidebarSessions.firstIndex(where: { $0.id == session.id }) {
+            guard sidebarSessions[idx] != row else { return }
+            sidebarSessions[idx] = row
+        } else {
+            sidebarSessions.append(row)
+        }
+    }
+
+    private func removeSidebarSession(_ sessionId: UUID) {
+        sidebarSessions.removeAll { $0.id == sessionId }
     }
 
     // MARK: - Project / Session creation
@@ -554,6 +595,7 @@ final class AppStore {
             sessions[idx].codexSandboxMode = profile.sandboxMode ?? .workspace
             sessions[idx].codexEffort = profile.reasoningEffort ?? .medium
         }
+        upsertSidebarSession(for: sessions[idx])
         scheduleStateSave()
     }
 
@@ -682,7 +724,10 @@ final class AppStore {
 
     /// Per-session run state. Each active conversation owns its adapter,
     /// stream task, and vendor tool-id mapping so sessions can run together.
+    @ObservationIgnored
     private var activeRuns: [UUID: ActiveRun] = [:]
+    private var runningSessionIds: Set<UUID> = []
+    private var activeRunStartedAts: [UUID: Date] = [:]
     private var pendingApprovalQueue: [PendingApprovalEntry] = []
 
     func send(_ prompt: String,
@@ -705,6 +750,7 @@ final class AppStore {
                                               attachments: attachments)
         }
         sessions[sIdx].lastUpdate = "now"
+        upsertSidebarSession(for: sessions[sIdx])
         guard let project = projects.first(where: { $0.id == sessions[sIdx].projectId }) else {
             appendError(to: sIdx, "Session has no project (id=\(sessions[sIdx].projectId))."); return
         }
@@ -770,13 +816,16 @@ final class AppStore {
         case .claude: adapter = ClaudeLocalAdapter()
         case .codex: adapter = codexAdapter(project: project, runConfig: runConfig)
         }
+        let startedAt = Date()
         activeRuns[sessionId] = ActiveRun(
             runId: runId,
             assistantId: assistantId,
             adapter: adapter,
             task: nil,
-            startedAt: Date()
+            startedAt: startedAt
         )
+        runningSessionIds.insert(sessionId)
+        activeRunStartedAts[sessionId] = startedAt
 
         do {
             let stream = try adapter.start(prompt: promptForAgent, attachments: attachments, session: session, run: runConfig, project: project)
@@ -821,6 +870,8 @@ final class AppStore {
         if let runId, run.runId != runId { return }
         persistTranscriptSnapshot(for: sessionId)
         activeRuns[sessionId] = nil
+        runningSessionIds.remove(sessionId)
+        activeRunStartedAts[sessionId] = nil
         pendingApprovalQueue.removeAll { $0.sessionId == sessionId }
     }
 
@@ -907,6 +958,7 @@ final class AppStore {
 
         let staleVendorSessionId = sessions[sIdx].vendorSessionId
         sessions[sIdx].vendorSessionId = nil
+        upsertSidebarSession(for: sessions[sIdx])
         removeRecoverableResumeErrors(from: sIdx)
         mutateAssistant(at: sIdx, id: assistantId) { msg in
             msg.role = .assistant(meta: "thinking…")
@@ -929,10 +981,12 @@ final class AppStore {
         case .codex: adapter = codexAdapter(project: project, runConfig: runConfig)
         }
         if var run = activeRuns[sessionId], run.runId == runId {
+            let restartedAt = Date()
             run.adapter = adapter
-            run.startedAt = Date()
+            run.startedAt = restartedAt
             run.toolMap = [:]
             activeRuns[sessionId] = run
+            activeRunStartedAts[sessionId] = restartedAt
         }
 
         do {
@@ -970,6 +1024,7 @@ final class AppStore {
         case .sessionId(let id):
             if sessions[sIdx].vendorSessionId != id {
                 sessions[sIdx].vendorSessionId = id
+                upsertSidebarSession(for: sessions[sIdx])
                 scheduleStateSave()
             }
 

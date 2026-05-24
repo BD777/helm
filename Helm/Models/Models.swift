@@ -395,6 +395,22 @@ struct Session: Identifiable, Hashable, Codable {
     }
 }
 
+struct SidebarSession: Identifiable, Hashable {
+    let id: UUID
+    var projectId: UUID
+    var title: String
+    var profileId: UUID
+    var vendorSessionId: String?
+
+    init(_ session: Session) {
+        self.id = session.id
+        self.projectId = session.projectId
+        self.title = session.title
+        self.profileId = session.profileId
+        self.vendorSessionId = session.vendorSessionId
+    }
+}
+
 struct Message: Identifiable, Hashable, Codable {
     let id: UUID
     enum Role: Hashable, Codable { case user, assistant(meta: String) }

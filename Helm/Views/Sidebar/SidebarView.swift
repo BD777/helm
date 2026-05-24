@@ -78,7 +78,7 @@ struct SidebarView: View {
         guard !normalizedSearch.isEmpty else { return store.projects }
         return store.projects.filter { project in
             projectMatches(project) ||
-            store.sessions(in: project.id).contains { sessionMatches($0, in: project) }
+            store.sidebarSessions(in: project.id).contains { sessionMatches($0, in: project) }
         }
     }
 
@@ -91,7 +91,7 @@ struct SidebarView: View {
         return haystack.contains(normalizedSearch)
     }
 
-    private func sessionMatches(_ session: Session, in project: Project) -> Bool {
+    private func sessionMatches(_ session: SidebarSession, in project: Project) -> Bool {
         let haystack = [
             session.title,
             store.sessionHeadline(session),
@@ -316,8 +316,8 @@ private struct ProjectSection: View {
     var onDragEnded: (DragGesture.Value) -> Void
 
     @State private var hoveredSessionId: UUID?
-    @State private var pendingDelete: Session?
-    @State private var pendingRename: Session?
+    @State private var pendingDelete: SidebarSession?
+    @State private var pendingRename: SidebarSession?
     @State private var renameTitle = ""
 
     var body: some View {
@@ -325,13 +325,16 @@ private struct ProjectSection: View {
             header
             if !project.collapsed || isFiltering {
                 ForEach(visibleSessions) { s in
+                    let isRunning = store.isSessionStreaming(s.id)
                     Button {
                         store.selectedSessionId = s.id
                     } label: {
                         SessionRow(
                             session: s,
+                            vendor: store.profile(s.profileId)?.vendor,
                             isActive: s.id == store.selectedSessionId,
-                            isHovered: hoveredSessionId == s.id
+                            isHovered: hoveredSessionId == s.id,
+                            isRunning: isRunning
                         )
                     }
                     .buttonStyle(.plain)
@@ -362,7 +365,7 @@ private struct ProjectSection: View {
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
-                        .disabled(store.isSessionStreaming(s.id))
+                        .disabled(isRunning)
                     }
                 }
             }
@@ -424,8 +427,8 @@ private struct ProjectSection: View {
         !normalizedSearch.isEmpty
     }
 
-    private var visibleSessions: [Session] {
-        let sessions = store.sessions(in: project.id)
+    private var visibleSessions: [SidebarSession] {
+        let sessions = store.sidebarSessions(in: project.id)
         guard isFiltering, !projectMatchesSearch else { return sessions }
         return sessions.filter(sessionMatchesSearch)
     }
@@ -439,7 +442,7 @@ private struct ProjectSection: View {
         return haystack.contains(normalizedSearch)
     }
 
-    private func sessionMatchesSearch(_ session: Session) -> Bool {
+    private func sessionMatchesSearch(_ session: SidebarSession) -> Bool {
         let haystack = [
             session.title,
             store.sessionHeadline(session),
@@ -540,7 +543,7 @@ private struct ProjectSection: View {
         )
     }
 
-    private func beginRename(_ session: Session) {
+    private func beginRename(_ session: SidebarSession) {
         renameTitle = session.title
         pendingRename = session
     }
@@ -703,17 +706,16 @@ private struct ProjectHeaderFramePreferenceKey: PreferenceKey {
 }
 
 private struct SessionRow: View {
-    @Environment(AppStore.self) private var store
-    let session: Session
+    let session: SidebarSession
+    let vendor: Vendor?
     let isActive: Bool
     let isHovered: Bool
+    let isRunning: Bool
 
     var body: some View {
-        let profile = store.profile(session.profileId)
-        let isRunning = store.isSessionStreaming(session.id)
-        return HStack(spacing: 8) {
-            if let profile {
-                VendorBadge(vendor: profile.vendor)
+        HStack(spacing: 8) {
+            if let vendor {
+                VendorBadge(vendor: vendor)
                     .frame(width: 18, height: 18)
             } else {
                 RoundedRectangle(cornerRadius: 4)
@@ -724,13 +726,9 @@ private struct SessionRow: View {
                 .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: 0)
-            if isRunning {
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.82)
-                    .frame(width: 16, height: 16)
-            }
+            RunningSessionIndicator(isRunning: isRunning)
         }
         .padding(.leading, 18)
         .padding(.trailing, 8)
@@ -751,6 +749,27 @@ private struct SessionRow: View {
         if isActive { return Color.helmSelected }
         if isHovered { return Color.helmHover }
         return Color.clear
+    }
+}
+
+private struct RunningSessionIndicator: View {
+    let isRunning: Bool
+
+    var body: some View {
+        ZStack {
+            if isRunning {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.accentColor.opacity(0.24), lineWidth: 4)
+                    )
+            }
+        }
+        .frame(width: 16, height: 18)
+        .opacity(isRunning ? 1 : 0)
+        .accessibilityHidden(!isRunning)
     }
 }
 
