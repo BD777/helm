@@ -1,6 +1,26 @@
 import Darwin
 import Foundation
 
+fileprivate func processOutput(_ executable: String, arguments: [String]) -> String {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: executable)
+    proc.arguments = arguments
+
+    let stdout = Pipe()
+    proc.standardOutput = stdout
+    proc.standardError = Pipe()
+
+    do {
+        try proc.run()
+    } catch {
+        return ""
+    }
+
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    proc.waitUntilExit()
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
 func jsonErrorIsPresent(_ value: Any?) -> Bool {
     switch value {
     case nil:
@@ -242,29 +262,31 @@ extension AgentAdapter {
 enum ProcessTreeTerminator {
     static func terminate(_ process: Process,
                           closing stdin: FileHandle? = nil,
+                          trackedDescendants: [Int32] = [],
                           killAfter grace: TimeInterval = 1.5) {
         let pid = process.processIdentifier
-        let descendants = descendantPIDs(of: pid)
-        for child in descendants.reversed() {
-            Darwin.kill(child, SIGTERM)
-        }
+        terminate(pids: descendantPIDs(of: pid) + trackedDescendants, signal: SIGTERM)
         if process.isRunning {
             process.terminate()
         }
         try? stdin?.close()
 
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
-            let remaining = descendantPIDs(of: pid)
-            for child in remaining.reversed() {
-                Darwin.kill(child, SIGKILL)
-            }
+            terminate(pids: descendantPIDs(of: pid) + trackedDescendants, signal: SIGKILL)
             if process.isRunning {
                 Darwin.kill(pid, SIGKILL)
             }
         }
     }
 
-    private static func descendantPIDs(of root: Int32) -> [Int32] {
+    static func terminate(pids: [Int32], killAfter grace: TimeInterval = 1.5) {
+        terminate(pids: pids, signal: SIGTERM)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
+            terminate(pids: pids, signal: SIGKILL)
+        }
+    }
+
+    static func descendantPIDs(of root: Int32) -> [Int32] {
         let childrenByParent = processParentMap()
         var out: [Int32] = []
 
@@ -280,23 +302,7 @@ enum ProcessTreeTerminator {
     }
 
     private static func processParentMap() -> [Int32: [Int32]] {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-axo", "pid=,ppid="]
-
-        let stdout = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = Pipe()
-
-        do {
-            try proc.run()
-        } catch {
-            return [:]
-        }
-        proc.waitUntilExit()
-
-        let text = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
-                          encoding: .utf8) ?? ""
+        let text = processOutput("/bin/ps", arguments: ["-axo", "pid=,ppid="])
         var map: [Int32: [Int32]] = [:]
         for line in text.split(separator: "\n") {
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
@@ -305,6 +311,88 @@ enum ProcessTreeTerminator {
                   let ppid = Int32(String(parts[1]))
             else { continue }
             map[ppid, default: []].append(pid)
+        }
+        return map
+    }
+
+    private static func terminate(pids: [Int32], signal: Int32) {
+        var seen = Set<Int32>()
+        for pid in pids.reversed() where pid > 1 && !seen.contains(pid) {
+            seen.insert(pid)
+            Darwin.kill(pid, signal)
+        }
+    }
+}
+
+final class ProcessDescendantTracker: @unchecked Sendable {
+    private let rootPID: Int32
+    private let interval: DispatchTimeInterval
+    private let excludedCommandSubstrings: [String]
+    private let queue = DispatchQueue(label: "dev.deng.helm.process-descendant-tracker",
+                                      qos: .utility)
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+    private var knownPIDs: Set<Int32> = []
+
+    init(process: Process,
+         interval: DispatchTimeInterval = .milliseconds(250),
+         excludedCommandSubstrings: [String] = ["SkyComputerUseService"]) {
+        self.rootPID = process.processIdentifier
+        self.interval = interval
+        self.excludedCommandSubstrings = excludedCommandSubstrings
+    }
+
+    func start() {
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now(), repeating: interval)
+        source.setEventHandler { [weak self] in
+            self?.recordSnapshot()
+        }
+        lock.lock()
+        timer = source
+        lock.unlock()
+        source.resume()
+    }
+
+    func stop() -> [Int32] {
+        recordSnapshot()
+        lock.lock()
+        let source = timer
+        timer = nil
+        let snapshot = Array(knownPIDs)
+        knownPIDs.removeAll()
+        lock.unlock()
+        source?.cancel()
+        return snapshot
+    }
+
+    private func recordSnapshot() {
+        var descendants = ProcessTreeTerminator.descendantPIDs(of: rootPID)
+            .filter { $0 != rootPID }
+        if !excludedCommandSubstrings.isEmpty {
+            let commands = processCommandMap(for: descendants)
+            descendants = descendants.filter { pid in
+                guard let command = commands[pid] else { return true }
+                return !excludedCommandSubstrings.contains { command.contains($0) }
+            }
+        }
+        guard !descendants.isEmpty else { return }
+        lock.lock()
+        knownPIDs.formUnion(descendants)
+        lock.unlock()
+    }
+
+    private func processCommandMap(for pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let pidList = pids.map(String.init).joined(separator: ",")
+        let text = processOutput("/bin/ps", arguments: ["-p", pidList, "-o", "pid=,command="])
+        var map: [Int32: String] = [:]
+        for line in text.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let firstSpace = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }),
+                  let pid = Int32(String(trimmed[..<firstSpace]).trimmingCharacters(in: .whitespaces))
+            else { continue }
+            map[pid] = String(trimmed[firstSpace...]).trimmingCharacters(in: .whitespaces)
         }
         return map
     }

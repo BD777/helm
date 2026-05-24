@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Resolved bag of env / args / command for one agent invocation. Adapters
@@ -14,6 +15,15 @@ struct RunConfig {
     var headlineModel: String
     /// Provider model id sent over the wire (e.g. "model_hub/es2_orange_o47").
     var providerModelId: String
+}
+
+extension RunConfig {
+    var usesComputerUseMCP: Bool {
+        args.contains { arg in
+            arg.contains("mcp_servers.computer-use")
+                || arg.contains(CodexComputerUseMCP.claudeServerName)
+        }
+    }
 }
 
 enum ResolverError: LocalizedError {
@@ -269,12 +279,12 @@ enum CodexComputerUseMCP {
     private static var failedServerKeys: [String: String] = [:]
 
     static func configArgs(isRemoteProject: Bool) throws -> [String] {
-        guard let server = try attachableServer(isRemoteProject: isRemoteProject) else { return [] }
+        guard try attachableServer(isRemoteProject: isRemoteProject) != nil else { return [] }
+        guard let executable = Bundle.main.executablePath else { return [] }
 
         return [
-            "-c", "mcp_servers.computer-use.command=\(tomlStringLiteral(server.command))",
-            "-c", "mcp_servers.computer-use.args=[\"mcp\"]",
-            "-c", "mcp_servers.computer-use.cwd=\(tomlStringLiteral(server.cwd))",
+            "-c", "mcp_servers.computer-use.command=\(tomlStringLiteral(executable))",
+            "-c", "mcp_servers.computer-use.args=[\"\(HelmComputerUseMCPProxy.commandLineFlag)\"]",
         ]
     }
 
@@ -282,6 +292,20 @@ enum CodexComputerUseMCP {
         guard try attachableServer(isRemoteProject: isRemoteProject) != nil else { return [] }
         guard let executable = Bundle.main.executablePath else { return [] }
         return ["--mcp-config", claudeProxyConfigString(command: executable)]
+    }
+
+    static func localServerForProxy() throws -> (command: String, cwd: String)? {
+        guard let server = try attachableServer(isRemoteProject: false) else { return nil }
+        return (server.command, server.cwd)
+    }
+
+    static func directConfigArgsForProxy() throws -> [String] {
+        guard let server = try attachableServer(isRemoteProject: false) else { return [] }
+        return [
+            "-c", "mcp_servers.computer-use.command=\(tomlStringLiteral(server.command))",
+            "-c", "mcp_servers.computer-use.args=[\"mcp\"]",
+            "-c", "mcp_servers.computer-use.cwd=\(tomlStringLiteral(server.cwd))",
+        ]
     }
 
     private static func attachableServer(isRemoteProject: Bool) throws -> Server? {
@@ -752,6 +776,98 @@ private final class MCPProbeOutput: @unchecked Sendable {
     }
 }
 
+private final class MCPProxyOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private let signal = DispatchSemaphore(value: 0)
+    private let requestHandler: (Any, String, [String: Any]?) -> Void
+    private var pending = ""
+    private var raw = ""
+    private var responses: [Int: [String: Any]] = [:]
+
+    init(requestHandler: @escaping (Any, String, [String: Any]?) -> Void) {
+        self.requestHandler = requestHandler
+    }
+
+    func append(_ data: Data) {
+        guard let chunk = String(data: data, encoding: .utf8),
+              !chunk.isEmpty
+        else { return }
+
+        var parsedResponseCount = 0
+        var requests: [(Any, String, [String: Any]?)] = []
+        lock.lock()
+        raw.append(chunk)
+        pending.append(chunk)
+        while let newline = pending.firstIndex(of: "\n") {
+            let line = String(pending[..<newline])
+            pending.removeSubrange(...newline)
+            guard let object = Self.parse(line),
+                  let id = object["id"]
+            else { continue }
+            if object["result"] != nil || object["error"] != nil {
+                if let responseId = Self.responseId(from: object) {
+                    responses[responseId] = object
+                    parsedResponseCount += 1
+                }
+            } else if let method = object["method"] as? String {
+                requests.append((id, method, object["params"] as? [String: Any]))
+            }
+        }
+        lock.unlock()
+
+        for request in requests {
+            requestHandler(request.0, request.1, request.2)
+        }
+        for _ in 0..<parsedResponseCount {
+            signal.signal()
+        }
+    }
+
+    func waitForResponse(id: Int, timeout: TimeInterval) -> [String: Any]? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            lock.lock()
+            let response = responses[id]
+            lock.unlock()
+            if let response {
+                return response
+            }
+
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 {
+                return nil
+            }
+            let milliseconds = max(1, Int(min(remaining, 0.1) * 1_000))
+            _ = signal.wait(timeout: .now() + .milliseconds(milliseconds))
+        }
+    }
+
+    func text() -> String {
+        lock.lock()
+        let snapshot = raw
+        lock.unlock()
+        return snapshot
+    }
+
+    private static func parse(_ line: String) -> [String: Any]? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8)
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func responseId(from object: [String: Any]) -> Int? {
+        if let id = object["id"] as? Int {
+            return id
+        }
+        if let id = object["id"] as? NSNumber {
+            return id.intValue
+        }
+        return nil
+    }
+}
+
 private final class LockedDataBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
@@ -917,9 +1033,22 @@ enum HelmComputerUseMCPProxy {
             return textResult("Unknown Computer Use tool '\(name)'.", isError: true)
         }
 
+        do {
+            guard try CodexComputerUseMCP.localServerForProxy() != nil else {
+                return textResult("Computer Use MCP is disabled or unavailable on this device.",
+                                  isError: true)
+            }
+        } catch {
+            return textResult(error.localizedDescription, isError: true)
+        }
+
+        return callCodexComputerUse(name: name, arguments: arguments)
+    }
+
+    private static func callCodexComputerUse(name: String, arguments: [String: Any]) -> [String: Any] {
         let configArgs: [String]
         do {
-            configArgs = try CodexComputerUseMCP.configArgs(isRemoteProject: false)
+            configArgs = try CodexComputerUseMCP.directConfigArgsForProxy()
         } catch {
             return textResult(error.localizedDescription, isError: true)
         }
@@ -928,29 +1057,13 @@ enum HelmComputerUseMCPProxy {
                               isError: true)
         }
 
-        let argumentsJSON = serialize(arguments)
-        let prompt: String
-        if requiresFreshAppState(name) {
-            guard let app = arguments["app"] as? String, !app.isEmpty else {
-                return textResult("Computer Use tool '\(name)' requires a non-empty app argument.",
-                                  isError: true)
-            }
-            prompt = """
-            Use only computer-use MCP tool calls.
-            First call get_app_state with Arguments JSON: \(serialize(["app": app]))
-            Then call \(name) with Arguments JSON: \(argumentsJSON)
+        let prompt = """
+        Use exactly one computer-use MCP tool call.
+        Tool name: \(name)
+        Arguments JSON: \(serialize(arguments))
 
-            Do not use shell or any other tool. After the \(name) tool call finishes, reply exactly HELM_COMPUTER_USE_DONE.
-            """
-        } else {
-            prompt = """
-            Use exactly one computer-use MCP tool call.
-            Tool name: \(name)
-            Arguments JSON: \(argumentsJSON)
-
-            Do not use shell or any other tool. After the tool call finishes, reply exactly HELM_COMPUTER_USE_DONE.
-            """
-        }
+        Do not use shell or any other tool. After the tool call finishes, reply exactly HELM_COMPUTER_USE_DONE.
+        """
 
         let executable: String
         do {
@@ -959,22 +1072,56 @@ enum HelmComputerUseMCPProxy {
             return textResult(error.localizedDescription, isError: true)
         }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = [
+        let codexArgs = [
             "exec",
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
         ] + configArgs + [prompt]
+        let timeout: TimeInterval = name == "get_app_state" ? 150 : 120
+
+        if ProcessInfo.processInfo.environment["HELM_DISABLE_CODEX_COMPUTER_USE_LAUNCHD"] != "1" {
+            let result = runCodexViaLaunchd(executable: executable,
+                                            arguments: codexArgs,
+                                            timeout: timeout)
+            if result.timedOut {
+                let details = processDetails(stdout: result.stdout,
+                                             stderr: result.stderr)
+                let suffix = details.isEmpty ? "" : " Last output:\n\(details)"
+                return textResult("Computer Use tool '\(name)' timed out.\(suffix)", isError: true)
+            }
+
+            let stdoutText = String(data: result.stdout, encoding: .utf8) ?? ""
+            let parsed = parseCodexToolOutput(stdoutText, expectedTool: name)
+            if let tool = parsed.tool {
+                return tool
+            }
+            if result.status != 0 {
+                let detail = processDetails(stdout: result.stdout,
+                                            stderr: result.stderr)
+                return textResult(detail.isEmpty ? "codex exited \(result.status)" : detail,
+                                  isError: true)
+            }
+            if let final = parsed.final, !final.text.isEmpty {
+                return textResult(final.text, isError: final.isError)
+            }
+            return textResult("Codex did not return a Computer Use tool result.", isError: true)
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: executable)
+        proc.arguments = codexArgs
+        proc.environment = cleanCodexEnvironment()
         proc.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 
-        let stdin = Pipe()
+        let stdin = try? FileHandle(forReadingFrom: URL(fileURLWithPath: "/dev/null"))
+        if let stdin {
+            proc.standardInput = stdin
+        }
         let stdout = Pipe()
         let stderr = Pipe()
         let stdoutBuffer = LockedDataBuffer()
         let stderrBuffer = LockedDataBuffer()
-        proc.standardInput = stdin
         proc.standardOutput = stdout
         proc.standardError = stderr
         stdout.fileHandleForReading.readabilityHandler = { handle in
@@ -986,33 +1133,51 @@ enum HelmComputerUseMCPProxy {
 
         let finished = DispatchSemaphore(value: 0)
         proc.terminationHandler = { _ in finished.signal() }
+
+        var tracker: ProcessDescendantTracker?
         do {
             try proc.run()
-            try? stdin.fileHandleForWriting.close()
+            tracker = ProcessDescendantTracker(process: proc)
+            tracker?.start()
         } catch {
+            try? stdin?.close()
             stdout.fileHandleForReading.readabilityHandler = nil
             stderr.fileHandleForReading.readabilityHandler = nil
             return textResult(error.localizedDescription, isError: true)
         }
 
-        if finished.wait(timeout: .now() + .seconds(180)) == .timedOut {
-            ProcessTreeTerminator.terminate(proc, closing: stdin.fileHandleForWriting, killAfter: 0.5)
-            return textResult("Computer Use tool '\(name)' timed out.", isError: true)
+        if finished.wait(timeout: .now() + .seconds(Int(timeout))) == .timedOut {
+            let tracked = tracker?.stop() ?? []
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            ProcessTreeTerminator.terminate(proc,
+                                            closing: stdin,
+                                            trackedDescendants: tracked,
+                                            killAfter: 0.5)
+            stdoutBuffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
+            stderrBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
+            let details = processDetails(stdout: stdoutBuffer.value(),
+                                         stderr: stderrBuffer.value())
+            let suffix = details.isEmpty ? "" : " Last output:\n\(details)"
+            return textResult("Computer Use tool '\(name)' timed out.\(suffix)", isError: true)
         }
 
+        let tracked = tracker?.stop() ?? []
+        ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
+        try? stdin?.close()
         stdout.fileHandleForReading.readabilityHandler = nil
         stderr.fileHandleForReading.readabilityHandler = nil
         stdoutBuffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
         stderrBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
 
         let stdoutText = String(data: stdoutBuffer.value(), encoding: .utf8) ?? ""
-        let stderrText = String(data: stderrBuffer.value(), encoding: .utf8) ?? ""
         let parsed = parseCodexToolOutput(stdoutText, expectedTool: name)
         if let tool = parsed.tool {
             return tool
         }
         if proc.terminationStatus != 0 {
-            let detail = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = processDetails(stdout: stdoutBuffer.value(),
+                                        stderr: stderrBuffer.value())
             return textResult(detail.isEmpty ? "codex exited \(proc.terminationStatus)" : detail,
                               isError: true)
         }
@@ -1020,6 +1185,416 @@ enum HelmComputerUseMCPProxy {
             return textResult(final.text, isError: final.isError)
         }
         return textResult("Codex did not return a Computer Use tool result.", isError: true)
+    }
+
+    private struct CodexLaunchResult {
+        var status: Int32
+        var stdout: Data
+        var stderr: Data
+        var timedOut: Bool
+    }
+
+    private static func runCodexViaLaunchd(executable: String,
+                                           arguments: [String],
+                                           timeout: TimeInterval) -> CodexLaunchResult {
+        let fileManager = FileManager.default
+        let id = UUID().uuidString.lowercased()
+        let label = "dev.deng.helm.computer-use.\(id)"
+        let dir = fileManager.temporaryDirectory
+            .appendingPathComponent("helm-computer-use-\(id)", isDirectory: true)
+        let scriptURL = dir.appendingPathComponent("run.sh")
+        let stdoutURL = dir.appendingPathComponent("stdout.jsonl")
+        let stderrURL = dir.appendingPathComponent("stderr.log")
+        let statusURL = dir.appendingPathComponent("status")
+        let pgidURL = dir.appendingPathComponent("pgid")
+
+        do {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            let envArgs = cleanCodexEnvironment()
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+            let command = (["/usr/bin/env", "-i"] + envArgs + [executable] + arguments)
+                .map(shellQuote)
+                .joined(separator: " ")
+            let script = """
+            #!/bin/bash
+            pgid="$(ps -o pgid= -p $$ | tr -d ' ')"
+            printf '%s\\n' "$pgid" > \(shellQuote(pgidURL.path))
+            cd \(shellQuote(FileManager.default.currentDirectoryPath))
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              printf '%s\\n' "$status" > \(shellQuote(statusURL.path))
+              exit "$status"
+            fi
+            \(command) < /dev/null
+            status=$?
+            if [ -n "$pgid" ]; then
+              pkill -TERM -g "$pgid" -f 'SkyComputerUseClient|codex app-server --listen stdio://' 2>/dev/null || true
+              sleep 0.2
+              pkill -KILL -g "$pgid" -f 'SkyComputerUseClient|codex app-server --listen stdio://' 2>/dev/null || true
+            fi
+            printf '%s\\n' "$status" > \(shellQuote(statusURL.path))
+            exit "$status"
+            """
+            try script.data(using: .utf8)?.write(to: scriptURL, options: .atomic)
+            try fileManager.setAttributes([.posixPermissions: 0o700],
+                                          ofItemAtPath: scriptURL.path)
+        } catch {
+            return CodexLaunchResult(status: 1,
+                                     stdout: Data(),
+                                     stderr: Data(error.localizedDescription.utf8),
+                                     timedOut: false)
+        }
+
+        let submit = Process()
+        submit.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        submit.arguments = [
+            "submit",
+            "-l", label,
+            "-o", stdoutURL.path,
+            "-e", stderrURL.path,
+            "--", scriptURL.path,
+        ]
+        let submitStderr = Pipe()
+        submit.standardError = submitStderr
+        do {
+            try submit.run()
+        } catch {
+            return CodexLaunchResult(status: 1,
+                                     stdout: readData(stdoutURL),
+                                     stderr: Data(error.localizedDescription.utf8),
+                                     timedOut: false)
+        }
+        submit.waitUntilExit()
+        if submit.terminationStatus != 0 {
+            let stderr = submitStderr.fileHandleForReading.readDataToEndOfFile()
+            return CodexLaunchResult(status: submit.terminationStatus,
+                                     stdout: readData(stdoutURL),
+                                     stderr: stderr,
+                                     timedOut: false)
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while !fileManager.fileExists(atPath: statusURL.path) {
+            if Date() >= deadline {
+                removeLaunchdJob(label)
+                terminateLaunchdProcessGroup(pgidURL)
+                let result = CodexLaunchResult(status: SIGTERM,
+                                               stdout: readData(stdoutURL),
+                                               stderr: readData(stderrURL),
+                                               timedOut: true)
+                try? fileManager.removeItem(at: dir)
+                return result
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        terminateLaunchdProcessGroup(pgidURL, killAfter: 0.2)
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let statusText = (try? String(contentsOf: statusURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let status = Int32(statusText ?? "") ?? 1
+        let result = CodexLaunchResult(status: status,
+                                       stdout: readData(stdoutURL),
+                                       stderr: readData(stderrURL),
+                                       timedOut: false)
+        try? fileManager.removeItem(at: dir)
+        return result
+    }
+
+    private static func terminateLaunchdProcessGroup(_ pgidURL: URL,
+                                                     killAfter grace: TimeInterval = 0.5) {
+        guard let text = try? String(contentsOf: pgidURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let pgid = Int32(text),
+              pgid > 1
+        else { return }
+        Darwin.kill(-pgid, SIGTERM)
+        Thread.sleep(forTimeInterval: grace)
+        Darwin.kill(-pgid, SIGKILL)
+    }
+
+    private static func removeLaunchdJob(_ label: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        proc.arguments = ["remove", label]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        try? proc.run()
+        proc.waitUntilExit()
+    }
+
+    private static func readData(_ url: URL) -> Data {
+        (try? Data(contentsOf: url)) ?? Data()
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func cleanCodexEnvironment() -> [String: String] {
+        var env: [String: String] = [
+            "HOME": NSHomeDirectory(),
+            "PATH": [
+                "/opt/homebrew/opt/node@24/bin",
+                "\(NSHomeDirectory())/.local/bin",
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ].joined(separator: ":"),
+            "TERM": "dumb",
+        ]
+        let inherited = ProcessInfo.processInfo.environment
+        if let tmp = inherited["TMPDIR"] {
+            env["TMPDIR"] = tmp
+        }
+        if let lang = inherited["LANG"] {
+            env["LANG"] = lang
+        }
+        if let lcAll = inherited["LC_ALL"] {
+            env["LC_ALL"] = lcAll
+        }
+        return env
+    }
+
+    private static func processDetails(stdout: Data, stderr: Data) -> String {
+        let stderrText = String(data: stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stdoutText = String(data: stdout, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return [stderrText, stdoutText]
+            .compactMap { text in
+                guard let text, !text.isEmpty else { return nil }
+                return text
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func callNativeComputerUse(server: (command: String, cwd: String),
+                                              name: String,
+                                              arguments: [String: Any]) -> [String: Any] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: server.command)
+        proc.arguments = ["mcp"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: server.cwd, isDirectory: true)
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        let stderrBuffer = LockedDataBuffer()
+        let stdin = Pipe()
+        let writeLock = NSLock()
+        let output = MCPProxyOutput { requestId, method, params in
+            let response = responseToNativeComputerUseRequest(id: requestId,
+                                                              method: method,
+                                                              params: params)
+            writeLock.lock()
+            defer { writeLock.unlock() }
+            try? writeMCPObject(response, to: stdin)
+        }
+        proc.standardInput = stdin
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            output.append(handle.availableData)
+        }
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            stderrBuffer.append(handle.availableData)
+        }
+
+        var tracker: ProcessDescendantTracker?
+        do {
+            try proc.run()
+            tracker = ProcessDescendantTracker(process: proc)
+            tracker?.start()
+        } catch {
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            return textResult(error.localizedDescription, isError: true)
+        }
+        defer {
+            let tracked = tracker?.stop() ?? []
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            ProcessTreeTerminator.terminate(proc,
+                                            closing: stdin.fileHandleForWriting,
+                                            trackedDescendants: tracked,
+                                            killAfter: 0.5)
+            output.append(stdout.fileHandleForReading.readDataToEndOfFile())
+            stderrBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
+        }
+
+        do {
+            try writeMCPObject([
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": [
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": [
+                        "elicitation": [
+                            "form": [:],
+                        ],
+                    ],
+                    "clientInfo": [
+                        "name": "helm",
+                        "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0",
+                    ],
+                ],
+            ], to: stdin)
+        } catch {
+            return textResult("Computer Use MCP initialize write failed: \(error.localizedDescription)",
+                              isError: true)
+        }
+
+        guard let initialize = output.waitForResponse(id: 1, timeout: 6) else {
+            return nativeMCPTimeoutResult(stage: "initialize",
+                                          output: output,
+                                          stderr: stderrBuffer)
+        }
+        if let error = mcpErrorText(in: initialize) {
+            return textResult("Computer Use MCP initialize failed: \(error)", isError: true)
+        }
+
+        do {
+            try writeMCPObject([
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": [:],
+            ], to: stdin)
+            try writeMCPObject([
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": [
+                    "_meta": nativeMCPCallMeta(),
+                ],
+            ], to: stdin)
+        } catch {
+            return textResult("Computer Use MCP tools/list write failed: \(error.localizedDescription)",
+                              isError: true)
+        }
+
+        guard let toolsList = output.waitForResponse(id: 2, timeout: 6) else {
+            return nativeMCPTimeoutResult(stage: "tools/list",
+                                          output: output,
+                                          stderr: stderrBuffer)
+        }
+        if let error = mcpErrorText(in: toolsList) {
+            return textResult("Computer Use MCP tools/list failed: \(error)", isError: true)
+        }
+
+        do {
+            try writeMCPObject([
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": [
+                    "name": name,
+                    "arguments": arguments,
+                    "_meta": nativeMCPCallMeta(),
+                ],
+            ], to: stdin)
+        } catch {
+            return textResult("Computer Use MCP tools/call write failed: \(error.localizedDescription)",
+                              isError: true)
+        }
+
+        let timeout: TimeInterval = name == "get_app_state" ? 120 : 90
+        guard let response = output.waitForResponse(id: 3, timeout: timeout) else {
+            return nativeMCPTimeoutResult(stage: "tools/call \(name)",
+                                          output: output,
+                                          stderr: stderrBuffer)
+        }
+        if let error = mcpErrorText(in: response) {
+            return textResult("Computer Use MCP tools/call failed: \(error)", isError: true)
+        }
+        guard var result = response["result"] as? [String: Any] else {
+            return textResult("Computer Use MCP returned an unexpected response: \(serialize(response))",
+                              isError: true)
+        }
+        if result["isError"] == nil {
+            result["isError"] = false
+        }
+        return result
+    }
+
+    private static func responseToNativeComputerUseRequest(id: Any,
+                                                           method: String,
+                                                           params: [String: Any]?) -> [String: Any] {
+        if method == "ping" {
+            return ["jsonrpc": "2.0", "id": id, "result": [:]]
+        }
+        if method.lowercased().contains("elicitation") {
+            var content: [String: Any] = [:]
+            if let schema = params?["requestedSchema"] as? [String: Any],
+               let properties = schema["properties"] as? [String: Any] {
+                for key in properties.keys {
+                    content[key] = true
+                }
+            }
+            return [
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    "action": "accept",
+                    "content": content,
+                ],
+            ]
+        }
+        return [
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": [
+                "code": -32601,
+                "message": "Unsupported Computer Use MCP request '\(method)'.",
+            ],
+        ]
+    }
+
+    private static func nativeMCPCallMeta() -> [String: Any] {
+        let threadId = "helm-\(UUID().uuidString.lowercased())"
+        let turnId = "helm-\(UUID().uuidString.lowercased())"
+        return [
+            "progressToken": "helm-\(UUID().uuidString.lowercased())",
+            "threadId": threadId,
+            "x-codex-turn-metadata": [
+                "thread-id": threadId,
+                "turn-id": turnId,
+                "cwd": FileManager.default.currentDirectoryPath,
+                "client": "helm",
+            ],
+        ]
+    }
+
+    private static func nativeMCPTimeoutResult(stage: String,
+                                               output: MCPProxyOutput,
+                                               stderr: LockedDataBuffer) -> [String: Any] {
+        let stderrText = String(data: stderr.value(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stdoutText = output.text().trimmingCharacters(in: .whitespacesAndNewlines)
+        let details = [stderrText, stdoutText]
+            .compactMap { text in
+                guard let text, !text.isEmpty else { return nil }
+                return text
+            }
+            .joined(separator: "\n")
+        let suffix = details.isEmpty ? "" : " Last output:\n\(details)"
+        return textResult("Computer Use MCP did not respond to \(stage).\(suffix)",
+                          isError: true)
+    }
+
+    private static func mcpErrorText(in response: [String: Any]) -> String? {
+        guard let error = response["error"] else { return nil }
+        return serialize(error)
+    }
+
+    private static func writeMCPObject(_ object: [String: Any], to stdin: Pipe) throws {
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try stdin.fileHandleForWriting.write(contentsOf: data)
+        try stdin.fileHandleForWriting.write(contentsOf: Data([0x0A]))
     }
 
     private static func parseCodexToolOutput(_ output: String,

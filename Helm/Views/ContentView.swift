@@ -44,7 +44,7 @@ struct ContentView: View {
             }
             .animation(.easeOut(duration: 0.14), value: store.imagePreviewURL)
             .animation(.easeOut(duration: 0.12), value: store.showQuickSwitcher)
-            .animation(.easeOut(duration: 0.12), value: store.pendingApproval?.id)
+            .animation(.easeOut(duration: 0.12), value: store.pendingApprovalKey)
             .onAppear {
                 HelmCommandCenter.shared.bind(store: store)
             }

@@ -6,6 +6,7 @@ import Foundation
 final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = ClaudeSessionStore()
     private var process: Process?
+    private var descendantTracker: ProcessDescendantTracker?
     private let lock = NSLock()
 
     func start(prompt: String,
@@ -115,6 +116,8 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             proc.terminationHandler = { p in
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                let tracked = self.stopTrackingDescendants()
+                ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
                 NSLog("[helm.claude] exit status=%d", p.terminationStatus)
                 for event in parser.flush() {
                     NSLog("[helm.claude] flush event: %@", String(describing: event).prefix(180) as CVarArg)
@@ -136,6 +139,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
 
             do {
                 try proc.run()
+                self.startTrackingDescendantsIfNeeded(for: run, process: proc)
             } catch {
                 continuation.finish(throwing: error)
                 return
@@ -185,10 +189,33 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     func cancel() {
         lock.lock()
         let p = process
+        let tracked = stopTrackingDescendantsLocked()
         process = nil
         lock.unlock()
         guard let p else { return }
-        ProcessTreeTerminator.terminate(p)
+        ProcessTreeTerminator.terminate(p, trackedDescendants: tracked)
+    }
+
+    private func startTrackingDescendantsIfNeeded(for run: RunConfig, process: Process) {
+        guard run.usesComputerUseMCP else { return }
+        let tracker = ProcessDescendantTracker(process: process)
+        tracker.start()
+        lock.lock()
+        descendantTracker = tracker
+        lock.unlock()
+    }
+
+    private func stopTrackingDescendants() -> [Int32] {
+        lock.lock()
+        let tracked = stopTrackingDescendantsLocked()
+        lock.unlock()
+        return tracked
+    }
+
+    private func stopTrackingDescendantsLocked() -> [Int32] {
+        let tracker = descendantTracker
+        descendantTracker = nil
+        return tracker?.stop() ?? []
     }
 
     // MARK: -

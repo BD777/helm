@@ -23,9 +23,9 @@ struct ChatToolbar: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer()
-            if store.selectedSessionIsStreaming {
-                RunningStatusPill(startedAt: store.activeRunStartedAt) {
-                    store.cancelStreaming()
+            if let session, store.selectedSessionIsStreaming {
+                RunningStatusPill(startedAt: store.activeRunStartedAt(for: session.id)) {
+                    store.cancelStreaming(sessionId: session.id)
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }

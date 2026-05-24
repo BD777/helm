@@ -164,33 +164,25 @@ struct ComposerView: View {
         return "Message \(vendor) (⌘V to attach image · ⌘↵ to send)"
     }
 
-    private var isStreamingInAnotherSession: Bool {
-        store.isStreaming && !store.selectedSessionIsStreaming
-    }
-
     private var canSubmit: Bool {
         if store.selectedSessionIsStreaming { return true }
-        if isStreamingInAnotherSession { return false }
         if selectedSSHSendBlockReason != nil { return false }
         return hasComposerContent
     }
 
     private var submitButtonTitle: String {
         if store.selectedSessionIsStreaming { return "Stop" }
-        if isStreamingInAnotherSession { return "Busy" }
         return "Send"
     }
 
     private var submitButtonColor: Color {
         if store.selectedSessionIsStreaming { return .red }
-        if isStreamingInAnotherSession { return .secondary.opacity(0.45) }
         if selectedSSHSendBlockReason != nil { return .secondary.opacity(0.45) }
         return .accentColor
     }
 
     private var submitButtonHelp: String {
         if store.selectedSessionIsStreaming { return "Stop current response" }
-        if isStreamingInAnotherSession { return "Another conversation is running" }
         if let reason = selectedSSHSendBlockReason { return reason }
         return "Send message"
     }
@@ -214,7 +206,7 @@ struct ComposerView: View {
             store.cancelStreaming()
             return
         }
-        if store.isStreaming || !hasComposerContent || selectedSSHSendBlockReason != nil {
+        if !hasComposerContent || selectedSSHSendBlockReason != nil {
             return
         }
         let toSend = composedPrompt()
@@ -664,7 +656,7 @@ struct ComposerView: View {
     }
 
     private func sendBuiltinCommand(_ command: String) {
-        guard !store.isStreaming,
+        guard !store.selectedSessionIsStreaming,
               selectedSSHSendBlockReason == nil
         else {
             requestComposerFocus()

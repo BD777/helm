@@ -30,7 +30,9 @@ final class AppStore {
             }
         }
     }
-    var isStreaming: Bool = false
+    var isStreaming: Bool {
+        !activeRuns.isEmpty
+    }
     var selectedSessionIsStreaming: Bool {
         guard let selectedSessionId else { return false }
         return isSessionStreaming(selectedSessionId)
@@ -43,7 +45,12 @@ final class AppStore {
     var showSSHProjectSheet: Bool = false
     var showQuickSwitcher: Bool = false
     var imagePreviewURL: URL?
-    var pendingApproval: AgentApprovalRequest?
+    var pendingApproval: AgentApprovalRequest? {
+        currentPendingApprovalEntry?.request
+    }
+    var pendingApprovalKey: String? {
+        currentPendingApprovalEntry?.key
+    }
     var composerFocusTick: Int = 0
 
     /// Bumped each time the user sends a message. The chat list watches this
@@ -51,6 +58,14 @@ final class AppStore {
     /// was previously parked. Distinct from the geometry-based stick-to-
     /// bottom: pressing Send is an explicit "show me what just landed" intent.
     var sendTick: Int = 0
+
+    private var currentPendingApprovalEntry: PendingApprovalEntry? {
+        if let selectedSessionId,
+           let selectedEntry = pendingApprovalQueue.first(where: { $0.sessionId == selectedSessionId }) {
+            return selectedEntry
+        }
+        return pendingApprovalQueue.first
+    }
 
     /// Wall-clock time of the most recent successful write to profiles.json
     /// / state.json. Editors read these to render a "Saved · HH:mm:ss" hint
@@ -263,7 +278,11 @@ final class AppStore {
     }
 
     func isSessionStreaming(_ sessionId: UUID) -> Bool {
-        isStreaming && activeSessionId == sessionId
+        activeRuns[sessionId] != nil
+    }
+
+    func activeRunStartedAt(for sessionId: UUID) -> Date? {
+        activeRuns[sessionId]?.startedAt
     }
 
     func project(for sessionId: UUID) -> Project? {
@@ -644,15 +663,27 @@ final class AppStore {
 
     // MARK: - Agent invocation
 
-    private var currentAdapter: AgentAdapter?
-    private var streamTask: Task<Void, Never>?
-    private var activeRunId: UUID?
-    private var activeSessionId: UUID?
-    private var activeAssistantId: UUID?
-    var activeRunStartedAt: Date?
-    /// Maps vendor tool_use ids → our ToolCall.id for the active assistant
-    /// message so input fragments and tool_results can land on the right call.
-    private var toolMap: [String: UUID] = [:]
+    private struct ActiveRun {
+        var runId: UUID
+        var assistantId: UUID
+        var adapter: AgentAdapter
+        var task: Task<Void, Never>?
+        var startedAt: Date
+        var toolMap: [String: UUID] = [:]
+    }
+
+    private struct PendingApprovalEntry: Identifiable {
+        var sessionId: UUID
+        var request: AgentApprovalRequest
+
+        var id: String { key }
+        var key: String { "\(sessionId.uuidString.lowercased()):\(request.id)" }
+    }
+
+    /// Per-session run state. Each active conversation owns its adapter,
+    /// stream task, and vendor tool-id mapping so sessions can run together.
+    private var activeRuns: [UUID: ActiveRun] = [:]
+    private var pendingApprovalQueue: [PendingApprovalEntry] = []
 
     func send(_ prompt: String,
               displayParts: [Part]? = nil,
@@ -661,8 +692,9 @@ final class AppStore {
               preUserEvents: [SessionEvent] = []) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptForAgent = (agentPrompt ?? prompt).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isStreaming, !promptForAgent.isEmpty || !attachments.isEmpty else { return }
+        guard !promptForAgent.isEmpty || !attachments.isEmpty else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
+        guard !isSessionStreaming(sessions[sIdx].id) else { return }
         // Promote a draft to a real session — first send is what makes the
         // sidebar row appear.
         if sessions[sIdx].isDraft {
@@ -732,78 +764,71 @@ final class AppStore {
                                       filenames: attachments.map { $0.fileURL.lastPathComponent })
         }
 
-        isStreaming = true
         let runId = UUID()
-        activeRunId = runId
-        activeSessionId = sessionId
-        activeAssistantId = assistantId
-        activeRunStartedAt = Date()
-        toolMap = [:]
-
         let adapter: AgentAdapter
         switch profile.vendor {
         case .claude: adapter = ClaudeLocalAdapter()
-        case .codex:
-            adapter = project.location.isSSH
-                ? CodexLocalAdapter()
-                : CodexAppServerAdapter()
+        case .codex: adapter = codexAdapter(project: project, runConfig: runConfig)
         }
-        currentAdapter = adapter
+        activeRuns[sessionId] = ActiveRun(
+            runId: runId,
+            assistantId: assistantId,
+            adapter: adapter,
+            task: nil,
+            startedAt: Date()
+        )
 
         do {
             let stream = try adapter.start(prompt: promptForAgent, attachments: attachments, session: session, run: runConfig, project: project)
-            streamTask = Task { [weak self] in
-                await self?.consumeAgentStream(stream,
-                                               runId: runId,
-                                               sessionId: sessionId,
-                                               assistantId: assistantId,
-                                               prompt: promptForAgent,
-                                               attachments: attachments,
-                                               project: project,
-                                               profile: profile,
-                                               runConfig: runConfig,
-                                               retryCount: 0)
+            let task = Task<Void, Never> { [weak self] in
+                guard let self else { return }
+                await self.consumeAgentStream(stream,
+                                              runId: runId,
+                                              sessionId: sessionId,
+                                              assistantId: assistantId,
+                                              prompt: promptForAgent,
+                                              attachments: attachments,
+                                              project: project,
+                                              profile: profile,
+                                              runConfig: runConfig,
+                                              retryCount: 0)
+            }
+            if var run = activeRuns[sessionId] {
+                run.task = task
+                activeRuns[sessionId] = run
             }
         } catch {
             appendError(to: sIdx, "Failed to start agent: \(error.localizedDescription)")
-            finishStreaming(runId: runId)
+            finishStreaming(sessionId: sessionId, runId: runId)
         }
     }
 
     func cancelStreaming() {
-        guard isStreaming else { return }
-        let adapter = currentAdapter
-        let task = streamTask
-        pendingApproval = nil
-        if let sessionId = activeSessionId,
-           let assistantId = activeAssistantId {
-            markRunStopped(sessionId: sessionId, assistantId: assistantId)
-        }
-        finishStreaming()
-        task?.cancel()
-        adapter?.cancel()
+        guard let selectedSessionId else { return }
+        cancelStreaming(sessionId: selectedSessionId)
     }
 
-    private func finishStreaming(runId: UUID? = nil) {
-        if let runId, activeRunId != runId { return }
-        if let activeSessionId {
-            persistTranscriptSnapshot(for: activeSessionId)
-        }
-        isStreaming = false
-        currentAdapter = nil
-        streamTask = nil
-        activeRunId = nil
-        activeSessionId = nil
-        activeAssistantId = nil
-        activeRunStartedAt = nil
-        toolMap = [:]
-        pendingApproval = nil
+    func cancelStreaming(sessionId: UUID) {
+        guard let run = activeRuns[sessionId] else { return }
+        markRunStopped(sessionId: sessionId, assistantId: run.assistantId)
+        finishStreaming(sessionId: sessionId, runId: run.runId)
+        run.task?.cancel()
+        run.adapter.cancel()
+    }
+
+    private func finishStreaming(sessionId: UUID, runId: UUID? = nil) {
+        guard let run = activeRuns[sessionId] else { return }
+        if let runId, run.runId != runId { return }
+        persistTranscriptSnapshot(for: sessionId)
+        activeRuns[sessionId] = nil
+        pendingApprovalQueue.removeAll { $0.sessionId == sessionId }
     }
 
     func respondToApproval(_ decision: AgentApprovalDecision) {
-        guard let request = pendingApproval else { return }
-        currentAdapter?.respondToApproval(id: request.id, decision: decision)
-        pendingApproval = nil
+        guard let entry = currentPendingApprovalEntry else { return }
+        activeRuns[entry.sessionId]?.adapter.respondToApproval(id: entry.request.id,
+                                                               decision: decision)
+        pendingApprovalQueue.removeAll { $0.key == entry.key }
     }
 
     private func consumeAgentStream(_ stream: AsyncThrowingStream<AgentEvent, Error>,
@@ -852,7 +877,7 @@ final class AppStore {
             return
         }
 
-        finishStreaming(runId: runId)
+        finishStreaming(sessionId: sessionId, runId: runId)
     }
 
     private func shouldRecoverMissingConversation(from event: AgentEvent,
@@ -876,7 +901,7 @@ final class AppStore {
                                                project: Project,
                                                profile: Profile,
                                                runConfig: RunConfig) async -> Bool {
-        guard activeRunId == runId,
+        guard activeRuns[sessionId]?.runId == runId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return false }
 
@@ -901,10 +926,14 @@ final class AppStore {
         let adapter: AgentAdapter
         switch profile.vendor {
         case .claude: adapter = ClaudeLocalAdapter()
-        case .codex:  adapter = CodexLocalAdapter()
+        case .codex: adapter = codexAdapter(project: project, runConfig: runConfig)
         }
-        currentAdapter = adapter
-        activeRunStartedAt = Date()
+        if var run = activeRuns[sessionId], run.runId == runId {
+            run.adapter = adapter
+            run.startedAt = Date()
+            run.toolMap = [:]
+            activeRuns[sessionId] = run
+        }
 
         do {
             let retrySession = sessions[sIdx]
@@ -935,7 +964,7 @@ final class AppStore {
 
     private func handle(_ event: AgentEvent, runId: UUID,
                         sessionId: UUID, assistantId: UUID) {
-        guard activeRunId == runId else { return }
+        guard activeRuns[sessionId]?.runId == runId else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         switch event {
         case .sessionId(let id):
@@ -957,13 +986,16 @@ final class AppStore {
         case .toolCallStart(let vendorId, let name, let input):
             let call = ToolCall(id: UUID(), name: name, arg: input,
                                 status: .running, meta: nil, body: nil)
-            toolMap[vendorId] = call.id
+            if var run = activeRuns[sessionId] {
+                run.toolMap[vendorId] = call.id
+                activeRuns[sessionId] = run
+            }
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.parts.append(.toolCall(call))
             }
 
         case .toolInputDelta(let vendorId, let fragment):
-            guard let callId = toolMap[vendorId] else { return }
+            guard let callId = activeRuns[sessionId]?.toolMap[vendorId] else { return }
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 guard let pIdx = msg.parts.firstIndex(where: {
                     if case .toolCall(let t) = $0 { return t.id == callId } else { return false }
@@ -973,7 +1005,7 @@ final class AppStore {
             }
 
         case .toolResult(let vendorId, let output, let isError):
-            guard let callId = toolMap[vendorId] else { return }
+            guard let callId = activeRuns[sessionId]?.toolMap[vendorId] else { return }
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 guard let pIdx = msg.parts.firstIndex(where: {
                     if case .toolCall(let t) = $0 { return t.id == callId } else { return false }
@@ -984,11 +1016,13 @@ final class AppStore {
             }
 
         case .approvalRequest(let request):
-            pendingApproval = request
+            let entry = PendingApprovalEntry(sessionId: sessionId, request: request)
+            pendingApprovalQueue.removeAll { $0.key == entry.key }
+            pendingApprovalQueue.append(entry)
 
         case .approvalResolved(let id):
-            if pendingApproval?.id == id {
-                pendingApproval = nil
+            pendingApprovalQueue.removeAll {
+                $0.sessionId == sessionId && $0.request.id == id
             }
 
         case .messageStop:
@@ -1000,8 +1034,7 @@ final class AppStore {
 
         case .finalResult(let text, let isError):
             var followupAnswer: Message?
-            let adapterToClose = currentAdapter
-            let taskToClose = streamTask
+            let runToClose = activeRuns[sessionId]
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.role = .assistant(meta: isError ? "error" : "done")
                 msg.meta = isError ? "error" : nil
@@ -1033,9 +1066,9 @@ final class AppStore {
             if let followupAnswer {
                 sessions[sIdx].transcript.append(.message(followupAnswer))
             }
-            finishStreaming(runId: runId)
-            taskToClose?.cancel()
-            adapterToClose?.cancel()
+            finishStreaming(sessionId: sessionId, runId: runId)
+            runToClose?.task?.cancel()
+            runToClose?.adapter.cancel()
 
         case .error(let detail):
             mutateAssistant(at: sIdx, id: assistantId) { msg in
@@ -1043,6 +1076,13 @@ final class AppStore {
                 msg.parts.append(.text("⚠️ " + detail))
             }
         }
+    }
+
+    private func codexAdapter(project: Project, runConfig: RunConfig) -> AgentAdapter {
+        if project.location.isSSH || runConfig.usesComputerUseMCP {
+            return CodexLocalAdapter()
+        }
+        return CodexAppServerAdapter()
     }
 
     private static func isMissingConversationError(_ detail: String) -> Bool {

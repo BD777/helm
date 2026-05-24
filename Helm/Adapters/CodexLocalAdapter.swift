@@ -5,6 +5,7 @@ import Foundation
 final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = CodexSessionStore()
     private var process: Process?
+    private var descendantTracker: ProcessDescendantTracker?
     private let lock = NSLock()
 
     func start(prompt: String,
@@ -104,6 +105,8 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
             proc.terminationHandler = { p in
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                let tracked = self.stopTrackingDescendants()
+                ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
                 NSLog("[helm.codex] exit status=%d", p.terminationStatus)
                 for event in parser.flush() {
                     continuation.yield(event)
@@ -124,6 +127,7 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
 
             do {
                 try proc.run()
+                self.startTrackingDescendantsIfNeeded(for: run, process: proc)
             } catch {
                 continuation.finish(throwing: error)
                 return
@@ -143,10 +147,33 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
     func cancel() {
         lock.lock()
         let p = process
+        let tracked = stopTrackingDescendantsLocked()
         process = nil
         lock.unlock()
         guard let p else { return }
-        ProcessTreeTerminator.terminate(p)
+        ProcessTreeTerminator.terminate(p, trackedDescendants: tracked)
+    }
+
+    private func startTrackingDescendantsIfNeeded(for run: RunConfig, process: Process) {
+        guard run.usesComputerUseMCP else { return }
+        let tracker = ProcessDescendantTracker(process: process)
+        tracker.start()
+        lock.lock()
+        descendantTracker = tracker
+        lock.unlock()
+    }
+
+    private func stopTrackingDescendants() -> [Int32] {
+        lock.lock()
+        let tracked = stopTrackingDescendantsLocked()
+        lock.unlock()
+        return tracked
+    }
+
+    private func stopTrackingDescendantsLocked() -> [Int32] {
+        let tracker = descendantTracker
+        descendantTracker = nil
+        return tracker?.stop() ?? []
     }
 
     private func resolveCommand(_ path: String, vendorDefault: String) throws -> String {
@@ -171,6 +198,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
 
     private let lock = NSLock()
     private var process: Process?
+    private var descendantTracker: ProcessDescendantTracker?
     private var stdinHandle: FileHandle?
     private var nextRequestId = 1
     private var initializeRequestId: Int?
@@ -273,6 +301,10 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
             proc.terminationHandler = { [weak self] p in
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                if let self {
+                    let tracked = self.stopTrackingDescendants()
+                    ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
+                }
                 NSLog("[helm.codex.app-server] exit status=%d", p.terminationStatus)
                 for object in lines.flush() {
                     guard let self else { continue }
@@ -296,6 +328,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
 
             do {
                 try proc.run()
+                self.startTrackingDescendantsIfNeeded(for: run, process: proc)
                 initializeRequestId = sendRequest(
                     method: "initialize",
                     params: [
@@ -333,6 +366,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         lock.lock()
         p = process
         stdin = stdinHandle
+        let tracked = stopTrackingDescendantsLocked()
         process = nil
         stdinHandle = nil
         activeTurnId = nil
@@ -342,7 +376,29 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
             try? stdin?.close()
             return
         }
-        ProcessTreeTerminator.terminate(p, closing: stdin)
+        ProcessTreeTerminator.terminate(p, closing: stdin, trackedDescendants: tracked)
+    }
+
+    private func startTrackingDescendantsIfNeeded(for run: RunConfig, process: Process) {
+        guard run.usesComputerUseMCP else { return }
+        let tracker = ProcessDescendantTracker(process: process)
+        tracker.start()
+        lock.lock()
+        descendantTracker = tracker
+        lock.unlock()
+    }
+
+    private func stopTrackingDescendants() -> [Int32] {
+        lock.lock()
+        let tracked = stopTrackingDescendantsLocked()
+        lock.unlock()
+        return tracked
+    }
+
+    private func stopTrackingDescendantsLocked() -> [Int32] {
+        let tracker = descendantTracker
+        descendantTracker = nil
+        return tracker?.stop() ?? []
     }
 
     func respondToApproval(id: String, decision: AgentApprovalDecision) {
@@ -492,7 +548,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
              "item/permissions/requestApproval":
             return true
         case "mcpServer/elicitation/request":
-            return mcpServerName(from: params) == "computer-use"
+            return isComputerUseElicitation(params)
         default:
             return false
         }
@@ -671,7 +727,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
             return AgentApprovalRequest(
                 id: id,
                 kind: .mcpElicitation,
-                title: server == "computer-use" ? "Approve App Request" : "Approve MCP Request",
+                title: isComputerUseElicitation(params) ? "Approve App Request" : "Approve MCP Request",
                 message: message,
                 detail: detail.isEmpty ? nil : detail,
                 allowsSessionApproval: false
@@ -706,6 +762,20 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         params?["serverName"] as? String
             ?? params?["server"] as? String
             ?? params?["name"] as? String
+    }
+
+    private func isComputerUseElicitation(_ params: [String: Any]?) -> Bool {
+        let candidates = [
+            mcpServerName(from: params),
+            params?["serverTitle"] as? String,
+            params?["title"] as? String,
+        ].compactMap { $0 }
+        if candidates.contains(where: { CodexToolPresentation.isComputerUseName($0) }) {
+            return true
+        }
+        let message = (params?["message"] as? String)?.lowercased() ?? ""
+        return message.contains("allow codex to use")
+            || message.contains("computer use")
     }
 
     @discardableResult
@@ -1157,6 +1227,17 @@ private final class CodexAppServerEventParser {
 }
 
 enum CodexToolPresentation {
+    static func isComputerUseName(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+        return normalized == "computer-use"
+            || normalized == CodexComputerUseMCP.claudeServerName.replacingOccurrences(of: "_", with: "-")
+            || normalized == "codex-computer-use"
+    }
+
     static func name(rawName: String, namespace: String?, server: String? = nil) -> String {
         if isComputerUse(rawName: rawName, namespace: namespace, server: server) {
             return "Computer Use"
@@ -1232,7 +1313,7 @@ enum CodexToolPresentation {
             return true
         }
         if let server,
-           server == "computer-use" || server == CodexComputerUseMCP.claudeServerName {
+           isComputerUseName(server) {
             return true
         }
         if computerUseTools.contains(rawName) {
