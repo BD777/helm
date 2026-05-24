@@ -33,6 +33,7 @@ struct SidebarView: View {
                                     project: project,
                                     searchText: searchText,
                                     isDragging: draggingProjectId == project.id,
+                                    tracksHeaderFrame: draggingProjectId != nil,
                                     dropPlacement: projectDropTargetId == project.id ? projectDropPlacement : nil,
                                     onDragChanged: { value in
                                         updateProjectDrag(project.id, value: value)
@@ -50,6 +51,8 @@ struct SidebarView: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 24)
                 .onPreferenceChange(ProjectHeaderFramePreferenceKey.self) { frames in
+                    guard draggingProjectId != nil else { return }
+                    guard projectHeaderFrames != frames else { return }
                     projectHeaderFrames = frames
                 }
             }
@@ -311,6 +314,7 @@ private struct ProjectSection: View {
     let project: Project
     let searchText: String
     let isDragging: Bool
+    let tracksHeaderFrame: Bool
     let dropPlacement: ProjectDropPlacement?
     var onDragChanged: (DragGesture.Value) -> Void
     var onDragEnded: (DragGesture.Value) -> Void
@@ -498,7 +502,11 @@ private struct ProjectSection: View {
         .padding(.leading, 14)
         .padding(.trailing, 8)
         .contentShape(Rectangle())
-        .background(ProjectHeaderFrameReader(projectId: project.id))
+        .background {
+            if tracksHeaderFrame {
+                ProjectHeaderFrameReader(projectId: project.id)
+            }
+        }
         .simultaneousGesture(projectDragGesture)
     }
 

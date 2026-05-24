@@ -712,6 +712,8 @@ final class AppStore {
         var task: Task<Void, Never>?
         var startedAt: Date
         var toolMap: [String: UUID] = [:]
+        var pendingAssistantText = ""
+        var assistantTextFlushTask: Task<Void, Never>?
     }
 
     private struct PendingApprovalEntry: Identifiable {
@@ -729,6 +731,7 @@ final class AppStore {
     private var runningSessionIds: Set<UUID> = []
     private var activeRunStartedAts: [UUID: Date] = [:]
     private var pendingApprovalQueue: [PendingApprovalEntry] = []
+    private static let assistantTextFlushDelayNanos: UInt64 = 50_000_000
 
     func send(_ prompt: String,
               displayParts: [Part]? = nil,
@@ -859,6 +862,10 @@ final class AppStore {
 
     func cancelStreaming(sessionId: UUID) {
         guard let run = activeRuns[sessionId] else { return }
+        activeRuns[sessionId]?.assistantTextFlushTask?.cancel()
+        flushAssistantTextBuffer(sessionId: sessionId,
+                                 runId: run.runId,
+                                 assistantId: run.assistantId)
         markRunStopped(sessionId: sessionId, assistantId: run.assistantId)
         finishStreaming(sessionId: sessionId, runId: run.runId)
         run.task?.cancel()
@@ -868,6 +875,10 @@ final class AppStore {
     private func finishStreaming(sessionId: UUID, runId: UUID? = nil) {
         guard let run = activeRuns[sessionId] else { return }
         if let runId, run.runId != runId { return }
+        activeRuns[sessionId]?.assistantTextFlushTask?.cancel()
+        flushAssistantTextBuffer(sessionId: sessionId,
+                                 runId: run.runId,
+                                 assistantId: run.assistantId)
         persistTranscriptSnapshot(for: sessionId)
         activeRuns[sessionId] = nil
         runningSessionIds.remove(sessionId)
@@ -1020,6 +1031,16 @@ final class AppStore {
                         sessionId: UUID, assistantId: UUID) {
         guard activeRuns[sessionId]?.runId == runId else { return }
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        if case .assistantTextDelta(let chunk) = event {
+            enqueueAssistantTextDelta(chunk,
+                                      sessionId: sessionId,
+                                      runId: runId,
+                                      assistantId: assistantId)
+            return
+        }
+        flushAssistantTextBuffer(sessionId: sessionId,
+                                 runId: runId,
+                                 assistantId: assistantId)
         switch event {
         case .sessionId(let id):
             if sessions[sIdx].vendorSessionId != id {
@@ -1028,15 +1049,8 @@ final class AppStore {
                 scheduleStateSave()
             }
 
-        case .assistantTextDelta(let chunk):
-            mutateAssistant(at: sIdx, id: assistantId) { msg in
-                msg.meta = "streaming…"
-                if case .text(let existing) = msg.parts.last {
-                    msg.parts[msg.parts.count - 1] = .text(existing + chunk)
-                } else {
-                    msg.parts.append(.text(chunk))
-                }
-            }
+        case .assistantTextDelta:
+            break
 
         case .toolCallStart(let vendorId, let name, let input):
             let call = ToolCall(id: UUID(), name: name, arg: input,
@@ -1129,6 +1143,53 @@ final class AppStore {
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.meta = "error"
                 msg.parts.append(.text("⚠️ " + detail))
+            }
+        }
+    }
+
+    private func enqueueAssistantTextDelta(_ chunk: String,
+                                           sessionId: UUID,
+                                           runId: UUID,
+                                           assistantId: UUID) {
+        guard !chunk.isEmpty,
+              var run = activeRuns[sessionId],
+              run.runId == runId
+        else { return }
+
+        run.pendingAssistantText += chunk
+        if run.assistantTextFlushTask == nil {
+            run.assistantTextFlushTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: Self.assistantTextFlushDelayNanos)
+                self?.flushAssistantTextBuffer(sessionId: sessionId,
+                                               runId: runId,
+                                               assistantId: assistantId)
+            }
+        }
+        activeRuns[sessionId] = run
+    }
+
+    private func flushAssistantTextBuffer(sessionId: UUID,
+                                          runId: UUID,
+                                          assistantId: UUID) {
+        guard var run = activeRuns[sessionId],
+              run.runId == runId
+        else { return }
+
+        let chunk = run.pendingAssistantText
+        run.pendingAssistantText = ""
+        run.assistantTextFlushTask = nil
+        activeRuns[sessionId] = run
+
+        guard !chunk.isEmpty,
+              let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
+        else { return }
+
+        mutateAssistant(at: sIdx, id: assistantId) { msg in
+            msg.meta = "streaming…"
+            if case .text(let existing) = msg.parts.last {
+                msg.parts[msg.parts.count - 1] = .text(existing + chunk)
+            } else {
+                msg.parts.append(.text(chunk))
             }
         }
     }
