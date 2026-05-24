@@ -738,7 +738,6 @@ private struct SessionRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
-            RunningSessionIndicator(isRunning: isRunning)
         }
         .padding(.leading, 18)
         .padding(.trailing, 8)
@@ -747,6 +746,10 @@ private struct SessionRow: View {
             RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
                 .fill(background)
         )
+        .overlay(alignment: .leading) {
+            RunningSessionIndicator(isRunning: isRunning)
+                .padding(.leading, 2)
+        }
         .contentShape(Rectangle())
         .help(isRunning ? "Conversation is running" : session.title)
         .accessibilityElement(children: .ignore)
@@ -777,8 +780,9 @@ private struct RunningSessionIndicator: View {
                     )
             }
         }
-        .frame(width: 16, height: 18)
+        .frame(width: 14, height: 18)
         .opacity(isRunning ? 1 : 0)
+        .allowsHitTesting(false)
         .accessibilityHidden(!isRunning)
     }
 }
