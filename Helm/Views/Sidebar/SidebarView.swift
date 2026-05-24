@@ -17,8 +17,8 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var store = store
         return VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 8) {
                     sidebarHeader
                         .padding(.bottom, 2)
                     if store.projects.isEmpty {
@@ -47,6 +47,7 @@ struct SidebarView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, DS.sidebarHeaderTopPadding)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 24)
@@ -471,7 +472,6 @@ private struct ProjectSection: View {
                         .tracking(0.5)
                         .foregroundStyle(.secondary)
                     locationLabel
-                    Spacer()
                 }
                 .contentShape(Rectangle())
                 .accessibilityElement(children: .ignore)
@@ -497,10 +497,12 @@ private struct ProjectSection: View {
             .buttonStyle(.plain)
             .help("New chat in \(project.name)")
             .accessibilityLabel("New chat in \(project.name)")
+
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
         .padding(.leading, 14)
         .padding(.trailing, 8)
+        .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26, alignment: .leading)
         .contentShape(Rectangle())
         .background {
             if tracksHeaderFrame {
@@ -740,7 +742,7 @@ private struct SessionRow: View {
         }
         .padding(.leading, 18)
         .padding(.trailing, 8)
-        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
                 .fill(background)
