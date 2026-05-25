@@ -157,7 +157,13 @@ enum RunConfigResolver {
                 args.append(contentsOf: ["-c", "model_providers.\(providerKey).base_url=\"\(provider.baseURL)\""])
             }
             args.append(contentsOf: ["-c", "model_providers.\(providerKey).wire_api=\"\(provider.wireAPI.rawValue)\""])
-            args.append(contentsOf: ["-c", "model_providers.\(providerKey).requires_openai_auth=\(provider.requiresOpenAIAuth)"])
+            let useOpenAIAuth = provider.requiresOpenAIAuth && provider.authToken.isEmpty
+            args.append(contentsOf: ["-c", "model_providers.\(providerKey).requires_openai_auth=\(useOpenAIAuth)"])
+            if !useOpenAIAuth, !provider.authToken.isEmpty {
+                let envKey = authEnvKey(for: provider.name)
+                args.append(contentsOf: ["-c", "model_providers.\(providerKey).env_key=\(tomlStringLiteral(envKey))"])
+                env[envKey] = provider.authToken
+            }
             if !provider.httpHeaders.isEmpty {
                 args.append(contentsOf: [
                     "-c",
@@ -171,12 +177,6 @@ enum RunConfigResolver {
             }
             args.append(contentsOf: ["-c", "sandbox_mode=\"\(session.codexSandboxMode.rawValue)\""])
             args.append(contentsOf: ["-c", "approval_policy=\"\(session.codexApprovalMode.rawValue)\""])
-        }
-
-        if !provider.authToken.isEmpty {
-            // Codex reads OPENAI_API_KEY (and similar) from env when
-            // requires_openai_auth is set; route the provider's token there.
-            env["OPENAI_API_KEY"] = provider.authToken
         }
 
         args.append(contentsOf: try CodexComputerUseMCP.configArgs(isRemoteProject: isRemoteProject))
@@ -209,6 +209,10 @@ enum RunConfigResolver {
             }
         }
         return out.isEmpty ? "helm" : out
+    }
+
+    private static func authEnvKey(for providerName: String) -> String {
+        "HELM_\(sanitizeKey(providerName).uppercased())_API_KEY"
     }
 
     private static func tomlInlineStringMap(_ values: [String: String]) -> String {
@@ -1704,21 +1708,8 @@ enum HelmComputerUseMCPProxy {
     }
 
     private static func resolveCommand(_ command: String) throws -> String {
-        if command.contains("/") {
-            return (command as NSString).expandingTildeInPath
-        }
-        let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .map(String.init)
-        let fallbackDirs = ["\(NSHomeDirectory())/.local/bin",
-                            "/opt/homebrew/bin",
-                            "/usr/local/bin",
-                            "/usr/bin"]
-        for dir in pathDirs + fallbackDirs {
-            let full = "\(dir)/\(command)"
-            if FileManager.default.isExecutableFile(atPath: full) {
-                return full
-            }
+        if let resolved = CodexCommandLocator.resolve(command) {
+            return resolved
         }
         throw AdapterError.commandNotFound(command)
     }

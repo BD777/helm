@@ -25,8 +25,9 @@ struct Provider: Identifiable, Hashable, Codable {
     /// Codex providers. Empty = no extras.
     var httpHeaders: [String: String]
 
-    /// `requires_openai_auth` — whether Codex should attach the OpenAI auth
-    /// header to outgoing requests. Most relay providers want this true.
+    /// `requires_openai_auth` — whether Codex should use its OpenAI / ChatGPT
+    /// account auth for this provider. Custom relay tokens use `env_key`
+    /// instead; see RunConfigResolver.
     var requiresOpenAIAuth: Bool
 
     // MARK: Claude-only
@@ -57,7 +58,7 @@ struct Provider: Identifiable, Hashable, Codable {
             authToken: "",
             wireAPI: .responses,
             httpHeaders: [:],
-            requiresOpenAIAuth: vendor == .codex,
+            requiresOpenAIAuth: false,
             extraEnv: [:]
         )
     }

@@ -627,7 +627,7 @@ enum AdapterError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .commandNotFound(let c):
-            return "Command not found on PATH: \(c). Set commandPath in the profile to an absolute path."
+            return "Command not found on PATH: \(c). Install the CLI or set commandPath in the profile to an absolute path."
         case .unsupportedRemoteAttachments(let vendor):
             return "\(vendor) image attachments are not supported for SSH projects yet."
         }

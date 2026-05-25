@@ -32,8 +32,9 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
         args.append("-")
 
         var env = ProcessInfo.processInfo.environment
-        let extras = ["\(NSHomeDirectory())/.local/bin",
-                      "/opt/homebrew/bin", "/usr/local/bin"]
+        // GUI apps inherit a stripped PATH. Include Codex.app's bundled CLI so
+        // users who installed the native app can run Helm without shell setup.
+        let extras = CodexCommandLocator.searchPathEntries()
         let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [existing]).joined(separator: ":")
         for (k, v) in run.env { env[k] = v }
@@ -181,10 +182,8 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
         if candidate.contains("/") {
             return (candidate as NSString).expandingTildeInPath
         }
-        for dir in ["\(NSHomeDirectory())/.local/bin",
-                    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-            let full = "\(dir)/\(candidate)"
-            if FileManager.default.isExecutableFile(atPath: full) { return full }
+        if let resolved = CodexCommandLocator.resolve(candidate) {
+            return resolved
         }
         throw AdapterError.commandNotFound(candidate)
     }
@@ -241,8 +240,9 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         args.append(contentsOf: ["app-server", "--listen", "stdio://"])
 
         var env = ProcessInfo.processInfo.environment
-        let extras = ["\(NSHomeDirectory())/.local/bin",
-                      "/opt/homebrew/bin", "/usr/local/bin"]
+        // GUI apps inherit a stripped PATH. Include Codex.app's bundled CLI so
+        // users who installed the native app can run Helm without shell setup.
+        let extras = CodexCommandLocator.searchPathEntries()
         let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [existing]).joined(separator: ":")
         for (k, v) in run.env { env[k] = v }
@@ -871,10 +871,8 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         if candidate.contains("/") {
             return (candidate as NSString).expandingTildeInPath
         }
-        for dir in ["\(NSHomeDirectory())/.local/bin",
-                    "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-            let full = "\(dir)/\(candidate)"
-            if FileManager.default.isExecutableFile(atPath: full) { return full }
+        if let resolved = CodexCommandLocator.resolve(candidate) {
+            return resolved
         }
         throw AdapterError.commandNotFound(candidate)
     }

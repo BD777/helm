@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Editor for a Provider record. Vendor is fixed once created (changing it
@@ -21,6 +22,7 @@ struct ProviderEditor: View {
                 identitySection
                 connectionSection
                 if provider.vendor == .codex {
+                    CodexRuntimeGuide()
                     codexExtrasSection
                 }
                 if provider.vendor == .claude {
@@ -122,8 +124,13 @@ struct ProviderEditor: View {
                 .frame(maxWidth: 320)
             }
             Toggle(isOn: $provider.requiresOpenAIAuth) {
-                Text("requires_openai_auth")
-                    .font(.system(size: 12.5))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use Codex OpenAI account auth")
+                        .font(.system(size: 12.5))
+                    Text("Leave off for relay/provider tokens. When Auth token is filled, Helm sends it through Codex env_key.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
             }
             field("HTTP headers",
                   hint: "Sent as `http_headers = { ... }`. Useful for relay session pinning.") {
@@ -308,5 +315,286 @@ struct ProviderEditor: View {
                 Text(hint).font(.system(size: 10.5)).foregroundStyle(.tertiary)
             }
         }
+    }
+}
+
+struct CodexRuntimeGuide: View {
+    var commandPath: Binding<String>? = nil
+
+    @State private var resolvedCommandPath: String? = CodexCommandLocator.resolve()
+    @State private var copiedInstallCommand = false
+    @State private var isInstalling = false
+    @State private var installMessage: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CODEX RUNTIME")
+                .font(.system(size: 10.5, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: resolvedCommandPath == nil ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(resolvedCommandPath == nil ? .orange : .green)
+                    .frame(width: 16, height: 16)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(resolvedCommandPath == nil ? "Codex CLI not found" : "Codex CLI found")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(detailText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let path = resolvedCommandPath {
+                        Text(path)
+                            .font(DS.monoFontSmall)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+
+                    if let installMessage {
+                        Text(installMessage)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                if let commandPath, let path = resolvedCommandPath {
+                    Button {
+                        commandPath.wrappedValue = path
+                    } label: {
+                        Label("Use this path", systemImage: "link")
+                    }
+                    .controlSize(.small)
+                    .disabled(commandPath.wrappedValue == path)
+                    .help("Write the detected Codex executable path into this profile.")
+                }
+
+                if commandPath != nil {
+                    Button {
+                        chooseCodexCommand()
+                    } label: {
+                        Label("Choose", systemImage: "folder")
+                    }
+                    .controlSize(.small)
+                    .help("Pick a codex executable or Codex.app manually.")
+                }
+
+                Menu {
+                    ForEach(CodexInstallMethod.allCases) { method in
+                        Button(method.title) {
+                            install(method)
+                        }
+                        .disabled(!method.isAvailable || isInstalling)
+                    }
+                } label: {
+                    if isInstalling {
+                        Label("Installing", systemImage: "arrow.down.circle")
+                    } else {
+                        Label("Install", systemImage: "arrow.down.circle")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(isInstalling || !CodexInstallMethod.hasAvailableInstaller)
+
+                Button {
+                    CodexCommandDiscovery.openInstallDocs()
+                } label: {
+                    Label("Install guide", systemImage: "safari")
+                }
+                .controlSize(.small)
+
+                Button {
+                    CodexCommandDiscovery.copyInstallCommand()
+                    copiedInstallCommand = true
+                } label: {
+                    Label(copiedInstallCommand ? "Copied" : "Copy npm install", systemImage: "doc.on.doc")
+                }
+                .controlSize(.small)
+
+                Button {
+                    resolvedCommandPath = CodexCommandLocator.resolve(refresh: true)
+                    copiedInstallCommand = false
+                    installMessage = nil
+                } label: {
+                    Label("Check", systemImage: "arrow.clockwise")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 520, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                .fill(Color.helmCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                        .stroke(Color.helmBorder, lineWidth: 1)
+                )
+        )
+    }
+
+    private var detailText: String {
+        if resolvedCommandPath == nil {
+            return "Helm needs a local codex command to run Codex profiles. Provider setup only defines API routing; install Codex or set an absolute command path on the profile."
+        }
+        return "Helm needs a local codex command to run Codex profiles. Provider setup only defines API routing; this runtime will be used automatically unless a profile overrides it."
+    }
+
+    private func chooseCodexCommand() {
+        guard let commandPath else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose Codex"
+        panel.message = "Select a codex executable or Codex.app."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let path = CodexCommandDiscovery.executablePath(from: url)
+        commandPath.wrappedValue = path
+        resolvedCommandPath = CodexCommandLocator.resolve(path, refresh: true) ?? path
+        installMessage = nil
+    }
+
+    private func install(_ method: CodexInstallMethod) {
+        isInstalling = true
+        copiedInstallCommand = false
+        installMessage = "Running \(method.commandPreview)..."
+        Task {
+            let result = await CodexCommandDiscovery.install(method)
+            await MainActor.run {
+                isInstalling = false
+                resolvedCommandPath = CodexCommandLocator.resolve(refresh: true)
+                installMessage = result.message
+            }
+        }
+    }
+}
+
+enum CodexCommandDiscovery {
+    static let installDocsURLString = "https://help.openai.com/en/articles/11096431"
+    static let installCommand = "npm install -g @openai/codex"
+
+    static func openInstallDocs() {
+        guard let url = URL(string: installDocsURLString) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    static func copyInstallCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(installCommand, forType: .string)
+    }
+
+    static func executablePath(from url: URL) -> String {
+        if url.pathExtension == "app" {
+            let resourcePath = url.appendingPathComponent("Contents/Resources/codex").path
+            if FileManager.default.isExecutableFile(atPath: resourcePath) {
+                return resourcePath
+            }
+            let macOSPath = url.appendingPathComponent("Contents/MacOS/codex").path
+            if FileManager.default.isExecutableFile(atPath: macOSPath) {
+                return macOSPath
+            }
+        }
+        return url.path
+    }
+
+    static func install(_ method: CodexInstallMethod) async -> CodexInstallResult {
+        guard let executable = method.executablePath else {
+            return CodexInstallResult(success: false,
+                                      message: "\(method.executableName) was not found. Use the install guide instead.")
+        }
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("helm-codex-install-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = method.arguments
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = CodexCommandLocator.searchPathEntries().joined(separator: ":")
+        process.environment = env
+
+        do {
+            let handle = try FileHandle(forWritingTo: logURL)
+            process.standardOutput = handle
+            process.standardError = handle
+            try process.run()
+            process.waitUntilExit()
+            try? handle.close()
+        } catch {
+            return CodexInstallResult(success: false,
+                                      message: "Install failed to start: \(error.localizedDescription)")
+        }
+
+        let output = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        let summary = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if process.terminationStatus == 0 {
+            return CodexInstallResult(success: true,
+                                      message: "Install finished. \(CodexCommandLocator.resolve(refresh: true) ?? "Click Check to refresh.")")
+        }
+        let tail = summary.isEmpty ? "No installer output." : String(summary.suffix(240))
+        return CodexInstallResult(success: false,
+                                  message: "Install exited \(process.terminationStatus): \(tail)")
+    }
+}
+
+struct CodexInstallResult {
+    let success: Bool
+    let message: String
+}
+
+enum CodexInstallMethod: String, CaseIterable, Identifiable {
+    case homebrew
+    case npm
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .homebrew: return "Homebrew cask"
+        case .npm: return "npm global"
+        }
+    }
+
+    var executableName: String {
+        switch self {
+        case .homebrew: return "brew"
+        case .npm: return "npm"
+        }
+    }
+
+    var executablePath: String? {
+        CodexCommandLocator.resolveTool(executableName)
+    }
+
+    var arguments: [String] {
+        switch self {
+        case .homebrew: return ["install", "--cask", "codex"]
+        case .npm: return ["install", "-g", "@openai/codex"]
+        }
+    }
+
+    var commandPreview: String {
+        ([executableName] + arguments).joined(separator: " ")
+    }
+
+    var isAvailable: Bool {
+        executablePath != nil
+    }
+
+    static var hasAvailableInstaller: Bool {
+        allCases.contains { $0.isAvailable }
     }
 }

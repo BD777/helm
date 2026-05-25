@@ -19,6 +19,7 @@ struct ProfileEditor: View {
                     claudeKnobsSection
                 }
                 if profile.vendor == .codex {
+                    CodexRuntimeGuide(commandPath: $profile.commandPath)
                     codexKnobsSection
                 }
                 advancedSection
@@ -200,7 +201,7 @@ struct ProfileEditor: View {
     private var advancedSection: some View {
         section("Advanced") {
             field("Command path",
-                  hint: "Bare name (looked up on PATH) or absolute path. Default: \(Profile.defaultCommand(for: profile.vendor))") {
+                  hint: commandPathHint) {
                 TextField(Profile.defaultCommand(for: profile.vendor), text: $profile.commandPath)
                     .textFieldStyle(.roundedBorder)
                     .font(DS.monoFontSmall)
@@ -223,6 +224,13 @@ struct ProfileEditor: View {
         if m.alias.isEmpty { return m.providerModelId }
         if m.providerModelId.isEmpty { return m.alias }
         return "\(m.alias)  ·  \(m.providerModelId)"
+    }
+
+    private var commandPathHint: String {
+        if profile.vendor == .codex {
+            return "Optional override. Helm searches PATH, Codex.app, Homebrew, npm/nvm/fnm/asdf/mise/volta-style installs, then this absolute path if set."
+        }
+        return "Bare name (looked up on PATH) or absolute path. Default: \(Profile.defaultCommand(for: profile.vendor))"
     }
 
     @ViewBuilder
