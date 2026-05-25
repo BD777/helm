@@ -8,6 +8,8 @@ final class AppStore {
     var projects: [Project]
     var sessions: [Session]
     var sidebarSessions: [SidebarSession]
+    var projectSchedulers: [ProjectSchedulerState]
+    var selectedProjectId: UUID?
     var providers: [Provider]
     var models: [Model]
     var profiles: [Profile]
@@ -22,6 +24,10 @@ final class AppStore {
                sessions[oldIdx].isDraft {
                 removeSidebarSession(oldId)
                 sessions.remove(at: oldIdx)
+            }
+            if let selectedSessionId,
+               let project = project(for: selectedSessionId) {
+                selectedProjectId = project.id
             }
             scheduleStateSave()
             if let id = selectedSessionId {
@@ -108,14 +114,29 @@ final class AppStore {
 
         // Caller-provided projects/sessions (previews / tests) win over disk.
         let stateFile = stateStore.load()
-        self.projects = projects.isEmpty ? stateFile.projects : projects
+        let loadedProjects = projects.isEmpty ? stateFile.projects : projects
+        self.projects = loadedProjects
+        let loadedSchedulers = stateFile.schedulers.filter { scheduler in
+            loadedProjects.contains { $0.id == scheduler.projectId }
+        }
+        self.projectSchedulers = loadedSchedulers
+        let schedulerSessionIds = Set(loadedSchedulers.flatMap { scheduler -> [UUID] in
+            var ids = scheduler.tasks.compactMap(\.sessionId)
+            if let schedulerSessionId = scheduler.schedulerSessionId {
+                ids.append(schedulerSessionId)
+            }
+            return ids
+        })
         // Drop sessions that were never sent. Keep sessions with either a
         // vendor-issued id or Helm's own transcript snapshot; a failed launch
         // can still produce useful chat context before the vendor reports an id.
+        // Scheduler-created worker sessions are also kept even before their
+        // first run because the scheduler state owns them by reference.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
             .filter {
                 $0.vendorSessionId != nil ||
-                TranscriptSnapshotStore.exists(sessionId: $0.id)
+                TranscriptSnapshotStore.exists(sessionId: $0.id) ||
+                schedulerSessionIds.contains($0.id)
             }
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
@@ -123,6 +144,13 @@ final class AppStore {
         self.selectedSessionId = cleanSessions.contains { $0.id == restoredSelection }
             ? restoredSelection
             : nil
+        let restoredProjectId = stateFile.selectedProjectId
+            ?? self.selectedSessionId.flatMap { sessionId in
+                cleanSessions.first { $0.id == sessionId }?.projectId
+            }
+        self.selectedProjectId = loadedProjects.contains { $0.id == restoredProjectId }
+            ? restoredProjectId
+            : loadedProjects.first?.id
 
         // didSet doesn't fire from `init`, so kick off the lazy-load
         // explicitly if there's a selected session restored from disk.
@@ -248,7 +276,9 @@ final class AppStore {
             version: AppStateFile.currentVersion,
             projects: projects,
             sessions: sessions.filter { !$0.isDraft },
-            selectedSessionId: selectedSessionId
+            selectedSessionId: selectedSessionId,
+            selectedProjectId: selectedProjectId,
+            schedulers: projectSchedulers
         ))
     }
 
@@ -266,11 +296,17 @@ final class AppStore {
             version: AppStateFile.currentVersion,
             projects: projects,
             sessions: sessions.filter { !$0.isDraft },
-            selectedSessionId: selectedSessionId
+            selectedSessionId: selectedSessionId,
+            selectedProjectId: selectedProjectId,
+            schedulers: projectSchedulers
         ))
     }
 
     // MARK: - Session helpers
+
+    func session(_ id: UUID) -> Session? {
+        sessions.first { $0.id == id }
+    }
 
     var selectedSession: Session? {
         get { sessions.first { $0.id == selectedSessionId } }
@@ -295,8 +331,12 @@ final class AppStore {
     }
 
     var selectedProject: Project? {
-        guard let selectedSessionId else { return nil }
-        return project(for: selectedSessionId)
+        if let selectedSessionId,
+           let project = project(for: selectedSessionId) {
+            return project
+        }
+        guard let selectedProjectId else { return nil }
+        return projects.first { $0.id == selectedProjectId }
     }
 
     var selectedSSHStatus: SSHStatus? {
@@ -327,6 +367,14 @@ final class AppStore {
 
     func requestComposerFocus() {
         composerFocusTick &+= 1
+    }
+
+    func selectProjectOverview(_ projectId: UUID) {
+        guard projects.contains(where: { $0.id == projectId }) else { return }
+        selectedProjectId = projectId
+        selectedSessionId = nil
+        _ = ensureSchedulerStateIndex(for: projectId)
+        scheduleStateSave()
     }
 
     func showQuickSwitcherPanel() {
@@ -466,6 +514,406 @@ final class AppStore {
         sidebarSessions.removeAll { $0.id == sessionId }
     }
 
+    // MARK: - Project scheduler
+
+    func schedulerState(for projectId: UUID) -> ProjectSchedulerState {
+        projectSchedulers.first { $0.projectId == projectId }
+            ?? ProjectSchedulerState(projectId: projectId)
+    }
+
+    func schedulerTasks(in projectId: UUID) -> [ProjectSchedulerTask] {
+        schedulerState(for: projectId).tasks.sorted { lhs, rhs in
+            if lhs.phase == rhs.phase { return lhs.updatedAt > rhs.updatedAt }
+            return phaseSortIndex(lhs.phase) < phaseSortIndex(rhs.phase)
+        }
+    }
+
+    func unresolvedHumanActions(in projectId: UUID) -> [ProjectSchedulerHumanAction] {
+        schedulerState(for: projectId).humanActions
+            .filter { !$0.isResolved }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func unmanagedProjectSessions(in projectId: UUID) -> [Session] {
+        let state = schedulerState(for: projectId)
+        var managedSessionIds = Set(state.tasks.compactMap(\.sessionId))
+        if let schedulerSessionId = state.schedulerSessionId {
+            managedSessionIds.insert(schedulerSessionId)
+        }
+        return sessions(in: projectId)
+            .filter { !managedSessionIds.contains($0.id) }
+            .sorted { lhs, rhs in
+                let lhsRunning = isSessionStreaming(lhs.id)
+                let rhsRunning = isSessionStreaming(rhs.id)
+                if lhsRunning != rhsRunning { return lhsRunning }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+    }
+
+    func schedulerTask(for sessionId: UUID) -> ProjectSchedulerTask? {
+        projectSchedulers
+            .lazy
+            .flatMap(\.tasks)
+            .first { $0.sessionId == sessionId }
+    }
+
+    func schedulerTaskCount(in projectId: UUID,
+                            phase: ProjectSchedulerTaskPhase? = nil) -> Int {
+        let tasks = schedulerState(for: projectId).tasks
+        guard let phase else { return tasks.count }
+        return tasks.filter { $0.phase == phase }.count
+    }
+
+    func setSchedulerProfile(_ profileId: UUID, for projectId: UUID) {
+        guard let profile = profile(profileId) else { return }
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        projectSchedulers[idx].schedulerProfileId = profileId
+        if let sessionId = projectSchedulers[idx].schedulerSessionId,
+           let sessionIndex = sessions.firstIndex(where: { $0.id == sessionId }),
+           !isSessionStreaming(sessionId),
+           sessions[sessionIndex].transcript.isEmpty {
+            let runConfiguration = SessionRunConfiguration.defaults(for: profile)
+            sessions[sessionIndex].profileId = profileId
+            sessions[sessionIndex].claudePermissionMode = runConfiguration.claudePermissionMode
+            sessions[sessionIndex].codexSandboxMode = runConfiguration.codexSandboxMode
+            sessions[sessionIndex].codexApprovalMode = runConfiguration.codexApprovalMode
+            sessions[sessionIndex].claudeEffort = runConfiguration.claudeEffort
+            sessions[sessionIndex].codexEffort = runConfiguration.codexEffort
+            upsertSidebarSession(for: sessions[sessionIndex])
+        }
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    func setDefaultWorkerProfile(_ profileId: UUID, for projectId: UUID) {
+        guard profile(profileId) != nil else { return }
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        projectSchedulers[idx].defaultWorkerProfileId = profileId
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    func schedulerProfile(for projectId: UUID) -> Profile? {
+        let state = schedulerState(for: projectId)
+        return state.schedulerProfileId.flatMap(profile)
+            ?? profiles(for: .codex).first
+            ?? profiles.first
+    }
+
+    func defaultWorkerProfile(for projectId: UUID) -> Profile? {
+        let state = schedulerState(for: projectId)
+        return state.defaultWorkerProfileId.flatMap(profile)
+            ?? profiles(for: .codex).first
+            ?? profiles.first
+    }
+
+    @discardableResult
+    func openSchedulerSession(for projectId: UUID) -> UUID? {
+        guard let project = projects.first(where: { $0.id == projectId }),
+              let schedulerProfile = schedulerProfile(for: projectId)
+        else { return nil }
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        if let sessionId = projectSchedulers[idx].schedulerSessionId,
+           sessions.contains(where: { $0.id == sessionId }) {
+            selectedSessionId = sessionId
+            return sessionId
+        }
+
+        let sessionId = createSession(in: projectId,
+                                      title: "Scheduler · \(project.name)",
+                                      profileId: schedulerProfile.id,
+                                      isDraft: false,
+                                      select: true)
+        projectSchedulers[idx].schedulerSessionId = sessionId
+        projectSchedulers[idx].schedulerProfileId = schedulerProfile.id
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+        return sessionId
+    }
+
+    @discardableResult
+    func submitProjectIdea(_ text: String,
+                           projectId: UUID,
+                           workerProfileId: UUID? = nil,
+                           runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              projects.contains(where: { $0.id == projectId })
+        else { return nil }
+        let workerProfile = workerProfileId.flatMap(profile)
+            ?? defaultWorkerProfile(for: projectId)
+        guard let workerProfile else { return nil }
+
+        let now = Date()
+        let title = Self.title(for: trimmed, attachments: [], maxLength: 48)
+        guard let sessionId = createSession(in: projectId,
+                                            title: title,
+                                            profileId: workerProfile.id,
+                                            isDraft: false,
+                                            select: false,
+                                            runConfiguration: runConfiguration ?? .defaults(for: workerProfile))
+        else { return nil }
+        let taskId = UUID()
+        let inboxItem = ProjectSchedulerInboxItem(
+            id: UUID(),
+            text: trimmed,
+            createdAt: now,
+            status: .accepted,
+            taskId: taskId
+        )
+        let task = ProjectSchedulerTask(
+            id: taskId,
+            title: title,
+            idea: trimmed,
+            sessionId: sessionId,
+            phase: .planned,
+            summary: "Worker session created. Start it when this task is next in the project plan.",
+            dependencies: [],
+            resourceNotes: [],
+            worktreeHint: worktreeHint(for: title, projectId: projectId),
+            createdAt: now,
+            updatedAt: now
+        )
+        let action = ProjectSchedulerHumanAction(
+            id: UUID(),
+            taskId: taskId,
+            kind: .startTask,
+            title: "Start \(title)",
+            detail: "A worker session is ready for this inbox idea.",
+            createdAt: now,
+            resolvedAt: nil
+        )
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        projectSchedulers[idx].inbox.insert(inboxItem, at: 0)
+        projectSchedulers[idx].tasks.insert(task, at: 0)
+        projectSchedulers[idx].humanActions.insert(action, at: 0)
+        projectSchedulers[idx].defaultWorkerProfileId = workerProfile.id
+        projectSchedulers[idx].updatedAt = now
+        selectedProjectId = projectId
+        scheduleStateSave()
+        return taskId
+    }
+
+    @discardableResult
+    func adoptSessionIntoScheduler(_ sessionId: UUID, projectId: UUID) -> UUID? {
+        guard let session = sessions.first(where: { $0.id == sessionId && $0.projectId == projectId && !$0.isDraft }),
+              schedulerTask(for: sessionId) == nil
+        else { return nil }
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        if projectSchedulers[idx].schedulerSessionId == sessionId { return nil }
+
+        let now = Date()
+        let taskId = UUID()
+        let isRunning = isSessionStreaming(sessionId)
+        let phase: ProjectSchedulerTaskPhase = isRunning ? .running : .needsReview
+        let task = ProjectSchedulerTask(
+            id: taskId,
+            title: session.title,
+            idea: "Imported existing session \"\(session.title)\" so the project scheduler can track its next step.",
+            sessionId: sessionId,
+            phase: phase,
+            summary: isRunning
+                ? "Existing session is running and is now tracked by the project scheduler."
+                : "Existing session is idle. Review whether it should continue, merge, complete, or be discarded.",
+            dependencies: [],
+            resourceNotes: ["Imported from an existing session."],
+            worktreeHint: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        projectSchedulers[idx].tasks.insert(task, at: 0)
+        if !isRunning {
+            projectSchedulers[idx].humanActions.insert(ProjectSchedulerHumanAction(
+                id: UUID(),
+                taskId: taskId,
+                kind: .reviewResult,
+                title: "Triage \(session.title)",
+                detail: "This existing session is idle but not marked complete.",
+                createdAt: now,
+                resolvedAt: nil
+            ), at: 0)
+        }
+        projectSchedulers[idx].updatedAt = now
+        scheduleStateSave()
+        return taskId
+    }
+
+    func startSchedulerTask(_ taskId: UUID, projectId: UUID) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        guard let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        guard let sessionId = ensureWorkerSession(forTaskAt: taskIndex,
+                                                  schedulerIndex: idx,
+                                                  projectId: projectId)
+        else { return }
+        guard !isSessionStreaming(sessionId) else { return }
+
+        let task = projectSchedulers[idx].tasks[taskIndex]
+        let prompt = Self.workerPrompt(for: task)
+        send(prompt,
+             displayParts: [.text(prompt)],
+             attachments: [],
+             sessionId: sessionId)
+    }
+
+    func openSchedulerTaskSession(_ taskId: UUID, projectId: UUID) {
+        let state = schedulerState(for: projectId)
+        guard let task = state.tasks.first(where: { $0.id == taskId }),
+              let sessionId = task.sessionId,
+              sessions.contains(where: { $0.id == sessionId })
+        else { return }
+        selectedSessionId = sessionId
+    }
+
+    func resolveHumanAction(_ actionId: UUID, projectId: UUID) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        guard let actionIndex = projectSchedulers[idx].humanActions.firstIndex(where: { $0.id == actionId }) else { return }
+        projectSchedulers[idx].humanActions[actionIndex].resolvedAt = Date()
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    func markSchedulerTask(_ taskId: UUID,
+                           projectId: UUID,
+                           phase: ProjectSchedulerTaskPhase) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        guard let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        projectSchedulers[idx].tasks[taskIndex].phase = phase
+        projectSchedulers[idx].tasks[taskIndex].updatedAt = Date()
+        if phase == .readyToMerge || phase == .done {
+            resolveHumanActions(projectId: projectId, taskId: taskId, kind: nil)
+        }
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    private func ensureSchedulerStateIndex(for projectId: UUID) -> Int {
+        if let idx = projectSchedulers.firstIndex(where: { $0.projectId == projectId }) {
+            return idx
+        }
+        projectSchedulers.append(ProjectSchedulerState(projectId: projectId))
+        return projectSchedulers.count - 1
+    }
+
+    private func ensureWorkerSession(forTaskAt taskIndex: Int,
+                                     schedulerIndex: Int,
+                                     projectId: UUID) -> UUID? {
+        if let sessionId = projectSchedulers[schedulerIndex].tasks[taskIndex].sessionId,
+           sessions.contains(where: { $0.id == sessionId }) {
+            return sessionId
+        }
+        guard let workerProfile = defaultWorkerProfile(for: projectId) else { return nil }
+        let task = projectSchedulers[schedulerIndex].tasks[taskIndex]
+        let sessionId = createSession(in: projectId,
+                                      title: task.title,
+                                      profileId: workerProfile.id,
+                                      isDraft: false,
+                                      select: false)
+        projectSchedulers[schedulerIndex].tasks[taskIndex].sessionId = sessionId
+        projectSchedulers[schedulerIndex].tasks[taskIndex].updatedAt = Date()
+        return sessionId
+    }
+
+    private func markManagedSessionRunning(_ sessionId: UUID) {
+        guard let location = managedTaskLocation(for: sessionId) else { return }
+        let now = Date()
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .running
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Worker session is running."
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].updatedAt = now
+        projectSchedulers[location.schedulerIndex].updatedAt = now
+        let taskId = projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].id
+        resolveHumanActions(projectId: projectSchedulers[location.schedulerIndex].projectId,
+                            taskId: taskId,
+                            kind: .startTask)
+        scheduleStateSave()
+    }
+
+    private func markManagedSessionFinished(_ sessionId: UUID) {
+        guard let location = managedTaskLocation(for: sessionId) else { return }
+        let now = Date()
+        let task = projectSchedulers[location.schedulerIndex].tasks[location.taskIndex]
+        guard task.phase == .running || task.phase == .waiting || task.phase == .planned else { return }
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .needsReview
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Worker session finished. Review the transcript and decide the next scheduler step."
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].updatedAt = now
+        projectSchedulers[location.schedulerIndex].humanActions.insert(ProjectSchedulerHumanAction(
+            id: UUID(),
+            taskId: task.id,
+            kind: .reviewResult,
+            title: "Review \(task.title)",
+            detail: "The worker session has stopped and needs a human check.",
+            createdAt: now,
+            resolvedAt: nil
+        ), at: 0)
+        projectSchedulers[location.schedulerIndex].updatedAt = now
+        scheduleStateSave()
+    }
+
+    private func managedTaskLocation(for sessionId: UUID) -> (schedulerIndex: Int, taskIndex: Int)? {
+        for schedulerIndex in projectSchedulers.indices {
+            if let taskIndex = projectSchedulers[schedulerIndex].tasks.firstIndex(where: { $0.sessionId == sessionId }) {
+                return (schedulerIndex, taskIndex)
+            }
+        }
+        return nil
+    }
+
+    private func resolveHumanActions(projectId: UUID,
+                                     taskId: UUID,
+                                     kind: ProjectSchedulerHumanActionKind?) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        let now = Date()
+        for actionIndex in projectSchedulers[idx].humanActions.indices {
+            guard projectSchedulers[idx].humanActions[actionIndex].taskId == taskId,
+                  !projectSchedulers[idx].humanActions[actionIndex].isResolved
+            else { continue }
+            if let kind,
+               projectSchedulers[idx].humanActions[actionIndex].kind != kind {
+                continue
+            }
+            projectSchedulers[idx].humanActions[actionIndex].resolvedAt = now
+        }
+    }
+
+    private func phaseSortIndex(_ phase: ProjectSchedulerTaskPhase) -> Int {
+        switch phase {
+        case .needsReview: return 0
+        case .running: return 1
+        case .waiting: return 2
+        case .planned: return 3
+        case .readyToMerge: return 4
+        case .done: return 5
+        }
+    }
+
+    private func worktreeHint(for title: String, projectId: UUID) -> String? {
+        guard let project = projects.first(where: { $0.id == projectId }),
+              case .local(let path) = project.location
+        else { return nil }
+        let slug = title
+            .lowercased()
+            .map { character -> Character in
+                character.isLetter || character.isNumber ? character : "-"
+            }
+        let compactSlug = String(slug).split(separator: "-").prefix(5).joined(separator: "-")
+        guard !compactSlug.isEmpty else { return nil }
+        let parent = (path as NSString).deletingLastPathComponent
+        let projectName = (path as NSString).lastPathComponent
+        return "\(parent)/\(projectName)-worktrees/\(compactSlug)"
+    }
+
+    private static func workerPrompt(for task: ProjectSchedulerTask) -> String {
+        """
+        You are working on this project task under Helm's project scheduler.
+
+        Task: \(task.title)
+
+        Idea:
+        \(task.idea)
+
+        Keep the implementation scoped to this task. If you need validation resources such as browser, Computer Use, a port, or a worktree merge, state that clearly in your result so the project scheduler can queue the next step.
+        """
+    }
+
     // MARK: - Project / Session creation
 
     /// Opens a folder picker. Adds the chosen directory as a local project.
@@ -481,6 +929,8 @@ final class AppStore {
         let name = url.lastPathComponent
         let project = Project(id: UUID(), name: name, location: .local(path: url.path))
         projects.append(project)
+        projectSchedulers.append(ProjectSchedulerState(projectId: project.id))
+        selectedProjectId = project.id
         scheduleStateSave()
         return project.id
     }
@@ -498,6 +948,8 @@ final class AppStore {
             location: .ssh(host: host, path: path, status: .connecting)
         )
         projects.append(project)
+        projectSchedulers.append(ProjectSchedulerState(projectId: project.id))
+        selectedProjectId = project.id
         scheduleStateSave()
         Task { @MainActor [weak self] in
             await self?.probeSSHProject(project.id)
@@ -550,32 +1002,57 @@ final class AppStore {
     func newSession(in projectId: UUID,
                     vendor: Vendor? = nil,
                     profileId: UUID? = nil) -> UUID? {
+        createSession(in: projectId,
+                      title: "New chat",
+                      vendor: vendor,
+                      profileId: profileId,
+                      isDraft: true,
+                      select: true)
+    }
+
+    @discardableResult
+    private func createSession(in projectId: UUID,
+                               title: String,
+                               vendor: Vendor? = nil,
+                               profileId: UUID? = nil,
+                               isDraft: Bool,
+                               select: Bool,
+                               runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
+        guard projects.contains(where: { $0.id == projectId }) else { return nil }
         let pickedProfile: Profile? = {
             if let id = profileId, let p = profile(id) { return p }
             if let v = vendor, let p = profiles(for: v).first { return p }
             return profiles(for: .claude).first ?? profiles.first
         }()
         guard let profile = pickedProfile else { return nil }
-        // Codex sessions seed sandbox + effort from the profile's defaults if
-        // any; the other fields stay at vendor-native defaults and are simply
-        // ignored when the session's vendor doesn't use them.
-        let sandbox = profile.sandboxMode ?? .workspace
-        let codexEffort = profile.reasoningEffort ?? .medium
-        let session = Session(
+        // Session runtime knobs are stored on the session so Project Inbox can
+        // create a real worker with the same per-send choices as the composer.
+        let resolvedRunConfiguration = runConfiguration ?? .defaults(for: profile)
+        var session = Session(
             id: UUID(),
             projectId: projectId,
             title: "New chat",
             profileId: profile.id,
-            claudePermissionMode: .defaultMode,
-            codexSandboxMode: sandbox,
-            codexApprovalMode: .onRequest,
-            claudeEffort: .medium,
-            codexEffort: codexEffort,
+            claudePermissionMode: resolvedRunConfiguration.claudePermissionMode,
+            codexSandboxMode: resolvedRunConfiguration.codexSandboxMode,
+            codexApprovalMode: resolvedRunConfiguration.codexApprovalMode,
+            claudeEffort: resolvedRunConfiguration.claudeEffort,
+            codexEffort: resolvedRunConfiguration.codexEffort,
             lastUpdate: "now",
             isDraft: true
         )
+        session.title = title
+        session.isDraft = isDraft
         sessions.append(session)
-        selectedSessionId = session.id  // didSet schedules state save + history load
+        if !isDraft {
+            upsertSidebarSession(for: session)
+        }
+        if select {
+            selectedSessionId = session.id  // didSet schedules state save + history load
+        } else {
+            selectedProjectId = projectId
+            scheduleStateSave()
+        }
         return session.id
     }
 
@@ -737,11 +1214,13 @@ final class AppStore {
               displayParts: [Part]? = nil,
               attachments: [ImageAttachment] = [],
               agentPrompt: String? = nil,
-              preUserEvents: [SessionEvent] = []) {
+              preUserEvents: [SessionEvent] = [],
+              sessionId targetSessionId: UUID? = nil) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptForAgent = (agentPrompt ?? prompt).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !promptForAgent.isEmpty || !attachments.isEmpty else { return }
-        guard let sIdx = sessions.firstIndex(where: { $0.id == selectedSessionId }) else { return }
+        let targetSessionId = targetSessionId ?? selectedSessionId
+        guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) else { return }
         guard !isSessionStreaming(sessions[sIdx].id) else { return }
         // Promote a draft to a real session — first send is what makes the
         // sidebar row appear.
@@ -827,6 +1306,7 @@ final class AppStore {
             task: nil,
             startedAt: startedAt
         )
+        markManagedSessionRunning(sessionId)
         runningSessionIds.insert(sessionId)
         activeRunStartedAts[sessionId] = startedAt
 
@@ -880,6 +1360,7 @@ final class AppStore {
                                  runId: run.runId,
                                  assistantId: run.assistantId)
         persistTranscriptSnapshot(for: sessionId)
+        markManagedSessionFinished(sessionId)
         activeRuns[sessionId] = nil
         runningSessionIds.remove(sessionId)
         activeRunStartedAts[sessionId] = nil

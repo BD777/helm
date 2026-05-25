@@ -82,6 +82,7 @@ struct SidebarView: View {
         guard !normalizedSearch.isEmpty else { return store.projects }
         return store.projects.filter { project in
             projectMatches(project) ||
+            schedulerMatches(project) ||
             store.sidebarSessions(in: project.id).contains { sessionMatches($0, in: project) }
         }
     }
@@ -102,6 +103,16 @@ struct SidebarView: View {
             project.name,
             project.location.pathString,
         ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
+    }
+
+    private func schedulerMatches(_ project: Project) -> Bool {
+        let state = store.schedulerState(for: project.id)
+        let haystack = ([project.name, "inbox", "scheduler"] +
+            state.inbox.map(\.text) +
+            state.tasks.map { "\($0.title) \($0.summary) \($0.idea)" })
+            .joined(separator: " ")
+            .lowercased()
         return haystack.contains(normalizedSearch)
     }
 
@@ -329,6 +340,19 @@ private struct ProjectSection: View {
         VStack(alignment: .leading, spacing: 1) {
             header
             if !project.collapsed || isFiltering {
+                if showSchedulerRow {
+                    Button {
+                        store.selectProjectOverview(project.id)
+                    } label: {
+                        ProjectInboxRow(
+                            project: project,
+                            isActive: store.selectedSessionId == nil && store.selectedProject?.id == project.id,
+                            unresolvedCount: store.unresolvedHumanActions(in: project.id).count,
+                            taskCount: store.schedulerTaskCount(in: project.id)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
                 ForEach(visibleSessions) { s in
                     let isRunning = store.isSessionStreaming(s.id)
                     Button {
@@ -438,6 +462,10 @@ private struct ProjectSection: View {
         return sessions.filter(sessionMatchesSearch)
     }
 
+    private var showSchedulerRow: Bool {
+        !isFiltering || projectMatchesSearch || schedulerMatchesSearch
+    }
+
     private var projectMatchesSearch: Bool {
         let haystack = [
             project.name,
@@ -454,6 +482,16 @@ private struct ProjectSection: View {
             project.name,
             project.location.pathString,
         ].joined(separator: " ").lowercased()
+        return haystack.contains(normalizedSearch)
+    }
+
+    private var schedulerMatchesSearch: Bool {
+        let state = store.schedulerState(for: project.id)
+        let haystack = ([project.name, "inbox", "scheduler"] +
+            state.inbox.map(\.text) +
+            state.tasks.map { "\($0.title) \($0.summary) \($0.idea)" })
+            .joined(separator: " ")
+            .lowercased()
         return haystack.contains(normalizedSearch)
     }
 
@@ -784,6 +822,54 @@ private struct RunningSessionIndicator: View {
         .opacity(isRunning ? 1 : 0)
         .allowsHitTesting(false)
         .accessibilityHidden(!isRunning)
+    }
+}
+
+private struct ProjectInboxRow: View {
+    let project: Project
+    let isActive: Bool
+    let unresolvedCount: Int
+    let taskCount: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tray.full")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                .frame(width: 18, height: 18)
+            Text("Project Inbox")
+                .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if unresolvedCount > 0 {
+                Text("\(unresolvedCount)")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .frame(height: 16)
+                    .background(Color.red, in: Capsule())
+            } else if taskCount > 0 {
+                Text("\(taskCount)")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .frame(height: 16)
+                    .background(Color.helmHover, in: Capsule())
+            }
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .fill(isActive ? Color.helmSelected : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .help("Project scheduler and inbox for \(project.name)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(project.name) project inbox")
+        .accessibilityValue(unresolvedCount > 0 ? "\(unresolvedCount) actions need attention" : "")
     }
 }
 

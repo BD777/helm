@@ -395,6 +395,33 @@ struct Session: Identifiable, Hashable, Codable {
     }
 }
 
+struct SessionRunConfiguration: Hashable {
+    var claudePermissionMode: ClaudePermissionMode
+    var codexSandboxMode: Profile.SandboxMode
+    var codexApprovalMode: CodexApprovalMode
+    var claudeEffort: ClaudeEffort
+    var codexEffort: Profile.ReasoningEffort
+
+    init(claudePermissionMode: ClaudePermissionMode = .defaultMode,
+         codexSandboxMode: Profile.SandboxMode = .workspace,
+         codexApprovalMode: CodexApprovalMode = .onRequest,
+         claudeEffort: ClaudeEffort = .medium,
+         codexEffort: Profile.ReasoningEffort = .medium) {
+        self.claudePermissionMode = claudePermissionMode
+        self.codexSandboxMode = codexSandboxMode
+        self.codexApprovalMode = codexApprovalMode
+        self.claudeEffort = claudeEffort
+        self.codexEffort = codexEffort
+    }
+
+    static func defaults(for profile: Profile) -> SessionRunConfiguration {
+        SessionRunConfiguration(
+            codexSandboxMode: profile.sandboxMode ?? .workspace,
+            codexEffort: profile.reasoningEffort ?? .medium
+        )
+    }
+}
+
 struct SidebarSession: Identifiable, Hashable {
     let id: UUID
     var projectId: UUID
@@ -408,6 +435,141 @@ struct SidebarSession: Identifiable, Hashable {
         self.title = session.title
         self.profileId = session.profileId
         self.vendorSessionId = session.vendorSessionId
+    }
+}
+
+enum ProjectSchedulerTaskPhase: String, CaseIterable, Hashable, Codable, Identifiable {
+    case planned
+    case running
+    case waiting
+    case needsReview
+    case readyToMerge
+    case done
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .planned: return "Planned"
+        case .running: return "Running"
+        case .waiting: return "Waiting"
+        case .needsReview: return "Needs You"
+        case .readyToMerge: return "Ready to Merge"
+        case .done: return "Done"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .planned: return "list.bullet.rectangle"
+        case .running: return "play.circle"
+        case .waiting: return "hourglass"
+        case .needsReview: return "person.crop.circle.badge.exclamationmark"
+        case .readyToMerge: return "arrow.triangle.merge"
+        case .done: return "checkmark.circle"
+        }
+    }
+}
+
+enum ProjectSchedulerInboxStatus: String, Hashable, Codable {
+    case planned
+    case accepted
+    case archived
+}
+
+enum ProjectSchedulerHumanActionKind: String, Hashable, Codable {
+    case startTask
+    case reviewResult
+    case answerQuestion
+    case resolveConflict
+    case approveMerge
+    case inspectFailure
+
+    var displayName: String {
+        switch self {
+        case .startTask: return "Start"
+        case .reviewResult: return "Review"
+        case .answerQuestion: return "Answer"
+        case .resolveConflict: return "Resolve"
+        case .approveMerge: return "Approve"
+        case .inspectFailure: return "Inspect"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .startTask: return "play"
+        case .reviewResult: return "checklist"
+        case .answerQuestion: return "questionmark.bubble"
+        case .resolveConflict: return "exclamationmark.triangle"
+        case .approveMerge: return "arrow.triangle.merge"
+        case .inspectFailure: return "stethoscope"
+        }
+    }
+}
+
+struct ProjectSchedulerInboxItem: Identifiable, Hashable, Codable {
+    let id: UUID
+    var text: String
+    var createdAt: Date
+    var status: ProjectSchedulerInboxStatus
+    var taskId: UUID?
+}
+
+struct ProjectSchedulerTask: Identifiable, Hashable, Codable {
+    let id: UUID
+    var title: String
+    var idea: String
+    var sessionId: UUID?
+    var phase: ProjectSchedulerTaskPhase
+    var summary: String
+    var dependencies: [UUID]
+    var resourceNotes: [String]
+    var worktreeHint: String?
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+struct ProjectSchedulerHumanAction: Identifiable, Hashable, Codable {
+    let id: UUID
+    var taskId: UUID?
+    var kind: ProjectSchedulerHumanActionKind
+    var title: String
+    var detail: String
+    var createdAt: Date
+    var resolvedAt: Date?
+
+    var isResolved: Bool { resolvedAt != nil }
+}
+
+struct ProjectSchedulerState: Identifiable, Hashable, Codable {
+    var projectId: UUID
+    var schedulerSessionId: UUID?
+    var schedulerProfileId: UUID?
+    var defaultWorkerProfileId: UUID?
+    var inbox: [ProjectSchedulerInboxItem]
+    var tasks: [ProjectSchedulerTask]
+    var humanActions: [ProjectSchedulerHumanAction]
+    var updatedAt: Date
+
+    var id: UUID { projectId }
+
+    init(projectId: UUID,
+         schedulerSessionId: UUID? = nil,
+         schedulerProfileId: UUID? = nil,
+         defaultWorkerProfileId: UUID? = nil,
+         inbox: [ProjectSchedulerInboxItem] = [],
+         tasks: [ProjectSchedulerTask] = [],
+         humanActions: [ProjectSchedulerHumanAction] = [],
+         updatedAt: Date = Date()) {
+        self.projectId = projectId
+        self.schedulerSessionId = schedulerSessionId
+        self.schedulerProfileId = schedulerProfileId
+        self.defaultWorkerProfileId = defaultWorkerProfileId
+        self.inbox = inbox
+        self.tasks = tasks
+        self.humanActions = humanActions
+        self.updatedAt = updatedAt
     }
 }
 

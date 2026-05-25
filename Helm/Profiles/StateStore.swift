@@ -10,12 +10,56 @@ struct AppStateFile: Codable {
     var projects: [Project]
     var sessions: [Session]
     var selectedSessionId: UUID?
+    var selectedProjectId: UUID?
+    var schedulers: [ProjectSchedulerState]
 
-    static let currentVersion = 1
+    static let currentVersion = 2
     static let empty = AppStateFile(version: currentVersion,
                                     projects: [],
                                     sessions: [],
-                                    selectedSessionId: nil)
+                                    selectedSessionId: nil,
+                                    selectedProjectId: nil,
+                                    schedulers: [])
+
+    private enum CodingKeys: String, CodingKey {
+        case version, projects, sessions, selectedSessionId,
+             selectedProjectId, schedulers
+    }
+
+    init(version: Int,
+         projects: [Project],
+         sessions: [Session],
+         selectedSessionId: UUID?,
+         selectedProjectId: UUID?,
+         schedulers: [ProjectSchedulerState]) {
+        self.version = version
+        self.projects = projects
+        self.sessions = sessions
+        self.selectedSessionId = selectedSessionId
+        self.selectedProjectId = selectedProjectId
+        self.schedulers = schedulers
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try c.decode(Int.self, forKey: .version)
+        self.projects = try c.decode([Project].self, forKey: .projects)
+        self.sessions = try c.decode([Session].self, forKey: .sessions)
+        self.selectedSessionId = try c.decodeIfPresent(UUID.self, forKey: .selectedSessionId)
+        self.selectedProjectId = try c.decodeIfPresent(UUID.self, forKey: .selectedProjectId)
+        self.schedulers = try c.decodeIfPresent([ProjectSchedulerState].self,
+                                                forKey: .schedulers) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(projects, forKey: .projects)
+        try c.encode(sessions, forKey: .sessions)
+        try c.encodeIfPresent(selectedSessionId, forKey: .selectedSessionId)
+        try c.encodeIfPresent(selectedProjectId, forKey: .selectedProjectId)
+        try c.encode(schedulers, forKey: .schedulers)
+    }
 }
 
 /// Synchronous load + debounced save of the runtime state file. App lifetime;
