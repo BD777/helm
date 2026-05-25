@@ -335,6 +335,7 @@ private struct ProjectSection: View {
     @State private var pendingDelete: SidebarSession?
     @State private var pendingRename: SidebarSession?
     @State private var renameTitle = ""
+    @State private var pendingProjectDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -446,6 +447,14 @@ private struct ProjectSection: View {
         } message: {
             Text("Choose a short title for this session.")
         }
+        .alert("Delete project?", isPresented: $pendingProjectDelete) {
+            Button("Delete", role: .destructive) {
+                store.deleteProject(project.id)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes \(project.name) and all of its sessions from Helm. Vendor history files are left untouched.")
+        }
     }
 
     private var normalizedSearch: String {
@@ -521,6 +530,8 @@ private struct ProjectSection: View {
 
             sshRetryButton
 
+            Spacer(minLength: 0)
+
             Button {
                 if store.newSession(in: project.id) == nil {
                     store.showProfilesSheet = true
@@ -535,8 +546,6 @@ private struct ProjectSection: View {
             .buttonStyle(.plain)
             .help("New chat in \(project.name)")
             .accessibilityLabel("New chat in \(project.name)")
-
-            Spacer(minLength: 0)
         }
         .padding(.leading, 14)
         .padding(.trailing, 8)
@@ -545,6 +554,13 @@ private struct ProjectSection: View {
         .background {
             if tracksHeaderFrame {
                 ProjectHeaderFrameReader(projectId: project.id)
+            }
+        }
+        .contextMenu {
+            Button(role: .destructive) {
+                pendingProjectDelete = true
+            } label: {
+                Label("Delete project", systemImage: "trash")
             }
         }
         .simultaneousGesture(projectDragGesture)

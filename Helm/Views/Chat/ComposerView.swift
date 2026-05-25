@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import SwiftUI
 
 struct ComposerView: View {
@@ -20,6 +21,8 @@ struct ComposerView: View {
     @State private var isRefreshingSkills = false
     @State private var skillRefreshToken = 0
     @State private var skillCatalogSignature: String?
+    @State private var skillCatalogWatcher: SkillCatalogWatcher?
+    @State private var skillWatchSignature: String?
     @State private var slashFilteredSkills: [ComposerSkill] = []
     @State private var slashHighlightedId: String?
     @State private var slashScrollTargetId: String?
@@ -43,6 +46,7 @@ struct ComposerView: View {
         .onAppear {
             loadDraft(for: store.selectedSessionId)
             refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
             installPasteMonitor()
             requestComposerFocus()
         }
@@ -50,6 +54,7 @@ struct ComposerView: View {
             saveCurrentDraft()
             loadDraft(for: newSessionId)
             refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
             activeBuiltinAction = nil
             requestComposerFocus()
         }
@@ -63,8 +68,14 @@ struct ComposerView: View {
         }
         .onChange(of: currentSkillCatalogContext?.signature) { _, _ in
             refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
         }
-        .onDisappear { removePasteMonitor() }
+        .onDisappear {
+            skillCatalogWatcher?.invalidate()
+            skillCatalogWatcher = nil
+            skillWatchSignature = nil
+            removePasteMonitor()
+        }
     }
 
     private func requestComposerFocus() {
@@ -298,7 +309,7 @@ struct ComposerView: View {
     private static func skillCommand(for skill: ComposerSkill, vendor: Vendor) -> String {
         switch vendor {
         case .claude:
-            return "\(skill.name) skill"
+            return "/\(skill.name)"
         case .codex:
             return "$\(skill.name)"
         }
@@ -434,6 +445,28 @@ struct ComposerView: View {
                 }
                 updateSlashResults()
             }
+        }
+    }
+
+    private func configureSkillCatalogWatcher() {
+        guard let context = currentSkillCatalogContext else {
+            skillCatalogWatcher?.invalidate()
+            skillCatalogWatcher = nil
+            skillWatchSignature = nil
+            return
+        }
+
+        let roots = ComposerSkillCatalog.watchRoots(context: context)
+        let signature = SkillCatalogWatcher.signature(for: roots)
+        guard signature != skillWatchSignature else { return }
+
+        skillCatalogWatcher?.invalidate()
+        skillWatchSignature = signature
+        skillCatalogWatcher = SkillCatalogWatcher(roots: roots) {
+            skillCatalogSignature = nil
+            skillWatchSignature = nil
+            refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
         }
     }
 
@@ -1137,7 +1170,14 @@ struct ComposerView: View {
     @ViewBuilder
     private func menuSelectionLabel(_ text: String, selected: Bool) -> some View {
         if selected {
-            Label(text, systemImage: "checkmark")
+            Label {
+                Text(text)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.accentColor)
+            } icon: {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+            }
         } else {
             Text(text)
         }
@@ -1838,6 +1878,90 @@ private struct ComposerSkillMatchScore: Comparable, Equatable {
     }
 }
 
+private final class SkillCatalogWatcher {
+    private let queue = DispatchQueue(label: "dev.deng.helm.skill-catalog-watcher")
+    private var sources: [DispatchSourceFileSystemObject] = []
+    private var descriptors: [CInt] = []
+    private var pendingChange: DispatchWorkItem?
+    private var isInvalidated = false
+
+    init(roots: [URL], onChange: @escaping @MainActor () -> Void) {
+        let paths = Self.watchPaths(for: roots)
+        for path in paths {
+            let descriptor = open(path, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: descriptor,
+                eventMask: [.write, .delete, .rename, .revoke],
+                queue: queue
+            )
+            source.setEventHandler { [weak self] in
+                guard let self, !self.isInvalidated else { return }
+                self.scheduleChange(onChange)
+            }
+            source.setCancelHandler {
+                close(descriptor)
+            }
+            descriptors.append(descriptor)
+            sources.append(source)
+            source.resume()
+        }
+    }
+
+    deinit {
+        invalidate()
+    }
+
+    func invalidate() {
+        guard !isInvalidated else { return }
+        isInvalidated = true
+        pendingChange?.cancel()
+        pendingChange = nil
+        sources.forEach { $0.cancel() }
+        sources = []
+        descriptors = []
+    }
+
+    private func scheduleChange(_ onChange: @escaping @MainActor () -> Void) {
+        pendingChange?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, !self.isInvalidated else { return }
+            Task { @MainActor in onChange() }
+        }
+        pendingChange = item
+        queue.asyncAfter(deadline: .now() + .milliseconds(250), execute: item)
+    }
+
+    static func signature(for roots: [URL]) -> String {
+        watchPaths(for: roots).joined(separator: "|")
+    }
+
+    private static func watchPaths(for roots: [URL],
+                                   fileManager: FileManager = .default) -> [String] {
+        var seen: Set<String> = []
+        return roots
+            .compactMap { watchPath(for: $0, fileManager: fileManager) }
+            .map { $0.resolvingSymlinksInPath().standardizedFileURL.path }
+            .filter { seen.insert($0).inserted }
+            .sorted()
+    }
+
+    private static func watchPath(for url: URL,
+                                  fileManager: FileManager) -> URL? {
+        let target = url.standardizedFileURL
+        if fileManager.fileExists(atPath: target.path) {
+            return target
+        }
+
+        let parent = target.deletingLastPathComponent()
+        guard parent.path != target.path,
+              fileManager.fileExists(atPath: parent.path)
+        else { return nil }
+
+        return parent
+    }
+}
+
 private enum ComposerSkillCatalog {
     struct Context: Equatable {
         let vendor: Vendor
@@ -1865,40 +1989,7 @@ private enum ComposerSkillCatalog {
 
     private static func loadLocal(context: Context,
                                   fileManager: FileManager) -> [ComposerSkill] {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        let env = ProcessInfo.processInfo.environment
-        let project = expandHome(context.projectPath)
-        let roots: [(label: String, url: URL, depth: Int)]
-
-        switch context.vendor {
-        case .claude:
-            let claudeHome = context.configRoot.map(expandHome)
-                ?? env["CLAUDE_CONFIG_DIR"].map(expandHome)
-                ?? home.appendingPathComponent(".claude", isDirectory: true)
-            roots = projectSkillRoots(project: project,
-                                      component: ".claude/skills",
-                                      label: "Project",
-                                      fileManager: fileManager)
-                + [("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2)]
-                + linkedSkillRoots(from: claudeHome.appendingPathComponent("skills/.my-skills-links.json"),
-                                   label: "My Skills",
-                                   fileManager: fileManager)
-        case .codex:
-            let codexHome = context.configRoot.map(expandHome)
-                ?? env["CODEX_HOME"].map(expandHome)
-                ?? home.appendingPathComponent(".codex", isDirectory: true)
-            let agentsHome = home.appendingPathComponent(".agents", isDirectory: true)
-            roots = codexProjectSkillRoots(project: project, fileManager: fileManager)
-                + [
-                    ("User", agentsHome.appendingPathComponent("skills", isDirectory: true), 3),
-                    ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
-                    ("Admin", URL(fileURLWithPath: "/etc/codex/skills", isDirectory: true), 3),
-                    ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
-                ]
-                + linkedSkillRoots(from: agentsHome.appendingPathComponent("skills/.my-skills-links.json"),
-                                   label: "My Skills",
-                                   fileManager: fileManager)
-        }
+        let roots = localRoots(context: context, fileManager: fileManager)
 
         var loadedSkills: [ComposerSkill] = []
         var seenPaths = Set<String>()
@@ -1914,6 +2005,69 @@ private enum ComposerSkillCatalog {
 
         return loadedSkills.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    static func watchRoots(context: Context,
+                           fileManager: FileManager = .default) -> [URL] {
+        guard context.sshHost == nil else { return [] }
+        let roots = localRoots(context: context, fileManager: fileManager)
+        let manifests = linkedSkillManifestURLs(context: context)
+        var seen: Set<String> = []
+        return (roots.map(\.url) + manifests)
+            .filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    private static func localRoots(context: Context,
+                                   fileManager: FileManager) -> [(label: String, url: URL, depth: Int)] {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let env = ProcessInfo.processInfo.environment
+        let project = expandHome(context.projectPath)
+
+        switch context.vendor {
+        case .claude:
+            let claudeHome = context.configRoot.map(expandHome)
+                ?? env["CLAUDE_CONFIG_DIR"].map(expandHome)
+                ?? home.appendingPathComponent(".claude", isDirectory: true)
+            return projectSkillRoots(project: project,
+                                     component: ".claude/skills",
+                                     label: "Project",
+                                     fileManager: fileManager)
+                + [("Claude", claudeHome.appendingPathComponent("skills", isDirectory: true), 2)]
+                + linkedSkillRoots(from: claudeHome.appendingPathComponent("skills/.my-skills-links.json"),
+                                   label: "My Skills",
+                                   fileManager: fileManager)
+        case .codex:
+            let codexHome = context.configRoot.map(expandHome)
+                ?? env["CODEX_HOME"].map(expandHome)
+                ?? home.appendingPathComponent(".codex", isDirectory: true)
+            let agentsHome = home.appendingPathComponent(".agents", isDirectory: true)
+            return codexProjectSkillRoots(project: project, fileManager: fileManager)
+                + [
+                    ("User", agentsHome.appendingPathComponent("skills", isDirectory: true), 3),
+                    ("Codex", codexHome.appendingPathComponent("skills", isDirectory: true), 3),
+                    ("Admin", URL(fileURLWithPath: "/etc/codex/skills", isDirectory: true), 3),
+                    ("Plugin", codexHome.appendingPathComponent("plugins/cache", isDirectory: true), 7),
+                ]
+                + linkedSkillRoots(from: agentsHome.appendingPathComponent("skills/.my-skills-links.json"),
+                                   label: "My Skills",
+                                   fileManager: fileManager)
+        }
+    }
+
+    private static func linkedSkillManifestURLs(context: Context) -> [URL] {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let env = ProcessInfo.processInfo.environment
+
+        switch context.vendor {
+        case .claude:
+            let claudeHome = context.configRoot.map(expandHome)
+                ?? env["CLAUDE_CONFIG_DIR"].map(expandHome)
+                ?? home.appendingPathComponent(".claude", isDirectory: true)
+            return [claudeHome.appendingPathComponent("skills/.my-skills-links.json")]
+        case .codex:
+            let agentsHome = home.appendingPathComponent(".agents", isDirectory: true)
+            return [agentsHome.appendingPathComponent("skills/.my-skills-links.json")]
         }
     }
 
@@ -2203,10 +2357,11 @@ print(json.dumps(records, ensure_ascii=False))
                              visited: inout Set<String>,
                              out: inout [URL]) {
         guard depth >= 0, out.count < 500 else { return }
-        let realPath = directory.resolvingSymlinksInPath().standardizedFileURL.path
+        let realURL = directory.resolvingSymlinksInPath().standardizedFileURL
+        let realPath = realURL.path
         guard visited.insert(realPath).inserted else { return }
         guard let entries = try? fileManager.contentsOfDirectory(
-            at: directory,
+            at: realURL,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsPackageDescendants]
         ) else { return }

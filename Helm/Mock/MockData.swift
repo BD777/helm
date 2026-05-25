@@ -455,6 +455,28 @@ final class AppStore {
         scheduleStateSave()
     }
 
+    func deleteProject(_ projectId: UUID) {
+        guard let idx = projects.firstIndex(where: { $0.id == projectId }) else { return }
+        let removedSessionIds = sessions.filter { $0.projectId == projectId }.map(\.id)
+        if removedSessionIds.contains(where: isSessionStreaming) { return }
+
+        projects.remove(at: idx)
+        sessions.removeAll { $0.projectId == projectId }
+        sidebarSessions.removeAll { removedSessionIds.contains($0.id) }
+        for sessionId in removedSessionIds {
+            TranscriptSnapshotStore.delete(sessionId: sessionId)
+        }
+        projectSchedulers.removeAll { $0.projectId == projectId }
+
+        if let sid = selectedSessionId, removedSessionIds.contains(sid) {
+            selectedSessionId = nil
+        }
+        if selectedProjectId == projectId {
+            selectedProjectId = projects.first?.id
+        }
+        scheduleStateSave()
+    }
+
     func moveProject(_ sourceId: UUID, around targetId: UUID, after: Bool) {
         guard sourceId != targetId,
               let sourceIndex = projects.firstIndex(where: { $0.id == sourceId })

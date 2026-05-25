@@ -355,9 +355,25 @@ private struct ProjectSchedulerView: View {
                     store.showProfilesSheet = true
                 }
             } label: {
-                Image(systemName: "brain.head.profile")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 28, height: 26)
+                HStack(spacing: 6) {
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("Open Scheduler")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .fill(Color.helmCard)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                                .stroke(Color.helmBorder, lineWidth: 1)
+                        )
+                )
             }
             .buttonStyle(.plain)
             .help("Open scheduler session")
@@ -387,8 +403,7 @@ private struct ProjectSchedulerView: View {
                     setProfile(candidate)
                 } label: {
                     menuSelectionLabel(candidate.name,
-                                       selected: candidate.id == profile?.id,
-                                       systemImage: candidate.vendor == .codex ? "terminal" : "sparkles")
+                                       selected: candidate.id == profile?.id)
                 }
             }
             if store.profiles.isEmpty {
@@ -440,12 +455,18 @@ private struct ProjectSchedulerView: View {
 
     @ViewBuilder
     private func menuSelectionLabel(_ text: String,
-                                    selected: Bool,
-                                    systemImage: String) -> some View {
+                                    selected: Bool) -> some View {
         if selected {
-            Label(text, systemImage: "checkmark")
+            Label {
+                Text(text)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.accentColor)
+            } icon: {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+            }
         } else {
-            Label(text, systemImage: systemImage)
+            Text(text)
         }
     }
 
@@ -1355,7 +1376,14 @@ private struct ProjectSchedulerComposer: View {
     @ViewBuilder
     private func menuSelectionLabel(_ text: String, selected: Bool) -> some View {
         if selected {
-            Label(text, systemImage: "checkmark")
+            Label {
+                Text(text)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.accentColor)
+            } icon: {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.accentColor)
+            }
         } else {
             Text(text)
         }
@@ -1478,15 +1506,18 @@ private struct ProjectIdeaProfilePickerMenu: View {
             onSelect(profile)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: isCurrent ? "checkmark" : "")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.tint)
-                    .frame(width: 12)
+                if isCurrent {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(profile.name).font(.system(size: 12.5))
+                    Text(profile.name)
+                        .font(.system(size: 12.5, weight: isCurrent ? .semibold : .regular))
+                        .foregroundStyle(isCurrent ? Color.accentColor : Color.primary)
                     Text(modelLabel)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isCurrent ? Color.accentColor.opacity(0.75) : Color.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -1501,6 +1532,10 @@ private struct ProjectIdeaProfilePickerMenu: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(isCurrent ? Color.accentColor.opacity(0.10) : Color.clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

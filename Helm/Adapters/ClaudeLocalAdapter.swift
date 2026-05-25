@@ -7,6 +7,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = ClaudeSessionStore()
     private var process: Process?
     private var descendantTracker: ProcessDescendantTracker?
+    private var permissionBridge: ClaudePermissionBridge?
     private let lock = NSLock()
 
     func start(prompt: String,
@@ -33,6 +34,12 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         }
         // Resolver-provided args (e.g. --model, --setting-sources).
         args.append(contentsOf: run.args)
+
+        let permissionBridge = try ClaudePermissionBridge.makeIfNeeded(session: session,
+                                                                       project: project)
+        if let permissionBridge {
+            args.append(contentsOf: ["--plugin-dir", permissionBridge.pluginURL.path])
+        }
 
         var env = ProcessInfo.processInfo.environment
         // GUI apps inherit a stripped PATH — add the usual command locations
@@ -80,7 +87,10 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
-        lock.lock(); process = proc; lock.unlock()
+        lock.lock()
+        process = proc
+        self.permissionBridge = permissionBridge
+        lock.unlock()
 
         return AsyncThrowingStream { continuation in
             let parser = ClaudeStreamParser()
@@ -88,6 +98,10 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             let stderrHandle = stderr.fileHandleForReading
             let stderrLock = NSLock()
             var stderrTail = "" // keep the most recent ~4KB for error context
+
+            permissionBridge?.start { event in
+                continuation.yield(event)
+            }
 
             stdoutHandle.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -116,6 +130,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             proc.terminationHandler = { p in
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
+                permissionBridge?.stop(responding: .cancel)
                 let tracked = self.stopTrackingDescendants()
                 ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
                 NSLog("[helm.claude] exit status=%d", p.terminationStatus)
@@ -189,11 +204,21 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     func cancel() {
         lock.lock()
         let p = process
+        let bridge = permissionBridge
         let tracked = stopTrackingDescendantsLocked()
         process = nil
+        permissionBridge = nil
         lock.unlock()
+        bridge?.stop(responding: .cancel)
         guard let p else { return }
         ProcessTreeTerminator.terminate(p, trackedDescendants: tracked)
+    }
+
+    func respondToApproval(id: String, decision: AgentApprovalDecision) {
+        lock.lock()
+        let bridge = permissionBridge
+        lock.unlock()
+        bridge?.respondToApproval(id: id, decision: decision)
     }
 
     private func startTrackingDescendantsIfNeeded(for run: RunConfig, process: Process) {
@@ -231,6 +256,367 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             if FileManager.default.isExecutableFile(atPath: full) { return full }
         }
         throw AdapterError.commandNotFound(candidate)
+    }
+}
+
+private final class ClaudePermissionBridge: @unchecked Sendable {
+    // Claude hook timeouts are seconds, but values above Int32.max
+    // milliseconds are cancelled immediately by the CLI runtime. This keeps
+    // approval effectively blocking without tripping that overflow path.
+    private static let blockingHookTimeoutSeconds = 2_000_000
+
+    private struct Pending {
+        let requestURL: URL
+        let responseURL: URL
+    }
+
+    let pluginURL: URL
+
+    private let baseURL: URL
+    private let requestsURL: URL
+    private let responsesURL: URL
+    private let pluginManifestURL: URL
+    private let scriptURL: URL
+    private let hooksURL: URL
+    private let lock = NSLock()
+    private var pending: [String: Pending] = [:]
+    private var monitorTask: Task<Void, Never>?
+    private var isStopped = false
+
+    static func makeIfNeeded(session: Session, project: Project) throws -> ClaudePermissionBridge? {
+        guard !project.location.isSSH,
+              session.claudePermissionMode == .defaultMode
+        else { return nil }
+        return try ClaudePermissionBridge(sessionId: session.id)
+    }
+
+    private init(sessionId: UUID) throws {
+        let runId = UUID().uuidString.lowercased()
+        let root = AppPaths.appSupportDir()
+            .appendingPathComponent("claude-permission-bridge", isDirectory: true)
+            .appendingPathComponent(sessionId.uuidString.lowercased(), isDirectory: true)
+            .appendingPathComponent(runId, isDirectory: true)
+        baseURL = root
+        pluginURL = root.appendingPathComponent("helm-permission-bridge-plugin", isDirectory: true)
+        requestsURL = root.appendingPathComponent("requests", isDirectory: true)
+        responsesURL = root.appendingPathComponent("responses", isDirectory: true)
+        pluginManifestURL = pluginURL
+            .appendingPathComponent(".claude-plugin", isDirectory: true)
+            .appendingPathComponent("plugin.json")
+        scriptURL = pluginURL
+            .appendingPathComponent("scripts", isDirectory: true)
+            .appendingPathComponent("permission-hook.sh")
+        hooksURL = pluginURL
+            .appendingPathComponent("hooks", isDirectory: true)
+            .appendingPathComponent("hooks.json")
+
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: requestsURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: responsesURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: pluginManifestURL.deletingLastPathComponent(),
+                                        withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: scriptURL.deletingLastPathComponent(),
+                                        withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: hooksURL.deletingLastPathComponent(),
+                                        withIntermediateDirectories: true)
+        try writePluginManifest()
+        try writeHookScript()
+        try writeHookConfig()
+    }
+
+    func start(_ emit: @escaping @Sendable (AgentEvent) -> Void) {
+        lock.lock()
+        guard monitorTask == nil, !isStopped else {
+            lock.unlock()
+            return
+        }
+        monitorTask = Task.detached(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                self?.drainRequests(emit)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        lock.unlock()
+    }
+
+    func respondToApproval(id: String, decision: AgentApprovalDecision) {
+        let pendingRequest: Pending?
+        lock.lock()
+        pendingRequest = pending.removeValue(forKey: id)
+        lock.unlock()
+
+        guard let pendingRequest else { return }
+        writeResponse(decision: decision, pending: pendingRequest)
+        try? FileManager.default.removeItem(at: pendingRequest.requestURL)
+    }
+
+    func stop(responding decision: AgentApprovalDecision) {
+        let requests: [Pending]
+        lock.lock()
+        if isStopped {
+            lock.unlock()
+            return
+        }
+        isStopped = true
+        monitorTask?.cancel()
+        monitorTask = nil
+        requests = Array(pending.values)
+        pending.removeAll()
+        lock.unlock()
+
+        for request in requests {
+            writeResponse(decision: decision, pending: request)
+        }
+        cancelUntrackedRequests(decision)
+
+        let baseURL = baseURL
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+            try? FileManager.default.removeItem(at: baseURL)
+        }
+    }
+
+    private func drainRequests(_ emit: @escaping @Sendable (AgentEvent) -> Void) {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: requestsURL,
+            includingPropertiesForKeys: nil
+        )) ?? []
+
+        for url in files where url.pathExtension == "json" {
+            let id = url.deletingPathExtension().lastPathComponent
+            lock.lock()
+            let known = pending[id] != nil || isStopped
+            lock.unlock()
+            guard !known else { continue }
+
+            guard let event = approvalEvent(id: id, requestURL: url) else {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+
+            lock.lock()
+            if pending[id] == nil, !isStopped {
+                pending[id] = Pending(
+                    requestURL: url,
+                    responseURL: responsesURL.appendingPathComponent("\(id).json")
+                )
+                lock.unlock()
+                emit(.approvalRequest(event))
+            } else {
+                lock.unlock()
+            }
+        }
+    }
+
+    private func approvalEvent(id: String, requestURL: URL) -> AgentApprovalRequest? {
+        guard let data = try? Data(contentsOf: requestURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let toolName = object["tool_name"] as? String ?? "tool"
+        let toolInput = object["tool_input"] as? [String: Any] ?? [:]
+        let cwd = object["cwd"] as? String
+        let detail = detailText(toolName: toolName, toolInput: toolInput, cwd: cwd)
+        return AgentApprovalRequest(
+            id: id,
+            kind: approvalKind(toolName: toolName),
+            title: approvalTitle(toolName: toolName),
+            message: approvalMessage(toolName: toolName, toolInput: toolInput),
+            detail: detail.isEmpty ? serialize(object) : detail,
+            allowsSessionApproval: false
+        )
+    }
+
+    private func writeResponse(decision: AgentApprovalDecision, pending: Pending) {
+        let object: [String: Any]
+        switch decision {
+        case .accept, .acceptForSession:
+            object = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Approved in Helm.",
+                ],
+            ]
+        case .decline:
+            object = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "Denied in Helm.",
+                ],
+            ]
+        case .cancel:
+            object = [
+                "hookSpecificOutput": [
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "Cancelled in Helm.",
+                ],
+            ]
+        }
+
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object)
+        else { return }
+        let tmp = pending.responseURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(pending.responseURL.lastPathComponent).tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            if FileManager.default.fileExists(atPath: pending.responseURL.path) {
+                try FileManager.default.removeItem(at: pending.responseURL)
+            }
+            try FileManager.default.moveItem(at: tmp, to: pending.responseURL)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+    }
+
+    private func writeHookScript() throws {
+        let script = """
+        #!/bin/bash
+        set -u
+
+        base_dir="$1"
+        requests_dir="$base_dir/requests"
+        responses_dir="$base_dir/responses"
+        mkdir -p "$requests_dir" "$responses_dir"
+
+        request_id="$(/usr/bin/uuidgen 2>/dev/null || printf '%s-%s' "$$" "$(date +%s)")"
+        request_tmp="$requests_dir/$request_id.tmp"
+        request_file="$requests_dir/$request_id.json"
+        response_file="$responses_dir/$request_id.json"
+
+        cat > "$request_tmp"
+        mv "$request_tmp" "$request_file"
+
+        while [ ! -f "$response_file" ]; do
+          sleep 0.2
+        done
+
+        cat "$response_file"
+        rm -f "$response_file" "$request_file"
+        """
+        try script.data(using: .utf8)?.write(to: scriptURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                              ofItemAtPath: scriptURL.path)
+    }
+
+    private func writePluginManifest() throws {
+        let manifest: [String: Any] = [
+            "name": "helm-permission-bridge",
+            "version": "1.0.0",
+            "description": "Routes Claude Code permission requests through Helm.",
+            "author": [
+                "name": "Helm",
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: pluginManifestURL, options: .atomic)
+    }
+
+    private func writeHookConfig() throws {
+        let config: [String: Any] = [
+            "description": "Helm permission approval bridge",
+            "hooks": [
+                "PreToolUse": [[
+                    "matcher": "Bash|Edit|MultiEdit|Write|NotebookEdit",
+                    "hooks": [[
+                        "type": "command",
+                        "command": "\(shellQuote(scriptURL.path)) \(shellQuote(baseURL.path))",
+                        "timeout": Self.blockingHookTimeoutSeconds,
+                        "statusMessage": "Waiting for Helm permission approval",
+                    ]],
+                ]],
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: config,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: hooksURL, options: .atomic)
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func cancelUntrackedRequests(_ decision: AgentApprovalDecision) {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: requestsURL,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        for url in files where url.pathExtension == "json" {
+            let id = url.deletingPathExtension().lastPathComponent
+            let pending = Pending(
+                requestURL: url,
+                responseURL: responsesURL.appendingPathComponent("\(id).json")
+            )
+            writeResponse(decision: decision, pending: pending)
+        }
+    }
+
+    private func approvalKind(toolName: String) -> AgentApprovalRequest.Kind {
+        switch toolName {
+        case "Bash":
+            return .command
+        case "Edit", "MultiEdit", "Write", "NotebookEdit":
+            return .fileChange
+        default:
+            return .permissions
+        }
+    }
+
+    private func approvalTitle(toolName: String) -> String {
+        switch approvalKind(toolName: toolName) {
+        case .command:
+            return "Approve Claude Command"
+        case .fileChange:
+            return "Approve Claude File Change"
+        default:
+            return "Approve Claude Tool"
+        }
+    }
+
+    private func approvalMessage(toolName: String, toolInput: [String: Any]) -> String {
+        if toolName == "Bash" {
+            if let description = toolInput["description"] as? String,
+               !description.isEmpty {
+                return description
+            }
+            return "Claude wants to run a command."
+        }
+        if let filePath = toolInput["file_path"] as? String,
+           !filePath.isEmpty {
+            return "Claude wants to edit \((filePath as NSString).lastPathComponent)."
+        }
+        return "Claude needs permission to use \(toolName)."
+    }
+
+    private func detailText(toolName: String,
+                            toolInput: [String: Any],
+                            cwd: String?) -> String {
+        var lines = ["tool: \(toolName)"]
+        if let cwd, !cwd.isEmpty {
+            lines.append("cwd: \(cwd)")
+        }
+        if let command = toolInput["command"] as? String, !command.isEmpty {
+            lines.append(command)
+        } else if let filePath = toolInput["file_path"] as? String, !filePath.isEmpty {
+            lines.append("file: \(filePath)")
+        }
+        if lines.count <= 2, let serialized = serialize(toolInput) {
+            lines.append(serialized)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func serialize(_ value: Any?) -> String? {
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty
+        else { return nil }
+        return text
     }
 }
 
