@@ -134,8 +134,9 @@ final class AppStore {
         // first run because the scheduler state owns them by reference.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
             .filter {
+                !$0.transcript.isEmpty ||
                 $0.vendorSessionId != nil ||
-                TranscriptSnapshotStore.exists(sessionId: $0.id) ||
+                Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
                 schedulerSessionIds.contains($0.id)
             }
         self.sessions = cleanSessions
@@ -493,6 +494,22 @@ final class AppStore {
 
     private static func sidebarSessions(from sessions: [Session]) -> [SidebarSession] {
         sessions.filter { !$0.isDraft }.map(SidebarSession.init)
+    }
+
+    private static func hasRestorableTranscriptSnapshot(sessionId: UUID) -> Bool {
+        guard TranscriptSnapshotStore.exists(sessionId: sessionId) else { return false }
+
+        let rawSnapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
+        let snapshot = removingRecoverableResumeErrors(from: rawSnapshot)
+        guard !snapshot.isEmpty else {
+            TranscriptSnapshotStore.delete(sessionId: sessionId)
+            return false
+        }
+
+        if snapshot.count != rawSnapshot.count {
+            TranscriptSnapshotStore.save(sessionId: sessionId, items: snapshot)
+        }
+        return true
     }
 
     private func upsertSidebarSession(for session: Session) {
@@ -1169,7 +1186,12 @@ final class AppStore {
 
         let rawSnapshot = TranscriptSnapshotStore.load(sessionId: sessionId)
         let snapshot = Self.removingRecoverableResumeErrors(from: rawSnapshot)
-        guard !snapshot.isEmpty else { return false }
+        guard !snapshot.isEmpty else {
+            if !rawSnapshot.isEmpty {
+                TranscriptSnapshotStore.delete(sessionId: sessionId)
+            }
+            return false
+        }
 
         sessions[idx].transcript = snapshot
         if snapshot.count != rawSnapshot.count {

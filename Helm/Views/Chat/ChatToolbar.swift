@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatToolbar: View {
     @Environment(AppStore.self) private var store
+    @State private var pendingDelete: Session?
 
     var body: some View {
         let session = store.selectedSession
@@ -29,10 +30,45 @@ struct ChatToolbar: View {
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
+            if let session {
+                Button {
+                    pendingDelete = session
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isSessionStreaming(session.id))
+                .help("Delete session")
+                .accessibilityLabel("Delete session")
+            }
         }
         .padding(.horizontal, 14)
         .frame(height: 44)
         .animation(.easeOut(duration: 0.14), value: store.selectedSessionIsStreaming)
+        .alert("Delete session?", isPresented: deleteBinding) {
+            Button("Delete", role: .destructive) {
+                if let pendingDelete {
+                    store.deleteSession(pendingDelete.id)
+                }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text("This removes the conversation from Helm's sidebar. Vendor history files are left untouched.")
+        }
+    }
+
+    private var deleteBinding: Binding<Bool> {
+        Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )
     }
 
     private func displayPath(for project: Project) -> String {

@@ -170,7 +170,10 @@ enum TranscriptSnapshotStore {
     }
 
     static func save(sessionId: UUID, items: [TranscriptItem]) {
-        guard !items.isEmpty else { return }
+        guard !items.isEmpty else {
+            delete(sessionId: sessionId)
+            return
+        }
         let url = AppPaths.transcriptSnapshotURL(for: sessionId)
         do {
             let file = TranscriptSnapshotFile(version: TranscriptSnapshotFile.currentVersion,
