@@ -22,6 +22,7 @@ struct ComposerTextView: NSViewRepresentable {
     let maxLines: Int
     let focusRequest: Int
     let skillInsertionRequest: ComposerSkillInsertionRequest?
+    let sendShortcut: MessageSendShortcut
     let onKeyDown: (NSEvent) -> Bool
     let onTextCommand: (ComposerTextCommand) -> Bool
     let onSlashContextChange: (ComposerSlashContext?) -> Void
@@ -49,10 +50,11 @@ struct ComposerTextView: NSViewRepresentable {
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         tv.placeholder = placeholder
+        tv.sendShortcut = sendShortcut
         tv.onKeyDown = onKeyDown
         tv.onTextCommand = onTextCommand
         tv.onSlashContextChange = onSlashContextChange
-        tv.onCommandReturn = onSend
+        tv.onSendShortcut = onSend
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -66,10 +68,11 @@ struct ComposerTextView: NSViewRepresentable {
         guard let tv = scroll.documentView as? PlaceholderTextView else { return }
         context.coordinator.parent = self
         tv.placeholder = placeholder
+        tv.sendShortcut = sendShortcut
         tv.onKeyDown = onKeyDown
         tv.onTextCommand = onTextCommand
         tv.onSlashContextChange = onSlashContextChange
-        tv.onCommandReturn = onSend
+        tv.onSendShortcut = onSend
         var insertedSkill = false
         if let skillInsertionRequest,
            context.coordinator.consumeSkillInsertionRequest(skillInsertionRequest.id) {
@@ -261,7 +264,7 @@ enum ComposerTextCommand {
     case cancel
 }
 
-/// NSTextView with a placeholder string and ⌘+Return forwarding.
+/// NSTextView with a placeholder string and configurable send forwarding.
 final class PlaceholderTextView: NSTextView {
     var placeholder: String = "" {
         didSet {
@@ -270,7 +273,8 @@ final class PlaceholderTextView: NSTextView {
             }
         }
     }
-    var onCommandReturn: () -> Void = {}
+    var sendShortcut: MessageSendShortcut = .defaultValue
+    var onSendShortcut: () -> Void = {}
     var onKeyDown: (NSEvent) -> Bool = { _ in false }
     var onTextCommand: (ComposerTextCommand) -> Bool = { _ in false }
     var onSlashContextChange: (ComposerSlashContext?) -> Void = { _ in }
@@ -381,9 +385,8 @@ final class PlaceholderTextView: NSTextView {
         if onKeyDown(event) {
             return
         }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if event.keyCode == 36, flags == .command {
-            onCommandReturn()
+        if sendShortcut.matches(event) {
+            onSendShortcut()
             return
         }
         super.keyDown(with: event)

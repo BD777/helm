@@ -6,6 +6,7 @@ import SwiftUI
 struct ComposerView: View {
     @Environment(AppStore.self) private var store
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
+    @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
     var externalFocusRequest: Int = 0
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
@@ -82,6 +83,7 @@ struct ComposerView: View {
             maxLines: 11,
             focusRequest: focusRequest,
             resetRequest: composerInteractionResetRequest,
+            sendShortcut: messageSendShortcut,
             menuWidthSource: footerWidth,
             textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,
@@ -129,7 +131,11 @@ struct ComposerView: View {
         let vendor = store.selectedSession
             .flatMap { store.profile($0.profileId) }?
             .vendor.displayName ?? "agent"
-        return "Message \(vendor) (⌘V to attach image · ⌘↵ to send)"
+        return "Message \(vendor) (⌘V to attach image · \(messageSendShortcut.glyph) to send)"
+    }
+
+    private var messageSendShortcut: MessageSendShortcut {
+        MessageSendShortcut.normalized(messageSendShortcutRawValue)
     }
 
     private var canSubmit: Bool {
@@ -522,7 +528,7 @@ struct ComposerView: View {
     }
 
     private var sendShortcut: some View {
-        Text("⌘↵")
+        Text(messageSendShortcut.glyph)
             .font(.system(size: 10.5))
             .foregroundStyle(.tertiary)
     }
@@ -541,7 +547,7 @@ struct ComposerView: View {
                 )
         }
         .buttonStyle(.plain)
-        .keyboardShortcut(.return, modifiers: .command)
+        .messageSendKeyboardShortcut(messageSendShortcut)
         .disabled(!canSubmit)
         .help(submitButtonHelp)
     }
@@ -1015,6 +1021,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
     let maxLines: Int
     let focusRequest: Int
     let resetRequest: Int
+    let sendShortcut: MessageSendShortcut
     let menuWidthSource: CGFloat
     let textTopPadding: CGFloat
     let skillProfile: Profile?
@@ -1045,6 +1052,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
          maxLines: Int,
          focusRequest: Int,
          resetRequest: Int,
+         sendShortcut: MessageSendShortcut,
          menuWidthSource: CGFloat,
          textTopPadding: CGFloat,
          skillProfile: Profile?,
@@ -1060,6 +1068,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
         self.maxLines = maxLines
         self.focusRequest = focusRequest
         self.resetRequest = resetRequest
+        self.sendShortcut = sendShortcut
         self.menuWidthSource = menuWidthSource
         self.textTopPadding = textTopPadding
         self.skillProfile = skillProfile
@@ -1081,6 +1090,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
                 maxLines: maxLines,
                 focusRequest: focusRequest &+ localFocusRequest,
                 skillInsertionRequest: skillInsertionRequest,
+                sendShortcut: sendShortcut,
                 onKeyDown: handleComposerKeyDown,
                 onTextCommand: handleComposerTextCommand,
                 onSlashContextChange: handleSlashContextChange,

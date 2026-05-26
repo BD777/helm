@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum Vendor: String, CaseIterable, Codable, Hashable {
@@ -277,6 +278,107 @@ enum CodexComputerUseMode: String, CaseIterable, Hashable, Codable, Identifiable
               let mode = Self(rawValue: raw)
         else { return .automatic }
         return mode
+    }
+}
+
+/// Device-level message send shortcut. Composer text input and the send button
+/// both read this so the footer hint, focused NSTextView handling, and SwiftUI
+/// keyboard shortcut stay in sync.
+enum MessageSendShortcut: String, CaseIterable, Hashable, Codable, Identifiable {
+    case commandReturn = "commandReturn"
+    case returnOnly = "return"
+    case shiftReturn = "shiftReturn"
+    case optionReturn = "optionReturn"
+    case controlReturn = "controlReturn"
+
+    static let userDefaultsKey = "messageSendShortcut"
+    static let defaultValue: Self = .commandReturn
+
+    private static let returnKeyCodes: Set<UInt16> = [36, 76]
+    private static let relevantAppKitModifiers: NSEvent.ModifierFlags = [
+        .command, .option, .control, .shift,
+    ]
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .commandReturn: return "Command Return"
+        case .returnOnly: return "Return"
+        case .shiftReturn: return "Shift Return"
+        case .optionReturn: return "Option Return"
+        case .controlReturn: return "Control Return"
+        }
+    }
+
+    var glyph: String {
+        switch self {
+        case .commandReturn: return "⌘↵"
+        case .returnOnly: return "↵"
+        case .shiftReturn: return "⇧↵"
+        case .optionReturn: return "⌥↵"
+        case .controlReturn: return "⌃↵"
+        }
+    }
+
+    var eventModifiers: EventModifiers {
+        switch self {
+        case .commandReturn: return [.command]
+        case .returnOnly: return []
+        case .shiftReturn: return [.shift]
+        case .optionReturn: return [.option]
+        case .controlReturn: return [.control]
+        }
+    }
+
+    var installsButtonShortcut: Bool {
+        self != .returnOnly
+    }
+
+    private var appKitModifiers: NSEvent.ModifierFlags {
+        switch self {
+        case .commandReturn: return [.command]
+        case .returnOnly: return []
+        case .shiftReturn: return [.shift]
+        case .optionReturn: return [.option]
+        case .controlReturn: return [.control]
+        }
+    }
+
+    func matches(_ event: NSEvent) -> Bool {
+        guard Self.returnKeyCodes.contains(event.keyCode) else { return false }
+        let flags = event.modifierFlags.intersection(Self.relevantAppKitModifiers)
+        return flags == appKitModifiers
+    }
+
+    static func normalized(_ rawValue: String) -> Self {
+        Self(rawValue: rawValue) ?? defaultValue
+    }
+
+    static func stored(in defaults: UserDefaults = .standard) -> Self {
+        guard let raw = defaults.string(forKey: userDefaultsKey) else {
+            return defaultValue
+        }
+        return normalized(raw)
+    }
+}
+
+struct MessageSendKeyboardShortcutModifier: ViewModifier {
+    let shortcut: MessageSendShortcut
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if shortcut.installsButtonShortcut {
+            content.keyboardShortcut(.return, modifiers: shortcut.eventModifiers)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func messageSendKeyboardShortcut(_ shortcut: MessageSendShortcut) -> some View {
+        modifier(MessageSendKeyboardShortcutModifier(shortcut: shortcut))
     }
 }
 

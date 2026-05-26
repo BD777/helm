@@ -852,6 +852,7 @@ private struct ProjectSchedulerTaskCard: View {
 private struct ProjectSchedulerComposer: View {
     @Environment(AppStore.self) private var store
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
+    @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
 
     let project: Project
     @Binding var text: String
@@ -895,6 +896,10 @@ private struct ProjectSchedulerComposer: View {
             .label ?? "no model"
     }
 
+    private var messageSendShortcut: MessageSendShortcut {
+        MessageSendShortcut.normalized(messageSendShortcutRawValue)
+    }
+
     private var canSubmit: Bool {
         hasComposerContent && selectedProfile != nil && sshSendBlockReason == nil
     }
@@ -927,6 +932,7 @@ private struct ProjectSchedulerComposer: View {
             maxLines: 11,
             focusRequest: focusRequest &+ localFocusRequest,
             resetRequest: composerInteractionResetRequest,
+            sendShortcut: messageSendShortcut,
             menuWidthSource: footerWidth,
             textTopPadding: 8,
             skillProfile: selectedProfile,
@@ -1069,7 +1075,7 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var sendShortcut: some View {
-        Text("⌘↵")
+        Text(messageSendShortcut.glyph)
             .font(.system(size: 10.5))
             .foregroundStyle(.tertiary)
     }
@@ -1086,7 +1092,7 @@ private struct ProjectSchedulerComposer: View {
                 .background(Capsule().fill(submitColor))
         }
         .buttonStyle(.plain)
-        .keyboardShortcut(.return, modifiers: .command)
+        .messageSendKeyboardShortcut(messageSendShortcut)
         .disabled(!canSubmit)
         .help(submitHelp)
     }

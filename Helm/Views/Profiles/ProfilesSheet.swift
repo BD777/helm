@@ -8,6 +8,7 @@ struct ProfilesSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("helmAppearance") private var appearanceRawValue = HelmAppearance.system.rawValue
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
+    @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
     @State private var selection: Selection? = nil
     /// Set when the user clicks a provider's [+] — drives the AddModelsSheet
     /// presentation. Cleared on dismiss.
@@ -18,6 +19,7 @@ struct ProfilesSheet: View {
 
     enum Selection: Hashable {
         case appearance
+        case keyboardShortcuts
         case computerUse
         case provider(UUID)
         case model(UUID)
@@ -33,6 +35,8 @@ struct ProfilesSheet: View {
                 switch selection {
                 case .appearance:
                     AppearanceSettingsView(appearanceRawValue: $appearanceRawValue)
+                case .keyboardShortcuts:
+                    KeyboardShortcutsSettingsView(sendShortcutRawValue: $messageSendShortcutRawValue)
                 case .computerUse:
                     ComputerUseSettingsView(modeRawValue: $computerUseModeRawValue)
                 case .provider(let id):
@@ -89,6 +93,12 @@ struct ProfilesSheet: View {
                         symbolName: HelmAppearance.normalized(appearanceRawValue).symbolName,
                         title: "Appearance",
                         subtitle: HelmAppearance.normalized(appearanceRawValue).title
+                    )
+                    settingsRow(
+                        selection: .keyboardShortcuts,
+                        symbolName: "keyboard",
+                        title: "Shortcuts",
+                        subtitle: "Send \(MessageSendShortcut.normalized(messageSendShortcutRawValue).glyph)"
                     )
                     settingsRow(
                         selection: .computerUse,
@@ -446,6 +456,104 @@ struct ProfilesSheet: View {
             }
             .padding(14)
             .frame(maxWidth: 420, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                    .fill(Color.helmCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                            .stroke(Color.helmBorder, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private struct KeyboardShortcutsSettingsView: View {
+        @Binding var sendShortcutRawValue: String
+
+        private var sendShortcut: MessageSendShortcut {
+            MessageSendShortcut.normalized(sendShortcutRawValue)
+        }
+
+        private var sendShortcutBinding: Binding<MessageSendShortcut> {
+            Binding(
+                get: { sendShortcut },
+                set: { sendShortcutRawValue = $0.rawValue }
+            )
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                section("Messages") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18, height: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Send message")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(sendShortcut.glyph)
+                                .font(DS.monoFontSmall)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        Picker("", selection: sendShortcutBinding) {
+                            ForEach(MessageSendShortcut.allCases) { shortcut in
+                                Text("\(shortcut.glyph)  \(shortcut.displayName)")
+                                    .tag(shortcut)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 220)
+                    }
+
+                    Divider()
+
+                    Button {
+                        sendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
+                    } label: {
+                        Label("Restore Default", systemImage: "arrow.counterclockwise")
+                    }
+                    .controlSize(.small)
+                    .disabled(sendShortcut == .defaultValue)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.helmChatBg)
+        }
+
+        private var header: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "keyboard")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Shortcuts")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Message sending")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+
+        private func section<Content: View>(_ title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                content()
+            }
+            .padding(14)
+            .frame(maxWidth: 520, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
                     .fill(Color.helmCard)
