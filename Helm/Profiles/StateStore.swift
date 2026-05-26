@@ -12,18 +12,20 @@ struct AppStateFile: Codable {
     var selectedSessionId: UUID?
     var selectedProjectId: UUID?
     var schedulers: [ProjectSchedulerState]
+    var sshProfileAccess: [SSHProfileAccessState]
 
-    static let currentVersion = 2
+    static let currentVersion = 3
     static let empty = AppStateFile(version: currentVersion,
                                     projects: [],
                                     sessions: [],
                                     selectedSessionId: nil,
                                     selectedProjectId: nil,
-                                    schedulers: [])
+                                    schedulers: [],
+                                    sshProfileAccess: [])
 
     private enum CodingKeys: String, CodingKey {
         case version, projects, sessions, selectedSessionId,
-             selectedProjectId, schedulers
+             selectedProjectId, schedulers, sshProfileAccess
     }
 
     init(version: Int,
@@ -31,13 +33,15 @@ struct AppStateFile: Codable {
          sessions: [Session],
          selectedSessionId: UUID?,
          selectedProjectId: UUID?,
-         schedulers: [ProjectSchedulerState]) {
+         schedulers: [ProjectSchedulerState],
+         sshProfileAccess: [SSHProfileAccessState] = []) {
         self.version = version
         self.projects = projects
         self.sessions = sessions
         self.selectedSessionId = selectedSessionId
         self.selectedProjectId = selectedProjectId
         self.schedulers = schedulers
+        self.sshProfileAccess = sshProfileAccess
     }
 
     init(from decoder: Decoder) throws {
@@ -49,6 +53,8 @@ struct AppStateFile: Codable {
         self.selectedProjectId = try c.decodeIfPresent(UUID.self, forKey: .selectedProjectId)
         self.schedulers = try c.decodeIfPresent([ProjectSchedulerState].self,
                                                 forKey: .schedulers) ?? []
+        self.sshProfileAccess = try c.decodeIfPresent([SSHProfileAccessState].self,
+                                                       forKey: .sshProfileAccess) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -59,6 +65,7 @@ struct AppStateFile: Codable {
         try c.encodeIfPresent(selectedSessionId, forKey: .selectedSessionId)
         try c.encodeIfPresent(selectedProjectId, forKey: .selectedProjectId)
         try c.encode(schedulers, forKey: .schedulers)
+        try c.encode(sshProfileAccess, forKey: .sshProfileAccess)
     }
 }
 

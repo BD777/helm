@@ -147,6 +147,9 @@ struct Profile: Identifiable, Hashable, Codable {
     let id: UUID
     var name: String
     var vendor: Vendor
+    /// nil = global/local profile. Non-nil profiles are owned by one SSH
+    /// project and never appear in local or other SSH project pickers.
+    var sshProjectId: UUID? = nil
 
     var providerId: UUID
     /// Primary model id (UUID into the Models table). For Claude, this also
@@ -207,6 +210,19 @@ struct Project: Identifiable, Hashable, Codable {
     var name: String
     var location: ProjectLocation
     var collapsed: Bool = false
+}
+
+struct SSHProfileAccessState: Identifiable, Hashable, Codable {
+    var projectId: UUID
+    var allowedGlobalProfileIds: [UUID]
+
+    var id: UUID { projectId }
+
+    init(projectId: UUID,
+         allowedGlobalProfileIds: [UUID] = []) {
+        self.projectId = projectId
+        self.allowedGlobalProfileIds = allowedGlobalProfileIds
+    }
 }
 
 /// Claude's `--permission-mode`. One axis covers both "what can be touched"

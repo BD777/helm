@@ -339,7 +339,8 @@ private struct ProjectSchedulerView: View {
             metric("\(tasks.filter { effectivePhase($0) == .running }.count)", "Running")
             metric("\(activeTasks.filter { effectivePhase($0) == .waiting }.count)", "Waiting")
 
-            schedulerProfileMenu(profile: store.schedulerProfile(for: project.id),
+            schedulerProfileMenu(projectId: project.id,
+                                 profile: store.schedulerProfile(for: project.id),
                                  setProfile: { store.setSchedulerProfile($0.id, for: project.id) })
 
             Button {
@@ -387,10 +388,12 @@ private struct ProjectSchedulerView: View {
         .frame(minWidth: 54, alignment: .trailing)
     }
 
-    private func schedulerProfileMenu(profile: Profile?,
+    private func schedulerProfileMenu(projectId: UUID,
+                                      profile: Profile?,
                                       setProfile: @escaping (Profile) -> Void) -> some View {
-        Menu {
-            ForEach(store.profiles) { candidate in
+        let candidates = store.availableProfiles(for: projectId)
+        return Menu {
+            ForEach(candidates) { candidate in
                 Button {
                     setProfile(candidate)
                 } label: {
@@ -398,7 +401,7 @@ private struct ProjectSchedulerView: View {
                                        selected: candidate.id == profile?.id)
                 }
             }
-            if store.profiles.isEmpty {
+            if candidates.isEmpty {
                 Button("Open Settings") {
                     store.showProfilesSheet = true
                 }
@@ -884,7 +887,9 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var selectedProfile: Profile? {
-        if let workerProfileId, let profile = store.profile(workerProfileId) {
+        if let workerProfileId,
+           store.isProfileAvailable(workerProfileId, for: project.id),
+           let profile = store.profile(workerProfileId) {
             return profile
         }
         return store.defaultWorkerProfile(for: project.id)
@@ -1010,6 +1015,7 @@ private struct ProjectSchedulerComposer: View {
         .buttonStyle(.plain)
         .popover(isPresented: $pickerOpen, arrowEdge: .bottom) {
             ProjectIdeaProfilePickerMenu(
+                projectId: project.id,
                 selectedProfileId: selectedProfile?.id,
                 onSelect: { profile in
                     workerProfileId = profile.id
@@ -1322,17 +1328,19 @@ private struct ProjectSchedulerComposer: View {
 private struct ProjectIdeaProfilePickerMenu: View {
     @Environment(AppStore.self) private var store
 
+    let projectId: UUID
     let selectedProfileId: UUID?
     var onSelect: (Profile) -> Void
 
     var body: some View {
+        let available = store.availableProfiles(for: projectId)
         VStack(alignment: .leading, spacing: 0) {
             groupHeader("Worker Profile · Project Inbox")
-            if store.profiles.isEmpty {
+            if available.isEmpty {
                 emptyHint("No profiles. Open Profiles (gear icon) to add one.")
             } else {
                 ForEach(Vendor.allCases, id: \.self) { vendor in
-                    let profiles = store.profiles(for: vendor)
+                    let profiles = available.filter { $0.vendor == vendor }
                     if !profiles.isEmpty {
                         subgroupHeader(vendor.displayName)
                         ForEach(profiles) { profile in

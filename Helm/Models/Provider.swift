@@ -7,6 +7,13 @@ struct Provider: Identifiable, Hashable, Codable {
     let id: UUID
     var name: String
     var vendor: Vendor
+    /// nil = global/local provider. Non-nil providers are detected from, and
+    /// only usable inside, the matching SSH project.
+    var sshProjectId: UUID? = nil
+    /// Codex config key from the remote `[model_providers.<key>]` table. This
+    /// lets SSH-scoped profiles reference the remote config without copying
+    /// local tokens or base URL overrides into the SSH command.
+    var remoteCodexProviderKey: String? = nil
 
     /// `ANTHROPIC_BASE_URL` for Claude or `[model_providers.X].base_url` for
     /// Codex. May be empty when the user wants to hit the vendor default.

@@ -145,7 +145,25 @@ enum RunConfigResolver {
 
         var args: [String] = []
 
-        if !isRemoteProject, let delegate = profile.delegateVendorProfile, !delegate.isEmpty {
+        if isRemoteProject,
+           profile.sshProjectId != nil,
+           let delegate = profile.delegateVendorProfile,
+           !delegate.isEmpty {
+            args.append(contentsOf: ["--profile", delegate])
+            appendCodexRuntimeConfig(profile: profile,
+                                     session: session,
+                                     primary: nil,
+                                     to: &args)
+        } else if isRemoteProject,
+                  profile.sshProjectId != nil,
+                  let remoteProviderKey = provider.remoteCodexProviderKey,
+                  !remoteProviderKey.isEmpty {
+            args.append(contentsOf: ["-c", "model_provider=\(tomlStringLiteral(remoteProviderKey))"])
+            appendCodexRuntimeConfig(profile: profile,
+                                     session: session,
+                                     primary: primary,
+                                     to: &args)
+        } else if !isRemoteProject, let delegate = profile.delegateVendorProfile, !delegate.isEmpty {
             args.append(contentsOf: ["--profile", delegate])
         } else {
             // Inline -c overrides. Provider gets a synthesized name; safe
@@ -170,13 +188,10 @@ enum RunConfigResolver {
                     "model_providers.\(providerKey).http_headers=\(tomlInlineStringMap(provider.httpHeaders))",
                 ])
             }
-            args.append(contentsOf: ["-c", "model=\"\(primary.providerModelId)\""])
-            args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(session.codexEffort.rawValue)\""])
-            if let s = profile.serviceTier {
-                args.append(contentsOf: ["-c", "service_tier=\"\(s.rawValue)\""])
-            }
-            args.append(contentsOf: ["-c", "sandbox_mode=\"\(session.codexSandboxMode.rawValue)\""])
-            args.append(contentsOf: ["-c", "approval_policy=\"\(session.codexApprovalMode.rawValue)\""])
+            appendCodexRuntimeConfig(profile: profile,
+                                     session: session,
+                                     primary: primary,
+                                     to: &args)
         }
 
         args.append(contentsOf: try CodexComputerUseMCP.configArgs(isRemoteProject: isRemoteProject))
@@ -196,6 +211,21 @@ enum RunConfigResolver {
     private static func lookupModel(_ id: UUID?, models: [Model]) -> Model? {
         guard let id else { return nil }
         return models.first { $0.id == id }
+    }
+
+    private static func appendCodexRuntimeConfig(profile: Profile,
+                                                 session: Session,
+                                                 primary: Model?,
+                                                 to args: inout [String]) {
+        if let primary, primary.providerModelId != "remote default" {
+            args.append(contentsOf: ["-c", "model=\"\(primary.providerModelId)\""])
+        }
+        args.append(contentsOf: ["-c", "model_reasoning_effort=\"\(session.codexEffort.rawValue)\""])
+        if let s = profile.serviceTier {
+            args.append(contentsOf: ["-c", "service_tier=\"\(s.rawValue)\""])
+        }
+        args.append(contentsOf: ["-c", "sandbox_mode=\"\(session.codexSandboxMode.rawValue)\""])
+        args.append(contentsOf: ["-c", "approval_policy=\"\(session.codexApprovalMode.rawValue)\""])
     }
 
     /// `-c key=value` keys must be plain TOML identifiers.

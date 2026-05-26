@@ -13,6 +13,7 @@ final class AppStore {
     var providers: [Provider]
     var models: [Model]
     var profiles: [Profile]
+    var sshProfileAccess: [SSHProfileAccessState]
     var selectedSessionId: UUID? {
         didSet {
             guard oldValue != selectedSessionId else { return }
@@ -111,23 +112,38 @@ final class AppStore {
             .codex:  CodexSessionStore(),
         ]
 
+        // Caller-provided projects/sessions (previews / tests) win over disk.
         let profilesFile = profileStore.load()
-        self.providers = profilesFile.providers
+        let stateFile = stateStore.load()
+        let loadedProjects = projects.isEmpty ? stateFile.projects : projects
+        let sshProjectIds = Set(loadedProjects.filter { $0.location.isSSH }.map(\.id))
+        let scopedProviderIdsToDrop = Set(profilesFile.providers.filter { provider in
+            provider.sshProjectId.map { !sshProjectIds.contains($0) } ?? false
+        }.map(\.id))
+
+        self.providers = profilesFile.providers.filter { provider in
+            provider.sshProjectId.map { sshProjectIds.contains($0) } ?? true
+        }
         // Skip Models that lack a providerModelId — those are partial drafts
         // that an earlier code path persisted before we added validation.
         // They have no value and they pollute pickers.
-        let cleanModels = profilesFile.models.filter { !$0.providerModelId.isEmpty }
+        let cleanModels = profilesFile.models.filter {
+            !$0.providerModelId.isEmpty && !scopedProviderIdsToDrop.contains($0.providerId)
+        }
         self.models = cleanModels
-        self.profiles = profilesFile.profiles
-
-        // Caller-provided projects/sessions (previews / tests) win over disk.
-        let stateFile = stateStore.load()
-        let loadedProjects = projects.isEmpty ? stateFile.projects : projects
+        self.profiles = profilesFile.profiles.filter { profile in
+            profile.sshProjectId.map { sshProjectIds.contains($0) } ?? true
+        }
         self.projects = loadedProjects
         let loadedSchedulers = stateFile.schedulers.filter { scheduler in
             loadedProjects.contains { $0.id == scheduler.projectId }
         }
         self.projectSchedulers = loadedSchedulers
+        self.sshProfileAccess = stateFile.sshProfileAccess.filter { access in
+            loadedProjects.contains { project in
+                project.id == access.projectId && project.location.isSSH
+            }
+        }
         let schedulerSessionIds = Set(loadedSchedulers.flatMap { scheduler -> [UUID] in
             var ids = scheduler.tasks.compactMap(\.sessionId)
             if let schedulerSessionId = scheduler.schedulerSessionId {
@@ -206,16 +222,74 @@ final class AppStore {
     func provider(_ id: UUID) -> Provider? { providers.first { $0.id == id } }
     func model(_ id: UUID) -> Model? { models.first { $0.id == id } }
 
+    var sshProjects: [Project] {
+        projects.filter { $0.location.isSSH }
+    }
+
+    var globalProviders: [Provider] {
+        providers.filter { $0.sshProjectId == nil }
+    }
+
+    var globalProfiles: [Profile] {
+        profiles.filter { $0.sshProjectId == nil }
+    }
+
+    func remoteProviders(forSSHProject projectId: UUID) -> [Provider] {
+        providers.filter { $0.sshProjectId == projectId }
+    }
+
+    func remoteProfiles(forSSHProject projectId: UUID) -> [Profile] {
+        profiles.filter { $0.sshProjectId == projectId }
+    }
+
     func profiles(for vendor: Vendor) -> [Profile] {
-        profiles.filter { $0.vendor == vendor }
+        globalProfiles.filter { $0.vendor == vendor }
     }
 
     func providers(for vendor: Vendor) -> [Provider] {
-        providers.filter { $0.vendor == vendor }
+        globalProviders.filter { $0.vendor == vendor }
     }
 
     func models(in providerId: UUID) -> [Model] {
         models.filter { $0.providerId == providerId }
+    }
+
+    func availableProfiles(for projectId: UUID) -> [Profile] {
+        guard let project = projects.first(where: { $0.id == projectId }) else { return [] }
+        guard project.location.isSSH else { return globalProfiles }
+
+        let allowed = Set(sshProfileAccessState(for: projectId).allowedGlobalProfileIds)
+        return profiles.filter { profile in
+            if profile.sshProjectId == projectId { return true }
+            return profile.sshProjectId == nil && allowed.contains(profile.id)
+        }
+    }
+
+    func availableProfiles(for projectId: UUID, vendor: Vendor) -> [Profile] {
+        availableProfiles(for: projectId).filter { $0.vendor == vendor }
+    }
+
+    func isProfileAvailable(_ profileId: UUID, for projectId: UUID) -> Bool {
+        availableProfiles(for: projectId).contains { $0.id == profileId }
+    }
+
+    func isGlobalProfileAllowed(_ profileId: UUID, inSSHProject projectId: UUID) -> Bool {
+        sshProfileAccessState(for: projectId).allowedGlobalProfileIds.contains(profileId)
+    }
+
+    func setGlobalProfile(_ profileId: UUID, allowed: Bool, forSSHProject projectId: UUID) {
+        guard globalProfiles.contains(where: { $0.id == profileId }),
+              projects.contains(where: { $0.id == projectId && $0.location.isSSH })
+        else { return }
+        let idx = ensureSSHProfileAccessIndex(for: projectId)
+        var ids = sshProfileAccess[idx].allowedGlobalProfileIds
+        if allowed {
+            if !ids.contains(profileId) { ids.append(profileId) }
+        } else {
+            ids.removeAll { $0 == profileId }
+        }
+        sshProfileAccess[idx].allowedGlobalProfileIds = ids
+        scheduleStateSave()
     }
 
     // MARK: - Provider / Model / Profile mutations
@@ -267,8 +341,117 @@ final class AppStore {
     }
 
     func deleteProfile(_ id: UUID) {
+        let removedProfile = profiles.first { $0.id == id }
         profiles.removeAll { $0.id == id }
+        for idx in sshProfileAccess.indices {
+            sshProfileAccess[idx].allowedGlobalProfileIds.removeAll { $0 == id }
+        }
+        if let removedProfile, removedProfile.sshProjectId != nil {
+            deleteRemoteProviderIfUnused(removedProfile.providerId)
+        }
+        scheduleStateSave()
         scheduleProfilesSave()
+    }
+
+    @discardableResult
+    func createRemoteCodexProfile(_ candidate: RemoteCodexProfileCandidate,
+                                  provider: RemoteCodexProviderCandidate,
+                                  forSSHProject projectId: UUID) -> UUID? {
+        guard projects.contains(where: { $0.id == projectId && $0.location.isSSH }) else { return nil }
+
+        let providerId: UUID
+        if let existing = providers.first(where: {
+            $0.sshProjectId == projectId &&
+            $0.vendor == .codex &&
+            $0.remoteCodexProviderKey == provider.key
+        }) {
+            providerId = existing.id
+        } else {
+            let p = Provider(
+                id: UUID(),
+                name: provider.displayName,
+                vendor: .codex,
+                sshProjectId: projectId,
+                remoteCodexProviderKey: provider.key,
+                baseURL: provider.baseURL,
+                authToken: "",
+                wireAPI: provider.wireAPI,
+                httpHeaders: [:],
+                requiresOpenAIAuth: provider.requiresOpenAIAuth,
+                extraEnv: [:]
+            )
+            providers.append(p)
+            providerId = p.id
+        }
+
+        let modelId: UUID
+        if let existing = models.first(where: {
+            $0.providerId == providerId && $0.providerModelId == candidate.modelId
+        }) {
+            modelId = existing.id
+        } else {
+            let model = Model(
+                id: UUID(),
+                providerId: providerId,
+                providerModelId: candidate.modelId,
+                alias: ""
+            )
+            models.append(model)
+            modelId = model.id
+        }
+
+        if let existing = profiles.first(where: {
+            $0.sshProjectId == projectId &&
+            $0.vendor == .codex &&
+            $0.providerId == providerId &&
+            $0.primaryModelId == modelId &&
+            $0.delegateVendorProfile == candidate.profileName
+        }) {
+            return existing.id
+        }
+
+        let profile = Profile(
+            id: UUID(),
+            name: candidate.displayName,
+            vendor: .codex,
+            sshProjectId: projectId,
+            providerId: providerId,
+            primaryModelId: modelId,
+            commandPath: "",
+            configRoot: nil,
+            opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
+            subagentModelId: nil,
+            autoCompactWindow: nil,
+            reasoningEffort: candidate.reasoningEffort,
+            serviceTier: candidate.serviceTier,
+            sandboxMode: candidate.sandboxMode,
+            delegateVendorProfile: candidate.profileName
+        )
+        profiles.append(profile)
+        scheduleProfilesSave()
+        return profile.id
+    }
+
+    private func sshProfileAccessState(for projectId: UUID) -> SSHProfileAccessState {
+        sshProfileAccess.first { $0.projectId == projectId }
+            ?? SSHProfileAccessState(projectId: projectId)
+    }
+
+    private func ensureSSHProfileAccessIndex(for projectId: UUID) -> Int {
+        if let idx = sshProfileAccess.firstIndex(where: { $0.projectId == projectId }) {
+            return idx
+        }
+        sshProfileAccess.append(SSHProfileAccessState(projectId: projectId))
+        return sshProfileAccess.count - 1
+    }
+
+    private func deleteRemoteProviderIfUnused(_ providerId: UUID) {
+        guard let provider = providers.first(where: { $0.id == providerId }),
+              provider.sshProjectId != nil,
+              !profiles.contains(where: { $0.providerId == providerId })
+        else { return }
+        providers.removeAll { $0.id == providerId }
+        models.removeAll { $0.providerId == providerId }
     }
 
     private func scheduleProfilesSave() {
@@ -287,7 +470,8 @@ final class AppStore {
             sessions: sessions.filter { !$0.isDraft },
             selectedSessionId: selectedSessionId,
             selectedProjectId: selectedProjectId,
-            schedulers: projectSchedulers
+            schedulers: projectSchedulers,
+            sshProfileAccess: sshProfileAccess
         ))
     }
 
@@ -307,7 +491,8 @@ final class AppStore {
             sessions: sessions.filter { !$0.isDraft },
             selectedSessionId: selectedSessionId,
             selectedProjectId: selectedProjectId,
-            schedulers: projectSchedulers
+            schedulers: projectSchedulers,
+            sshProfileAccess: sshProfileAccess
         ))
     }
 
@@ -475,12 +660,21 @@ final class AppStore {
             TranscriptSnapshotStore.delete(sessionId: sessionId)
         }
         projectSchedulers.removeAll { $0.projectId == projectId }
+        sshProfileAccess.removeAll { $0.projectId == projectId }
+
+        let removedProviderIds = Set(providers.filter { $0.sshProjectId == projectId }.map(\.id))
+        providers.removeAll { $0.sshProjectId == projectId }
+        models.removeAll { removedProviderIds.contains($0.providerId) }
+        profiles.removeAll { $0.sshProjectId == projectId }
 
         if let sid = selectedSessionId, removedSessionIds.contains(sid) {
             selectedSessionId = nil
         }
         if selectedProjectId == projectId {
             selectedProjectId = projects.first?.id
+        }
+        if !removedProviderIds.isEmpty {
+            scheduleProfilesSave()
         }
         scheduleStateSave()
     }
@@ -618,7 +812,9 @@ final class AppStore {
     }
 
     func setSchedulerProfile(_ profileId: UUID, for projectId: UUID) {
-        guard let profile = profile(profileId) else { return }
+        guard let profile = profile(profileId),
+              isProfileAvailable(profileId, for: projectId)
+        else { return }
         let idx = ensureSchedulerStateIndex(for: projectId)
         projectSchedulers[idx].schedulerProfileId = profileId
         if let sessionId = projectSchedulers[idx].schedulerSessionId,
@@ -639,7 +835,9 @@ final class AppStore {
     }
 
     func setDefaultWorkerProfile(_ profileId: UUID, for projectId: UUID) {
-        guard profile(profileId) != nil else { return }
+        guard profile(profileId) != nil,
+              isProfileAvailable(profileId, for: projectId)
+        else { return }
         let idx = ensureSchedulerStateIndex(for: projectId)
         projectSchedulers[idx].defaultWorkerProfileId = profileId
         projectSchedulers[idx].updatedAt = Date()
@@ -649,16 +847,22 @@ final class AppStore {
 
     func schedulerProfile(for projectId: UUID) -> Profile? {
         let state = schedulerState(for: projectId)
-        return state.schedulerProfileId.flatMap(profile)
-            ?? profiles(for: .codex).first
-            ?? profiles.first
+        let available = availableProfiles(for: projectId)
+        return state.schedulerProfileId.flatMap { id in
+            available.first { $0.id == id }
+        }
+            ?? available.first { $0.vendor == .codex }
+            ?? available.first
     }
 
     func defaultWorkerProfile(for projectId: UUID) -> Profile? {
         let state = schedulerState(for: projectId)
-        return state.defaultWorkerProfileId.flatMap(profile)
-            ?? profiles(for: .codex).first
-            ?? profiles.first
+        let available = availableProfiles(for: projectId)
+        return state.defaultWorkerProfileId.flatMap { id in
+            available.first { $0.id == id }
+        }
+            ?? available.first { $0.vendor == .codex }
+            ?? available.first
     }
 
     func canStartSchedulerTask(_ taskId: UUID, projectId: UUID) -> Bool {
@@ -1357,6 +1561,7 @@ else:
         )
         projects.append(project)
         projectSchedulers.append(ProjectSchedulerState(projectId: project.id))
+        sshProfileAccess.append(SSHProfileAccessState(projectId: project.id))
         selectedProjectId = project.id
         scheduleStateSave()
         Task { @MainActor [weak self] in
@@ -1430,10 +1635,13 @@ else:
                                select: Bool,
                                runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
         guard projects.contains(where: { $0.id == projectId }) else { return nil }
+        let projectProfiles = availableProfiles(for: projectId)
         let pickedProfile: Profile? = {
-            if let id = profileId, let p = profile(id) { return p }
-            if let v = vendor, let p = profiles(for: v).first { return p }
-            return profiles(for: .claude).first ?? profiles.first
+            if let id = profileId,
+               let p = projectProfiles.first(where: { $0.id == id }) { return p }
+            if let v = vendor,
+               let p = projectProfiles.first(where: { $0.vendor == v }) { return p }
+            return projectProfiles.first { $0.vendor == .claude } ?? projectProfiles.first
         }()
         guard let profile = pickedProfile else { return nil }
         // Session runtime knobs are stored on the session so Project Inbox can
@@ -1472,6 +1680,7 @@ else:
     /// and only same-vendor profiles are allowed.
     func setProfile(_ profile: Profile, on sessionId: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        guard isProfileAvailable(profile.id, for: sessions[idx].projectId) else { return }
         let currentVendor = self.profile(sessions[idx].profileId)?.vendor
         let canCrossVendor = sessions[idx].isDraft
         guard sessions[idx].profileId == profile.id ||
@@ -1662,6 +1871,10 @@ else:
         }
         guard let profile = profile(sessions[sIdx].profileId) else {
             appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return false
+        }
+        guard isProfileAvailable(profile.id, for: project.id) else {
+            appendError(to: sIdx, "This profile is not enabled for this SSH connection. Open Profiles and enable it under the SSH project's settings.")
+            return false
         }
 
         let session = sessions[sIdx]

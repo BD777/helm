@@ -29,6 +29,7 @@
 		A4C82EF6BBB383FAC2091D92 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C82827309F2C3C4358299950 /* ComposerView.swift */; };
 		A5AC4F105D0413DC703B5632 /* MockData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CF142C31A18B36F53D73237 /* MockData.swift */; };
 		A79A9A20CF719C682755517F /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72EEEBFC7773373A65448FD /* ProfileStore.swift */; };
+		A8F73B31A91F4B54A7C0B861 /* RemoteProviderDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8F73B30A91F4B54A7C0B861 /* RemoteProviderDiscovery.swift */; };
 		ADFA1A2CF79947B1B61EFF87 /* ImageManifestStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF7F55F59620EFA95BEF62E5 /* ImageManifestStore.swift */; };
 		B3F6EA65CE64C457FCCF3746 /* StateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 394B6A290AE23CA5A367D077 /* StateStore.swift */; };
 		BBCF12046E9572DDF3077CB2 /* ShellEnvParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B84D6A6B5085614B213136 /* ShellEnvParser.swift */; };
@@ -75,6 +76,7 @@
 		912FAE6CF9DB902DD560F01D /* EmptyChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyChatView.swift; sourceTree = "<group>"; };
 		9D8E910325AFE50F60C36C51 /* HelmApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelmApp.swift; sourceTree = "<group>"; };
 		A127AB44EADFCF6954A7840C /* ChatToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatToolbar.swift; sourceTree = "<group>"; };
+		A8F73B30A91F4B54A7C0B861 /* RemoteProviderDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteProviderDiscovery.swift; sourceTree = "<group>"; };
 		ACA291F85FAAF945DDCF206D /* ClaudeLocalAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeLocalAdapter.swift; sourceTree = "<group>"; };
 		B72EEEBFC7773373A65448FD /* ProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStore.swift; sourceTree = "<group>"; };
 		C16418C0D5D474EA754955C8 /* RunConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunConfig.swift; sourceTree = "<group>"; };
@@ -140,6 +142,7 @@
 				799BFBF7ADF7603F97D1ADE9 /* AppPaths.swift */,
 				DF7F55F59620EFA95BEF62E5 /* ImageManifestStore.swift */,
 				B72EEEBFC7773373A65448FD /* ProfileStore.swift */,
+				A8F73B30A91F4B54A7C0B861 /* RemoteProviderDiscovery.swift */,
 				09B84D6A6B5085614B213136 /* ShellEnvParser.swift */,
 				394B6A290AE23CA5A367D077 /* StateStore.swift */,
 			);
@@ -332,6 +335,7 @@
 				24776A8859C5A97E0E9D5750 /* ProfilesSheet.swift in Sources */,
 				6A80E2E5E834861C4EE5B27E /* Provider.swift in Sources */,
 				82E0CB52F1D783F3647E06DC /* ProviderEditor.swift in Sources */,
+				A8F73B31A91F4B54A7C0B861 /* RemoteProviderDiscovery.swift in Sources */,
 				CEB18AC3D9413E8096D3DC00 /* RunConfig.swift in Sources */,
 				C180D26A5AF455800B7C270B /* SavedIndicator.swift in Sources */,
 				78069172E379C5E908E50EA0 /* SessionEventView.swift in Sources */,

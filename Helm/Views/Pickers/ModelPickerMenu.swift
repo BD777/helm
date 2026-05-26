@@ -62,10 +62,12 @@ struct ModelPickerMenu: View {
     }
 
     private func availableProfiles(for session: Session, current: Profile) -> [Profile] {
+        guard let project = store.project(for: session.id) else { return [] }
+        let scoped = store.availableProfiles(for: project.id)
         if session.isDraft {
-            return store.profiles
+            return scoped
         }
-        return store.profiles(for: current.vendor)
+        return scoped.filter { $0.vendor == current.vendor }
     }
 
     private var divider: some View {
