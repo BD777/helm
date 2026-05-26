@@ -470,7 +470,7 @@ private struct ProjectSchedulerView: View {
                     Text(tasks.isEmpty ? "Inbox is empty" : "No active scheduler tasks")
                         .font(.system(size: 13, weight: .semibold))
                     Text(tasks.isEmpty
-                         ? "Drop an idea below. Helm will start anything safe to run and queue blocked work here."
+                         ? "Drop an idea below. Helm will start workers as soon as the basic project requirements are ready."
                          : "Completed work is tucked below; new or imported sessions will appear here when they are running or waiting.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)

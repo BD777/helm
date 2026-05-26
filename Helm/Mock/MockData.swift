@@ -780,11 +780,12 @@ final class AppStore {
         return taskId
     }
 
-    func startSchedulerTask(_ taskId: UUID, projectId: UUID) {
+    @discardableResult
+    func startSchedulerTask(_ taskId: UUID, projectId: UUID) -> Bool {
         let idx = ensureSchedulerStateIndex(for: projectId)
         guard let project = projects.first(where: { $0.id == projectId }),
               let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId })
-        else { return }
+        else { return false }
         guard schedulerStartBlockers(forTaskAt: taskIndex,
                                      schedulerIndex: idx,
                                      project: project).isEmpty else {
@@ -792,13 +793,13 @@ final class AppStore {
                                           schedulerIndex: idx,
                                           project: project)
             scheduleStateSave()
-            return
+            return false
         }
         guard let sessionId = ensureWorkerSession(forTaskAt: taskIndex,
                                                   schedulerIndex: idx,
                                                   projectId: projectId)
-        else { return }
-        guard !isSessionStreaming(sessionId) else { return }
+        else { return false }
+        guard !isSessionStreaming(sessionId) else { return true }
 
         let task = projectSchedulers[idx].tasks[taskIndex]
         let prompt = task.idea
@@ -807,6 +808,7 @@ final class AppStore {
              attachments: [],
              agentPrompt: Self.workerPrompt(for: task),
              sessionId: sessionId)
+        return isSessionStreaming(sessionId)
     }
 
     func openSchedulerTaskSession(_ taskId: UUID, projectId: UUID) {
@@ -849,47 +851,9 @@ final class AppStore {
         case notGitRepository(isRemote: Bool)
         case unknown(isRemote: Bool)
 
-        var defaultResourceDomain: String {
-            switch self {
-            case .singleGitRepo(let root, let isRemote):
-                return "\(isRemote ? "ssh-git" : "git"):\(root)"
-            case .multipleGitRepos(let roots, let isRemote):
-                return "\(isRemote ? "ssh-project" : "project"):\(roots.joined(separator: "|"))"
-            case .notGitRepository(let isRemote):
-                return "\(isRemote ? "ssh-workspace" : "workspace"):non-git"
-            case .unknown(let isRemote):
-                return "\(isRemote ? "ssh-workspace" : "workspace"):unknown"
-            }
-        }
-
-        func gitResourceDomain(for root: String) -> String {
-            "\(isRemote ? "ssh-git" : "git"):\(root)"
-        }
-
         var singleGitRoot: String? {
             if case .singleGitRepo(let root, _) = self { return root }
             return nil
-        }
-
-        var gitRoots: [String] {
-            switch self {
-            case .singleGitRepo(let root, _):
-                return [root]
-            case .multipleGitRepos(let roots, _):
-                return roots
-            case .notGitRepository, .unknown:
-                return []
-            }
-        }
-
-        var isRemote: Bool {
-            switch self {
-            case .singleGitRepo(_, let isRemote),
-                 .multipleGitRepos(_, let isRemote),
-                 .notGitRepository(let isRemote),
-                 .unknown(let isRemote):
-                return isRemote
-            }
         }
 
         var workerNotes: [String] {
@@ -907,47 +871,13 @@ final class AppStore {
                 ]
             case .notGitRepository(let isRemote):
                 return [
-                    "\(isRemote ? "No Git repository was detected for this SSH project" : "This project is not a Git repository"). Helm may run independent inbox work concurrently; name exact files/directories when asking for edits and report conflicts instead of overwriting another worker's changes."
+                    "\(isRemote ? "No Git repository was detected for this SSH project" : "This project is not a Git repository"). Helm may run independent inbox work concurrently; inspect before editing and report conflicts instead of overwriting another worker's changes."
                 ]
             case .unknown(let isRemote):
                 return [
-                    "\(isRemote ? "Helm has not finished discovering this SSH project's Git layout" : "Helm could not determine this project's Git layout"). Proceed concurrently when work is independent, but inspect the workspace before editing and report conflicts."
+                    "\(isRemote ? "Helm has not finished discovering this SSH project's Git layout" : "Helm could not determine this project's Git layout"). Proceed concurrently, inspect the workspace before editing, and report conflicts."
                 ]
             }
-        }
-    }
-
-    private enum ProjectSchedulerResourceProfile: Equatable {
-        case readOnly
-        case explicit(keys: Set<String>)
-        case broad(domain: String)
-        case unknownMutation
-
-        var mayWrite: Bool {
-            self != .readOnly
-        }
-
-        func conflicts(with other: ProjectSchedulerResourceProfile) -> Bool {
-            guard mayWrite, other.mayWrite else { return false }
-            switch (self, other) {
-            case (.broad(let lhs), .broad(let rhs)):
-                return lhs == rhs
-            case (.broad(let domain), .explicit(let keys)),
-                 (.explicit(let keys), .broad(let domain)):
-                return keys.contains { keyOverlaps($0, domain) }
-            case (.broad, .unknownMutation), (.unknownMutation, .broad):
-                return true
-            case (.explicit(let lhs), .explicit(let rhs)):
-                return lhs.contains { left in rhs.contains { keyOverlaps(left, $0) } }
-            case (.unknownMutation, _), (_, .unknownMutation):
-                return false
-            case (.readOnly, _), (_, .readOnly):
-                return false
-            }
-        }
-
-        private func keyOverlaps(_ lhs: String, _ rhs: String) -> Bool {
-            lhs == rhs || lhs.hasPrefix(rhs + "/") || rhs.hasPrefix(lhs + "/")
         }
     }
 
@@ -956,10 +886,12 @@ final class AppStore {
         guard let project = projects.first(where: { $0.id == projectId }) else { return }
 
         var startedAny = false
+        var attemptedTaskIds: Set<UUID> = []
         while true {
             guard let taskIndex = projectSchedulers[schedulerIndex].tasks.indices.first(where: { index in
                 let task = projectSchedulers[schedulerIndex].tasks[index]
                 guard task.phase == .planned,
+                      !attemptedTaskIds.contains(task.id),
                       task.sessionId.map({ !isSessionStreaming($0) }) ?? true
                 else { return false }
                 return schedulerStartBlockers(forTaskAt: index,
@@ -967,11 +899,10 @@ final class AppStore {
                                               project: project).isEmpty
             }) else { break }
             let taskId = projectSchedulers[schedulerIndex].tasks[taskIndex].id
-            startSchedulerTask(taskId, projectId: projectId)
-            startedAny = true
-            guard let refreshedIndex = projectSchedulers[schedulerIndex].tasks.firstIndex(where: { $0.id == taskId }),
-                  schedulerTaskIsActivelyRunning(projectSchedulers[schedulerIndex].tasks[refreshedIndex])
-            else { break }
+            attemptedTaskIds.insert(taskId)
+            if startSchedulerTask(taskId, projectId: projectId) {
+                startedAny = true
+            }
         }
 
         for taskIndex in projectSchedulers[schedulerIndex].tasks.indices {
@@ -996,16 +927,7 @@ final class AppStore {
            !status.isConnected {
             return [task]
         }
-
-        let layout = schedulerWorkspaceLayout(for: project)
-        let taskProfile = Self.resourceProfile(for: task, layout: layout)
-        guard taskProfile.mayWrite else { return [] }
-        return projectSchedulers[schedulerIndex].tasks.filter { other in
-            guard other.id != task.id,
-                  schedulerTaskIsActivelyRunning(other)
-            else { return false }
-            return taskProfile.conflicts(with: Self.resourceProfile(for: other, layout: layout))
-        }
+        return []
     }
 
     private func refreshSchedulerTaskWaitState(taskIndex: Int,
@@ -1024,15 +946,6 @@ final class AppStore {
         } else if case .ssh(_, _, let status) = project.location,
                   !status.isConnected {
             newSummary = "Waiting for SSH connection: \(status.shortLabel)."
-        } else if !blockers.isEmpty {
-            let blockerTitles = blockers
-                .filter { $0.id != task.id }
-                .prefix(2)
-                .map(\.title)
-                .joined(separator: ", ")
-            newSummary = blockerTitles.isEmpty
-                ? "Waiting for a competing workspace change."
-                : "Waiting for competing work on the same resources: \(blockerTitles)."
         } else {
             newSummary = "Waiting to start."
         }
@@ -1045,14 +958,6 @@ final class AppStore {
             projectSchedulers[schedulerIndex].tasks[taskIndex].dependencies = dependencyIds
             projectSchedulers[schedulerIndex].tasks[taskIndex].updatedAt = now
         }
-    }
-
-    private func schedulerTaskIsActivelyRunning(_ task: ProjectSchedulerTask) -> Bool {
-        if let sessionId = task.sessionId,
-           isSessionStreaming(sessionId) {
-            return true
-        }
-        return false
     }
 
     private func ensureWorkerSession(forTaskAt taskIndex: Int,
@@ -1321,178 +1226,6 @@ else:
     print("none")
 """#
 
-    private static func resourceProfile(for task: ProjectSchedulerTask,
-                                        layout: ProjectSchedulerWorkspaceLayout) -> ProjectSchedulerResourceProfile {
-        let idea = task.idea
-        guard ideaLooksMutating(idea) else { return .readOnly }
-        let keys = resourceKeys(in: idea, layout: layout)
-        if !keys.isEmpty {
-            return .explicit(keys: Set(keys))
-        }
-        if ideaLooksBroadMutation(idea) {
-            return .broad(domain: layout.defaultResourceDomain)
-        }
-        return .unknownMutation
-    }
-
-    private static func ideaLooksMutating(_ idea: String) -> Bool {
-        let normalized = idea.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                                      locale: nil)
-            .lowercased()
-        let tokens = [
-            "implement", "fix", "change", "update", "modify", "edit", "remove",
-            "delete", "rename", "refactor", "migrate", "create", "generate",
-            "scaffold", "write", "commit", "push", "merge", "apply", "bump",
-            "upgrade", "install", "add ",
-            "实现", "修复", "修改", "更新", "新增", "添加", "删除", "移除",
-            "重命名", "重构", "迁移", "创建", "生成", "提交", "推送", "合并",
-            "升级", "安装", "写入", "落地", "接入", "封装", "改一下", "改成", "改为"
-        ]
-        return tokens.contains { normalized.contains($0) }
-    }
-
-    private static func ideaLooksBroadMutation(_ idea: String) -> Bool {
-        let normalized = idea.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                                      locale: nil)
-            .lowercased()
-        let tokens = [
-            "whole repo", "entire repo", "whole project", "entire project",
-            "all files", "across the project", "global", "format", "lint --fix",
-            "rename", "refactor", "migrate", "upgrade dependencies", "bump dependencies",
-            "commit", "push", "merge",
-            "整个项目", "整个仓库", "全局", "所有文件", "全部文件", "格式化",
-            "重命名", "重构", "迁移", "依赖", "提交", "推送", "合并"
-        ]
-        return tokens.contains { normalized.contains($0) }
-    }
-
-    private static func resourceKeys(in idea: String,
-                                     layout: ProjectSchedulerWorkspaceLayout) -> [String] {
-        pathMentions(in: idea)
-            .map { normalizeResourceKey($0, layout: layout) }
-            .filter { !$0.isEmpty }
-    }
-
-    private static func pathMentions(in idea: String) -> [String] {
-        var candidates: [String] = []
-        var buffer = ""
-        var insideBackticks = false
-
-        func flush() {
-            let token = sanitizedPathToken(buffer)
-            if isLikelyPathToken(token) {
-                candidates.append(token)
-            }
-            buffer = ""
-        }
-
-        for character in idea {
-            if character == "`" {
-                flush()
-                insideBackticks.toggle()
-                continue
-            }
-            if insideBackticks {
-                buffer.append(character)
-                continue
-            }
-            if character.isWhitespace || pathTokenBoundaryCharacters.contains(character) {
-                flush()
-            } else {
-                buffer.append(character)
-            }
-        }
-        flush()
-
-        var seen: Set<String> = []
-        return candidates.filter { seen.insert($0).inserted }
-    }
-
-    private static let pathTokenBoundaryCharacters = Set<Character>("\"'“”‘’()[]{}<>，。；;：:,")
-
-    private static func sanitizedPathToken(_ raw: String) -> String {
-        let trimCharacters = CharacterSet.whitespacesAndNewlines
-            .union(CharacterSet(charactersIn: "\"'“”‘’()[]{}<>，。；;：:,"))
-        return raw.trimmingCharacters(in: trimCharacters)
-    }
-
-    private static func isLikelyPathToken(_ token: String) -> Bool {
-        guard !token.isEmpty,
-              !token.hasPrefix("http://"),
-              !token.hasPrefix("https://")
-        else { return false }
-        if token.contains("/") { return true }
-        let knownNames: Set<String> = [
-            "Package.swift", "Package.resolved", "Podfile", "Podfile.lock",
-            "Cartfile", "Makefile", "Dockerfile", "Gemfile", "Gemfile.lock",
-            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-            "go.mod", "go.sum", "Cargo.toml", "Cargo.lock"
-        ]
-        if knownNames.contains(token) { return true }
-        let ext = (token as NSString).pathExtension.lowercased()
-        let pathExtensions: Set<String> = [
-            "swift", "m", "mm", "h", "c", "cc", "cpp", "hpp", "py", "rb", "go",
-            "rs", "java", "kt", "kts", "js", "jsx", "ts", "tsx", "css", "scss",
-            "html", "md", "json", "yaml", "yml", "toml", "xml", "plist", "pbxproj",
-            "xcodeproj", "xcworkspace", "sh", "zsh", "bash", "sql", "proto"
-        ]
-        return pathExtensions.contains(ext)
-    }
-
-    private static func normalizeResourceKey(_ rawPath: String,
-                                             layout: ProjectSchedulerWorkspaceLayout) -> String {
-        var collapsed = rawPath
-            .replacingOccurrences(of: "\\", with: "/")
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .joined(separator: "/")
-        guard !collapsed.isEmpty else { return "" }
-
-        var domain = layout.defaultResourceDomain
-        var isAbsolute = rawPath.hasPrefix("/")
-        if isAbsolute {
-            for root in layout.gitRoots {
-                let collapsedRoot = root
-                    .replacingOccurrences(of: "\\", with: "/")
-                    .split(separator: "/", omittingEmptySubsequences: true)
-                    .joined(separator: "/")
-                if collapsed == collapsedRoot {
-                    collapsed = "."
-                    isAbsolute = false
-                    break
-                }
-                if collapsed.hasPrefix(collapsedRoot + "/") {
-                    collapsed = String(collapsed.dropFirst(collapsedRoot.count + 1))
-                    domain = layout.gitResourceDomain(for: root)
-                    isAbsolute = false
-                    break
-                }
-            }
-        } else if layout.gitRoots.count > 1 {
-            for root in layout.gitRoots {
-                let repoName = (root as NSString).lastPathComponent
-                guard !repoName.isEmpty else { continue }
-                if collapsed == repoName {
-                    collapsed = "."
-                    domain = layout.gitResourceDomain(for: root)
-                    break
-                }
-                if collapsed.hasPrefix(repoName + "/") {
-                    collapsed = String(collapsed.dropFirst(repoName.count + 1))
-                    domain = layout.gitResourceDomain(for: root)
-                    break
-                }
-            }
-        }
-
-        let prefix: String
-        if isAbsolute {
-            prefix = layout.isRemote ? "ssh-path" : "path"
-        } else {
-            prefix = layout.isRemote ? "ssh-rel" : "rel"
-        }
-        return "\(domain)/\(prefix):\(collapsed)"
-    }
-
     private static func enclosingGitRoot(for path: String) -> String? {
         var url = URL(fileURLWithPath: path).standardizedFileURL
         let fileManager = FileManager.default
@@ -1575,6 +1308,7 @@ else:
         if let worktreeHint = task.worktreeHint {
             coordination.append("For edits in this Git repository, create or reuse a task-scoped worktree such as \(worktreeHint); do not make broad edits directly in the shared project checkout.")
         }
+        coordination.append("End with a brief recap of what changed, what remains blocked or conflicted, and whether anything needs review or merge.")
         if !coordination.isEmpty {
             prompt += "\n\nProject Inbox coordination:\n"
             prompt += coordination.map { "- \($0)" }.joined(separator: "\n")
