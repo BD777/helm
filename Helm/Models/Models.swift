@@ -453,8 +453,8 @@ enum ProjectSchedulerTaskPhase: String, CaseIterable, Hashable, Codable, Identif
         case .planned: return "Planned"
         case .running: return "Running"
         case .waiting: return "Waiting"
-        case .needsReview: return "Needs You"
-        case .readyToMerge: return "Ready to Merge"
+        case .needsReview: return "Waiting"
+        case .readyToMerge: return "Waiting"
         case .done: return "Done"
         }
     }

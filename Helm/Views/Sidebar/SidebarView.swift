@@ -348,8 +348,8 @@ private struct ProjectSection: View {
                         ProjectInboxRow(
                             project: project,
                             isActive: store.selectedSessionId == nil && store.selectedProject?.id == project.id,
-                            unresolvedCount: store.unresolvedHumanActions(in: project.id).count,
-                            taskCount: store.schedulerTaskCount(in: project.id)
+                            runningCount: store.schedulerRunningTaskCount(in: project.id),
+                            waitingCount: store.schedulerWaitingTaskCount(in: project.id)
                         )
                     }
                     .buttonStyle(.plain)
@@ -844,8 +844,12 @@ private struct RunningSessionIndicator: View {
 private struct ProjectInboxRow: View {
     let project: Project
     let isActive: Bool
-    let unresolvedCount: Int
-    let taskCount: Int
+    let runningCount: Int
+    let waitingCount: Int
+
+    private var taskCount: Int {
+        runningCount + waitingCount
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -858,20 +862,15 @@ private struct ProjectInboxRow: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            if unresolvedCount > 0 {
-                Text("\(unresolvedCount)")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 5)
-                    .frame(height: 16)
-                    .background(Color.red, in: Capsule())
-            } else if taskCount > 0 {
-                Text("\(taskCount)")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .frame(height: 16)
-                    .background(Color.helmHover, in: Capsule())
+            if taskCount > 0 {
+                HStack(spacing: 4) {
+                    if runningCount > 0 {
+                        countPill("\(runningCount)", foreground: .green, background: .green.opacity(0.12))
+                    }
+                    if waitingCount > 0 {
+                        countPill("\(waitingCount)", foreground: .secondary, background: Color.helmHover)
+                    }
+                }
             }
         }
         .padding(.leading, 18)
@@ -885,7 +884,18 @@ private struct ProjectInboxRow: View {
         .help("Project scheduler and inbox for \(project.name)")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(project.name) project inbox")
-        .accessibilityValue(unresolvedCount > 0 ? "\(unresolvedCount) actions need attention" : "")
+        .accessibilityValue(taskCount > 0 ? "\(runningCount) running, \(waitingCount) waiting" : "")
+    }
+
+    private func countPill(_ text: String,
+                           foreground: Color,
+                           background: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 5)
+            .frame(height: 16)
+            .background(background, in: Capsule())
     }
 }
 

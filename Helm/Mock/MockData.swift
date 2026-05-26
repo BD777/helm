@@ -567,12 +567,6 @@ final class AppStore {
         }
     }
 
-    func unresolvedHumanActions(in projectId: UUID) -> [ProjectSchedulerHumanAction] {
-        schedulerState(for: projectId).humanActions
-            .filter { !$0.isResolved }
-            .sorted { $0.createdAt < $1.createdAt }
-    }
-
     func unmanagedProjectSessions(in projectId: UUID) -> [Session] {
         let state = schedulerState(for: projectId)
         var managedSessionIds = Set(state.tasks.compactMap(\.sessionId))
@@ -603,6 +597,18 @@ final class AppStore {
         return tasks.filter { $0.phase == phase }.count
     }
 
+    func schedulerRunningTaskCount(in projectId: UUID) -> Int {
+        schedulerState(for: projectId).tasks.filter { task in
+            task.sessionId.map(isSessionStreaming) ?? false
+        }.count
+    }
+
+    func schedulerWaitingTaskCount(in projectId: UUID) -> Int {
+        schedulerState(for: projectId).tasks.filter { task in
+            task.phase != .done && !(task.sessionId.map(isSessionStreaming) ?? false)
+        }.count
+    }
+
     func setSchedulerProfile(_ profileId: UUID, for projectId: UUID) {
         guard let profile = profile(profileId) else { return }
         let idx = ensureSchedulerStateIndex(for: projectId)
@@ -630,6 +636,7 @@ final class AppStore {
         projectSchedulers[idx].defaultWorkerProfileId = profileId
         projectSchedulers[idx].updatedAt = Date()
         scheduleStateSave()
+        startRunnableSchedulerTasks(projectId: projectId)
     }
 
     func schedulerProfile(for projectId: UUID) -> Profile? {
@@ -644,6 +651,16 @@ final class AppStore {
         return state.defaultWorkerProfileId.flatMap(profile)
             ?? profiles(for: .codex).first
             ?? profiles.first
+    }
+
+    func canStartSchedulerTask(_ taskId: UUID, projectId: UUID) -> Bool {
+        guard let schedulerIndex = projectSchedulers.firstIndex(where: { $0.projectId == projectId }),
+              let project = projects.first(where: { $0.id == projectId }),
+              let taskIndex = projectSchedulers[schedulerIndex].tasks.firstIndex(where: { $0.id == taskId })
+        else { return false }
+        return schedulerStartBlockers(forTaskAt: taskIndex,
+                                      schedulerIndex: schedulerIndex,
+                                      project: project).isEmpty
     }
 
     @discardableResult
@@ -677,7 +694,7 @@ final class AppStore {
                            runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              projects.contains(where: { $0.id == projectId })
+              let project = projects.first(where: { $0.id == projectId })
         else { return nil }
         let workerProfile = workerProfileId.flatMap(profile)
             ?? defaultWorkerProfile(for: projectId)
@@ -685,6 +702,7 @@ final class AppStore {
 
         let now = Date()
         let title = Self.title(for: trimmed, attachments: [], maxLength: 48)
+        let isolation = Self.workspaceIsolation(for: project)
         guard let sessionId = createSession(in: projectId,
                                             title: title,
                                             profileId: workerProfile.id,
@@ -706,30 +724,21 @@ final class AppStore {
             idea: trimmed,
             sessionId: sessionId,
             phase: .planned,
-            summary: "Worker session created. Start it when this task is next in the project plan.",
+            summary: "Waiting to start.",
             dependencies: [],
-            resourceNotes: [],
-            worktreeHint: worktreeHint(for: title, projectId: projectId),
+            resourceNotes: isolation.workerNotes,
+            worktreeHint: worktreeHint(for: title, project: project, isolation: isolation),
             createdAt: now,
             updatedAt: now
-        )
-        let action = ProjectSchedulerHumanAction(
-            id: UUID(),
-            taskId: taskId,
-            kind: .startTask,
-            title: "Start \(title)",
-            detail: "A worker session is ready for this inbox idea.",
-            createdAt: now,
-            resolvedAt: nil
         )
         let idx = ensureSchedulerStateIndex(for: projectId)
         projectSchedulers[idx].inbox.insert(inboxItem, at: 0)
         projectSchedulers[idx].tasks.insert(task, at: 0)
-        projectSchedulers[idx].humanActions.insert(action, at: 0)
         projectSchedulers[idx].defaultWorkerProfileId = workerProfile.id
         projectSchedulers[idx].updatedAt = now
         selectedProjectId = projectId
         scheduleStateSave()
+        startRunnableSchedulerTasks(projectId: projectId)
         return taskId
     }
 
@@ -744,7 +753,7 @@ final class AppStore {
         let now = Date()
         let taskId = UUID()
         let isRunning = isSessionStreaming(sessionId)
-        let phase: ProjectSchedulerTaskPhase = isRunning ? .running : .needsReview
+        let phase: ProjectSchedulerTaskPhase = isRunning ? .running : .waiting
         let task = ProjectSchedulerTask(
             id: taskId,
             title: session.title,
@@ -753,7 +762,7 @@ final class AppStore {
             phase: phase,
             summary: isRunning
                 ? "Existing session is running and is now tracked by the project scheduler."
-                : "Existing session is idle. Review whether it should continue, merge, complete, or be discarded.",
+                : "Waiting for review: existing session is idle but not marked done.",
             dependencies: [],
             resourceNotes: ["Imported from an existing session."],
             worktreeHint: nil,
@@ -761,17 +770,6 @@ final class AppStore {
             updatedAt: now
         )
         projectSchedulers[idx].tasks.insert(task, at: 0)
-        if !isRunning {
-            projectSchedulers[idx].humanActions.insert(ProjectSchedulerHumanAction(
-                id: UUID(),
-                taskId: taskId,
-                kind: .reviewResult,
-                title: "Triage \(session.title)",
-                detail: "This existing session is idle but not marked complete.",
-                createdAt: now,
-                resolvedAt: nil
-            ), at: 0)
-        }
         projectSchedulers[idx].updatedAt = now
         scheduleStateSave()
         return taskId
@@ -779,7 +777,18 @@ final class AppStore {
 
     func startSchedulerTask(_ taskId: UUID, projectId: UUID) {
         let idx = ensureSchedulerStateIndex(for: projectId)
-        guard let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        guard let project = projects.first(where: { $0.id == projectId }),
+              let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId })
+        else { return }
+        guard schedulerStartBlockers(forTaskAt: taskIndex,
+                                     schedulerIndex: idx,
+                                     project: project).isEmpty else {
+            refreshSchedulerTaskWaitState(taskIndex: taskIndex,
+                                          schedulerIndex: idx,
+                                          project: project)
+            scheduleStateSave()
+            return
+        }
         guard let sessionId = ensureWorkerSession(forTaskAt: taskIndex,
                                                   schedulerIndex: idx,
                                                   projectId: projectId)
@@ -787,10 +796,11 @@ final class AppStore {
         guard !isSessionStreaming(sessionId) else { return }
 
         let task = projectSchedulers[idx].tasks[taskIndex]
-        let prompt = Self.workerPrompt(for: task)
+        let prompt = task.idea
         send(prompt,
              displayParts: [.text(prompt)],
              attachments: [],
+             agentPrompt: Self.workerPrompt(for: task),
              sessionId: sessionId)
     }
 
@@ -801,14 +811,6 @@ final class AppStore {
               sessions.contains(where: { $0.id == sessionId })
         else { return }
         selectedSessionId = sessionId
-    }
-
-    func resolveHumanAction(_ actionId: UUID, projectId: UUID) {
-        let idx = ensureSchedulerStateIndex(for: projectId)
-        guard let actionIndex = projectSchedulers[idx].humanActions.firstIndex(where: { $0.id == actionId }) else { return }
-        projectSchedulers[idx].humanActions[actionIndex].resolvedAt = Date()
-        projectSchedulers[idx].updatedAt = Date()
-        scheduleStateSave()
     }
 
     func markSchedulerTask(_ taskId: UUID,
@@ -823,6 +825,9 @@ final class AppStore {
         }
         projectSchedulers[idx].updatedAt = Date()
         scheduleStateSave()
+        if phase == .done {
+            startRunnableSchedulerTasks(projectId: projectId)
+        }
     }
 
     private func ensureSchedulerStateIndex(for projectId: UUID) -> Int {
@@ -831,6 +836,140 @@ final class AppStore {
         }
         projectSchedulers.append(ProjectSchedulerState(projectId: projectId))
         return projectSchedulers.count - 1
+    }
+
+    private enum ProjectSchedulerIsolation {
+        case singleGitRepo(root: String)
+        case multipleGitRepos(roots: [String])
+        case notGitRepository
+        case remoteUnknown
+
+        var serializesWriters: Bool {
+            switch self {
+            case .singleGitRepo, .multipleGitRepos:
+                return false
+            case .notGitRepository, .remoteUnknown:
+                return true
+            }
+        }
+
+        var workerNotes: [String] {
+            switch self {
+            case .singleGitRepo:
+                return []
+            case .multipleGitRepos(let roots):
+                let names = roots
+                    .prefix(4)
+                    .map { ($0 as NSString).lastPathComponent }
+                    .joined(separator: ", ")
+                let suffix = roots.count > 4 ? ", ..." : ""
+                return ["This project contains multiple Git repositories\(names.isEmpty ? "" : " (\(names)\(suffix))"). Identify the repo(s) you need and use task-scoped worktrees for edits."]
+            case .notGitRepository:
+                return ["This project is not a Git repository, so Helm serializes worker starts for it. Avoid broad writes and report conflicting local changes."]
+            case .remoteUnknown:
+                return ["This SSH project's Git layout is unknown from Helm. Verify the remote repo before editing; use a task worktree when available."]
+            }
+        }
+    }
+
+    private func startRunnableSchedulerTasks(projectId: UUID) {
+        let schedulerIndex = ensureSchedulerStateIndex(for: projectId)
+        guard let project = projects.first(where: { $0.id == projectId }) else { return }
+
+        var startedAny = false
+        while true {
+            guard let taskIndex = projectSchedulers[schedulerIndex].tasks.indices.first(where: { index in
+                let task = projectSchedulers[schedulerIndex].tasks[index]
+                guard task.phase == .planned,
+                      task.sessionId.map({ !isSessionStreaming($0) }) ?? true
+                else { return false }
+                return schedulerStartBlockers(forTaskAt: index,
+                                              schedulerIndex: schedulerIndex,
+                                              project: project).isEmpty
+            }) else { break }
+            let taskId = projectSchedulers[schedulerIndex].tasks[taskIndex].id
+            startSchedulerTask(taskId, projectId: projectId)
+            startedAny = true
+            guard let refreshedIndex = projectSchedulers[schedulerIndex].tasks.firstIndex(where: { $0.id == taskId }),
+                  schedulerTaskIsActivelyRunning(projectSchedulers[schedulerIndex].tasks[refreshedIndex])
+            else { break }
+        }
+
+        for taskIndex in projectSchedulers[schedulerIndex].tasks.indices {
+            refreshSchedulerTaskWaitState(taskIndex: taskIndex,
+                                          schedulerIndex: schedulerIndex,
+                                          project: project)
+        }
+        if startedAny || projectSchedulers[schedulerIndex].tasks.contains(where: { $0.phase == .planned }) {
+            projectSchedulers[schedulerIndex].updatedAt = Date()
+            scheduleStateSave()
+        }
+    }
+
+    private func schedulerStartBlockers(forTaskAt taskIndex: Int,
+                                        schedulerIndex: Int,
+                                        project: Project) -> [ProjectSchedulerTask] {
+        guard projectSchedulers[schedulerIndex].tasks.indices.contains(taskIndex) else { return [] }
+        let task = projectSchedulers[schedulerIndex].tasks[taskIndex]
+        guard task.phase == .planned else { return [task] }
+        guard defaultWorkerProfile(for: project.id) != nil else { return [task] }
+        if case .ssh(_, _, let status) = project.location,
+           !status.isConnected {
+            return [task]
+        }
+
+        let isolation = Self.workspaceIsolation(for: project)
+        guard isolation.serializesWriters else { return [] }
+        return projectSchedulers[schedulerIndex].tasks.filter { other in
+            other.id != task.id && schedulerTaskIsActivelyRunning(other)
+        }
+    }
+
+    private func refreshSchedulerTaskWaitState(taskIndex: Int,
+                                               schedulerIndex: Int,
+                                               project: Project) {
+        guard projectSchedulers[schedulerIndex].tasks.indices.contains(taskIndex) else { return }
+        let task = projectSchedulers[schedulerIndex].tasks[taskIndex]
+        guard task.phase == .planned else { return }
+        let blockers = schedulerStartBlockers(forTaskAt: taskIndex,
+                                              schedulerIndex: schedulerIndex,
+                                              project: project)
+        let now = Date()
+        let newSummary: String
+        if defaultWorkerProfile(for: project.id) == nil {
+            newSummary = "Waiting for a worker profile."
+        } else if case .ssh(_, _, let status) = project.location,
+                  !status.isConnected {
+            newSummary = "Waiting for SSH connection: \(status.shortLabel)."
+        } else if !blockers.isEmpty {
+            let blockerTitles = blockers
+                .filter { $0.id != task.id }
+                .prefix(2)
+                .map(\.title)
+                .joined(separator: ", ")
+            newSummary = blockerTitles.isEmpty
+                ? "Waiting for project isolation."
+                : "Waiting for active work to finish: \(blockerTitles)."
+        } else {
+            newSummary = "Waiting to start."
+        }
+        let dependencyIds = blockers
+            .filter { $0.id != task.id }
+            .map(\.id)
+        if projectSchedulers[schedulerIndex].tasks[taskIndex].summary != newSummary ||
+            projectSchedulers[schedulerIndex].tasks[taskIndex].dependencies != dependencyIds {
+            projectSchedulers[schedulerIndex].tasks[taskIndex].summary = newSummary
+            projectSchedulers[schedulerIndex].tasks[taskIndex].dependencies = dependencyIds
+            projectSchedulers[schedulerIndex].tasks[taskIndex].updatedAt = now
+        }
+    }
+
+    private func schedulerTaskIsActivelyRunning(_ task: ProjectSchedulerTask) -> Bool {
+        if let sessionId = task.sessionId,
+           isSessionStreaming(sessionId) {
+            return true
+        }
+        return false
     }
 
     private func ensureWorkerSession(forTaskAt taskIndex: Int,
@@ -871,20 +1010,12 @@ final class AppStore {
         let now = Date()
         let task = projectSchedulers[location.schedulerIndex].tasks[location.taskIndex]
         guard task.phase == .running || task.phase == .waiting || task.phase == .planned else { return }
-        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .needsReview
-        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Worker session finished. Review the transcript and decide the next scheduler step."
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .waiting
+        projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Waiting for review: worker session stopped."
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].updatedAt = now
-        projectSchedulers[location.schedulerIndex].humanActions.insert(ProjectSchedulerHumanAction(
-            id: UUID(),
-            taskId: task.id,
-            kind: .reviewResult,
-            title: "Review \(task.title)",
-            detail: "The worker session has stopped and needs a human check.",
-            createdAt: now,
-            resolvedAt: nil
-        ), at: 0)
         projectSchedulers[location.schedulerIndex].updatedAt = now
         scheduleStateSave()
+        startRunnableSchedulerTasks(projectId: projectSchedulers[location.schedulerIndex].projectId)
     }
 
     private func managedTaskLocation(for sessionId: UUID) -> (schedulerIndex: Int, taskIndex: Int)? {
@@ -915,18 +1046,96 @@ final class AppStore {
 
     private func phaseSortIndex(_ phase: ProjectSchedulerTaskPhase) -> Int {
         switch phase {
-        case .needsReview: return 0
-        case .running: return 1
-        case .waiting: return 2
-        case .planned: return 3
-        case .readyToMerge: return 4
+        case .running: return 0
+        case .planned: return 1
+        case .waiting, .needsReview, .readyToMerge: return 2
         case .done: return 5
         }
     }
 
-    private func worktreeHint(for title: String, projectId: UUID) -> String? {
-        guard let project = projects.first(where: { $0.id == projectId }),
-              case .local(let path) = project.location
+    private static func workspaceIsolation(for project: Project) -> ProjectSchedulerIsolation {
+        switch project.location {
+        case .ssh:
+            return .remoteUnknown
+        case .local(let path):
+            if let root = enclosingGitRoot(for: path) {
+                return .singleGitRepo(root: root)
+            }
+            let nested = nestedGitRepositories(under: path)
+            if nested.count == 1, let root = nested.first {
+                return .singleGitRepo(root: root)
+            }
+            if nested.count > 1 {
+                return .multipleGitRepos(roots: nested)
+            }
+            return .notGitRepository
+        }
+    }
+
+    private static func enclosingGitRoot(for path: String) -> String? {
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        let fileManager = FileManager.default
+        while true {
+            if isGitRepository(at: url.path, fileManager: fileManager) {
+                return url.path
+            }
+            let parent = url.deletingLastPathComponent()
+            if parent.path == url.path { return nil }
+            url = parent
+        }
+    }
+
+    private static func nestedGitRepositories(under path: String,
+                                              maxDepth: Int = 2) -> [String] {
+        let root = URL(fileURLWithPath: path).standardizedFileURL
+        let fileManager = FileManager.default
+        var results: [String] = []
+
+        func walk(_ url: URL, depth: Int) {
+            guard depth <= maxDepth,
+                  let children = try? fileManager.contentsOfDirectory(
+                    at: url,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                  )
+            else { return }
+
+            for child in children {
+                guard (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                      !shouldSkipGitLayoutScanDirectory(child.lastPathComponent)
+                else { continue }
+                if isGitRepository(at: child.path, fileManager: fileManager) {
+                    results.append(child.path)
+                } else {
+                    walk(child, depth: depth + 1)
+                }
+            }
+        }
+
+        walk(root, depth: 0)
+        return results.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+
+    private static func isGitRepository(at path: String,
+                                        fileManager: FileManager = .default) -> Bool {
+        fileManager.fileExists(atPath: (path as NSString).appendingPathComponent(".git"))
+    }
+
+    private static func shouldSkipGitLayoutScanDirectory(_ name: String) -> Bool {
+        let skipped: Set<String> = [
+            "build", "DerivedData", "node_modules", "Pods", ".build",
+            ".swiftpm", ".venv", "venv", "dist", "out"
+        ]
+        return skipped.contains(name)
+    }
+
+    private func worktreeHint(for title: String,
+                              project: Project,
+                              isolation: ProjectSchedulerIsolation) -> String? {
+        guard case .local = project.location,
+              case .singleGitRepo(let root) = isolation
         else { return nil }
         let slug = title
             .lowercased()
@@ -935,22 +1144,24 @@ final class AppStore {
             }
         let compactSlug = String(slug).split(separator: "-").prefix(5).joined(separator: "-")
         guard !compactSlug.isEmpty else { return nil }
-        let parent = (path as NSString).deletingLastPathComponent
-        let projectName = (path as NSString).lastPathComponent
+        let parent = (root as NSString).deletingLastPathComponent
+        let projectName = (root as NSString).lastPathComponent
         return "\(parent)/\(projectName)-worktrees/\(compactSlug)"
     }
 
     private static func workerPrompt(for task: ProjectSchedulerTask) -> String {
-        """
-        You are working on this project task under Helm's project scheduler.
-
-        Task: \(task.title)
-
-        Idea:
-        \(task.idea)
-
-        Keep the implementation scoped to this task. If you need validation resources such as browser, Computer Use, a port, or a worktree merge, state that clearly in your result so the project scheduler can queue the next step.
-        """
+        var prompt = task.idea
+        var coordination: [String] = []
+        coordination.append("Other Project Inbox workers may be running in this project. Inspect the current workspace state before editing, preserve unrelated changes, and stop to report any conflict instead of overwriting another worker's work.")
+        coordination.append(contentsOf: task.resourceNotes)
+        if let worktreeHint = task.worktreeHint {
+            coordination.append("For edits in this Git repository, create or reuse a task-scoped worktree such as \(worktreeHint); do not make broad edits directly in the shared project checkout.")
+        }
+        if !coordination.isEmpty {
+            prompt += "\n\nProject Inbox coordination:\n"
+            prompt += coordination.map { "- \($0)" }.joined(separator: "\n")
+        }
+        return prompt
     }
 
     // MARK: - Project / Session creation
@@ -1010,6 +1221,9 @@ final class AppStore {
         projects[latestIdx].location = projects[latestIdx].location.withSSHStatus(status)
         NSLog("[helm.ssh] probe result host=%@ status=%@",
               host, status.helpText)
+        if status.isConnected {
+            startRunnableSchedulerTasks(projectId: projectId)
+        }
     }
 
     func retrySSHProject(_ projectId: UUID) {
@@ -1404,11 +1618,11 @@ final class AppStore {
                                  runId: run.runId,
                                  assistantId: run.assistantId)
         persistTranscriptSnapshot(for: sessionId)
-        markManagedSessionFinished(sessionId)
         activeRuns[sessionId] = nil
         runningSessionIds.remove(sessionId)
         activeRunStartedAts[sessionId] = nil
         pendingApprovalQueue.removeAll { $0.sessionId == sessionId }
+        markManagedSessionFinished(sessionId)
     }
 
     func respondToApproval(_ decision: AgentApprovalDecision) {

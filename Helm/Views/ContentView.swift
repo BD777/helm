@@ -249,9 +249,7 @@ private struct ProjectSchedulerView: View {
     @State private var looseSessionsExpanded = false
     @State private var completedExpanded = false
 
-    private let phaseColumns: [ProjectSchedulerTaskPhase] = [
-        .planned, .running, .waiting, .needsReview, .readyToMerge
-    ]
+    private let phaseColumns: [ProjectSchedulerTaskPhase] = [.running, .waiting]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -259,7 +257,6 @@ private struct ProjectSchedulerView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    actionQueue
                     schedulerBoard
                     looseSessions
                     completedWork
@@ -306,10 +303,6 @@ private struct ProjectSchedulerView: View {
         store.unmanagedProjectSessions(in: project.id)
     }
 
-    private var unresolvedActions: [ProjectSchedulerHumanAction] {
-        store.unresolvedHumanActions(in: project.id)
-    }
-
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -343,9 +336,8 @@ private struct ProjectSchedulerView: View {
 
             Spacer(minLength: 0)
 
-            metric("\(tasks.count)", "Tasks")
             metric("\(tasks.filter { effectivePhase($0) == .running }.count)", "Running")
-            metric("\(unresolvedActions.count)", "Needs You")
+            metric("\(activeTasks.filter { effectivePhase($0) == .waiting }.count)", "Waiting")
 
             schedulerProfileMenu(profile: store.schedulerProfile(for: project.id),
                                  setProfile: { store.setSchedulerProfile($0.id, for: project.id) })
@@ -470,55 +462,16 @@ private struct ProjectSchedulerView: View {
         }
     }
 
-    @ViewBuilder
-    private var actionQueue: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Needs You", count: unresolvedActions.count)
-            if unresolvedActions.isEmpty {
-                Text("No pending scheduler actions.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                VStack(spacing: 6) {
-                    ForEach(unresolvedActions) { action in
-                        ProjectSchedulerActionRow(
-                            action: action,
-                            task: action.taskId.flatMap { taskId in
-                                tasks.first { $0.id == taskId }
-                            },
-                            onOpen: {
-                                if let taskId = action.taskId {
-                                    store.openSchedulerTaskSession(taskId, projectId: project.id)
-                                }
-                            },
-                            canStart: canStartTasks,
-                            onStart: {
-                                if let taskId = action.taskId {
-                                    store.startSchedulerTask(taskId, projectId: project.id)
-                                }
-                            },
-                            onResolve: {
-                                store.resolveHumanAction(action.id, projectId: project.id)
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-
     private var schedulerBoard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("Scheduler Board", count: activeTasks.count)
+            sectionHeader("Work Queue", count: activeTasks.count)
             if activeTasks.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tasks.isEmpty ? "Inbox is empty" : "No active scheduler tasks")
                         .font(.system(size: 13, weight: .semibold))
                     Text(tasks.isEmpty
-                         ? "Drop an idea below. Helm will create a managed task and a real worker session for it."
-                         : "Completed work is tucked below; new or imported sessions will appear here when they need attention.")
+                         ? "Drop an idea below. Helm will start anything safe to run and queue blocked work here."
+                         : "Completed work is tucked below; new or imported sessions will appear here when they are running or waiting.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -531,17 +484,14 @@ private struct ProjectSchedulerView: View {
                         ProjectSchedulerPhaseColumn(
                             phase: phase,
                             tasks: activeTasks.filter { effectivePhase($0) == phase },
-                            canStartTasks: canStartTasks,
+                            canStart: { task in
+                                canStartTasks && store.canStartSchedulerTask(task.id, projectId: project.id)
+                            },
                             onStart: { task in
                                 store.startSchedulerTask(task.id, projectId: project.id)
                             },
                             onOpen: { task in
                                 store.openSchedulerTaskSession(task.id, projectId: project.id)
-                            },
-                            onReadyToMerge: { task in
-                                store.markSchedulerTask(task.id,
-                                                        projectId: project.id,
-                                                        phase: .readyToMerge)
                             },
                             onDone: { task in
                                 store.markSchedulerTask(task.id,
@@ -698,7 +648,10 @@ private struct ProjectSchedulerView: View {
            store.isSessionStreaming(sessionId) {
             return .running
         }
-        return task.phase
+        if task.phase == .done {
+            return .done
+        }
+        return .waiting
     }
 
     private func submitIdea(workerProfileId: UUID, runConfiguration: SessionRunConfiguration) {
@@ -734,93 +687,12 @@ private struct ProjectSchedulerView: View {
     }
 }
 
-private struct ProjectSchedulerActionRow: View {
-    let action: ProjectSchedulerHumanAction
-    let task: ProjectSchedulerTask?
-    var onOpen: () -> Void
-    var canStart: Bool
-    var onStart: () -> Void
-    var onResolve: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: action.kind.symbolName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.orange)
-                .frame(width: 20, height: 20)
-                .background(Color.orange.opacity(0.12), in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(action.title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .lineLimit(1)
-                Text(action.detail)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            if action.kind == .startTask {
-                Button {
-                    onStart()
-                } label: {
-                    Text(action.kind.displayName)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(canStart ? Color.accentColor : Color.secondary)
-                        .padding(.horizontal, 7)
-                        .frame(height: 20)
-                        .background(Color.helmHover, in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canStart)
-                .help(canStart ? "Start worker session" : "Cannot start yet")
-            } else {
-                Text(action.kind.displayName)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .frame(height: 20)
-                    .background(Color.helmHover, in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
-            }
-            if task?.sessionId != nil {
-                Button {
-                    onOpen()
-                } label: {
-                    Image(systemName: "arrow.right.circle")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .buttonStyle(.plain)
-                .help("Open worker session")
-            }
-            Button {
-                onResolve()
-            } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .help("Resolve action")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                .fill(Color.helmCard)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                        .stroke(Color.orange.opacity(0.28), lineWidth: 1)
-                )
-        )
-    }
-}
-
 private struct ProjectSchedulerPhaseColumn: View {
     let phase: ProjectSchedulerTaskPhase
     let tasks: [ProjectSchedulerTask]
-    let canStartTasks: Bool
+    var canStart: (ProjectSchedulerTask) -> Bool
     var onStart: (ProjectSchedulerTask) -> Void
     var onOpen: (ProjectSchedulerTask) -> Void
-    var onReadyToMerge: (ProjectSchedulerTask) -> Void
     var onDone: (ProjectSchedulerTask) -> Void
 
     var body: some View {
@@ -854,10 +726,10 @@ private struct ProjectSchedulerPhaseColumn: View {
                     ForEach(tasks) { task in
                         ProjectSchedulerTaskCard(
                             task: task,
-                            canStart: canStartTasks,
+                            displayPhase: phase,
+                            canStart: canStart(task),
                             onStart: { onStart(task) },
                             onOpen: { onOpen(task) },
-                            onReadyToMerge: { onReadyToMerge(task) },
                             onDone: { onDone(task) }
                         )
                     }
@@ -879,10 +751,10 @@ private struct ProjectSchedulerPhaseColumn: View {
 
 private struct ProjectSchedulerTaskCard: View {
     let task: ProjectSchedulerTask
+    let displayPhase: ProjectSchedulerTaskPhase
     let canStart: Bool
     var onStart: () -> Void
     var onOpen: () -> Void
-    var onReadyToMerge: () -> Void
     var onDone: () -> Void
 
     var body: some View {
@@ -935,39 +807,31 @@ private struct ProjectSchedulerTaskCard: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        switch task.phase {
-        case .planned, .waiting:
-            Button {
-                onStart()
-            } label: {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 22, height: 22)
+        switch displayPhase {
+        case .planned, .waiting, .needsReview, .readyToMerge:
+            if task.phase == .planned {
+                Button {
+                    onStart()
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canStart)
+                .opacity(canStart ? 1 : 0.45)
+                .help(canStart ? "Start worker session" : "Cannot start yet")
+            } else {
+                Button {
+                    onDone()
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .help("Mark done")
             }
-            .buttonStyle(.plain)
-            .disabled(!canStart)
-            .opacity(canStart ? 1 : 0.45)
-            .help(canStart ? "Start worker session" : "Cannot start yet")
-        case .needsReview:
-            Button {
-                onReadyToMerge()
-            } label: {
-                Image(systemName: "arrow.triangle.merge")
-                    .font(.system(size: 10, weight: .medium))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .help("Mark ready to merge")
-        case .readyToMerge:
-            Button {
-                onDone()
-            } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .help("Mark done")
         case .running:
             ProgressView()
                 .controlSize(.small)
