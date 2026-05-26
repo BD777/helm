@@ -520,6 +520,7 @@ struct ProjectSchedulerTask: Identifiable, Hashable, Codable {
     let id: UUID
     var title: String
     var idea: String
+    var displayParts: [Part]? = nil
     var sessionId: UUID?
     var phase: ProjectSchedulerTaskPhase
     var summary: String

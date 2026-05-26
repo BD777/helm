@@ -11,23 +11,12 @@ struct ComposerView: View {
     @State private var pickerOpen: Bool = false
     @State private var attachments: [ImageAttachment] = []
     @State private var selectedSkills: [ComposerSkill] = []
-    @State private var skillInsertionRequest: ComposerSkillInsertionRequest?
     @State private var draftSessionId: UUID?
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
     @State private var footerWidth: CGFloat = 0
-    @State private var skills: [ComposerSkill] = []
-    @State private var isRefreshingSkills = false
-    @State private var skillRefreshToken = 0
-    @State private var skillCatalogSignature: String?
-    @State private var skillCatalogWatcher: SkillCatalogWatcher?
-    @State private var skillWatchSignature: String?
-    @State private var slashFilteredSkills: [ComposerSkill] = []
-    @State private var slashHighlightedId: String?
-    @State private var slashScrollTargetId: String?
-    @State private var slashContext: ComposerSlashContext?
-    @State private var slashSuppressedSignature: String?
+    @State private var composerInteractionResetRequest = 0
     @State private var activeBuiltinAction: BuiltinAction.Kind?
     @State private var goalActionActive = false
 
@@ -45,16 +34,12 @@ struct ComposerView: View {
         .background(Color.helmChatBg)
         .onAppear {
             loadDraft(for: store.selectedSessionId)
-            refreshSkillsAsync(force: true)
-            configureSkillCatalogWatcher()
             installPasteMonitor()
             requestComposerFocus()
         }
         .onChange(of: store.selectedSessionId) { _, newSessionId in
             saveCurrentDraft()
             loadDraft(for: newSessionId)
-            refreshSkillsAsync(force: true)
-            configureSkillCatalogWatcher()
             activeBuiltinAction = nil
             requestComposerFocus()
         }
@@ -66,14 +51,7 @@ struct ComposerView: View {
         .onChange(of: externalFocusRequest) { _, _ in
             requestComposerFocus()
         }
-        .onChange(of: currentSkillCatalogContext?.signature) { _, _ in
-            refreshSkillsAsync(force: true)
-            configureSkillCatalogWatcher()
-        }
         .onDisappear {
-            skillCatalogWatcher?.invalidate()
-            skillCatalogWatcher = nil
-            skillWatchSignature = nil
             removePasteMonitor()
         }
     }
@@ -96,64 +74,43 @@ struct ComposerView: View {
     }
 
     private var box: some View {
-        VStack(spacing: 0) {
-            if !attachments.isEmpty {
-                attachmentRow
+        SkillAwareComposerBox(
+            text: $text,
+            skillChips: $selectedSkills,
+            placeholder: composerPlaceholder,
+            minLines: 2,
+            maxLines: 11,
+            focusRequest: focusRequest,
+            resetRequest: composerInteractionResetRequest,
+            menuWidthSource: footerWidth,
+            textTopPadding: attachments.isEmpty ? 8 : 6,
+            skillProfile: selectedProfile,
+            skillProject: selectedProject,
+            onSlashActivityChange: { isActive in
+                if isActive {
+                    activeBuiltinAction = nil
+                }
+            },
+            onSend: sendIfPossible,
+            topContent: {
+                if !attachments.isEmpty {
+                    attachmentRow
+                }
+            },
+            accessoryOverlay: { slashMenuVisible in
+                if let activeBuiltinAction, !slashMenuVisible {
+                    let height = builtinActionPanelHeight(for: activeBuiltinAction)
+                    BuiltinActionPanel(
+                        kind: activeBuiltinAction,
+                        onClose: closeBuiltinActionPanel
+                    )
+                    .frame(width: builtinActionPanelWidth, height: height)
+                    .offset(x: 0, y: -(height + 8))
+                    .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
+                    .zIndex(9)
+                }
             }
-            ComposerTextView(
-                text: $text,
-                skillChips: $selectedSkills,
-                placeholder: composerPlaceholder,
-                minLines: 2,
-                maxLines: 11,
-                focusRequest: focusRequest,
-                skillInsertionRequest: skillInsertionRequest,
-                onKeyDown: handleComposerKeyDown,
-                onTextCommand: handleComposerTextCommand,
-                onSlashContextChange: handleSlashContextChange,
-                onSend: sendIfPossible
-            )
-            .padding(.horizontal, 10)
-            .padding(.top, attachments.isEmpty ? 8 : 6)
-            .padding(.bottom, 8)
-        }
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
-                .fill(Color.helmCard)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
-                        .stroke(Color.helmBorderStrong, lineWidth: 1)
-                )
         )
-        .overlay(alignment: .topLeading) {
-            if slashMenuVisible {
-                SlashSkillMenu(
-                    skills: slashFilteredSkills,
-                    isLoading: isRefreshingSkills && slashFilteredSkills.isEmpty,
-                    highlightedId: currentSlashHighlight,
-                    scrollTargetId: slashScrollTargetId,
-                    query: slashQuery ?? "",
-                    onHover: { slashHighlightedId = $0 },
-                    onSelect: insertSkillCommand
-                )
-                .frame(width: slashMenuWidth, height: slashMenuHeight)
-                .offset(x: 0, y: -(slashMenuHeight + 8))
-                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
-                .zIndex(10)
-            }
-            if let activeBuiltinAction, !slashMenuVisible {
-                let height = builtinActionPanelHeight(for: activeBuiltinAction)
-                BuiltinActionPanel(
-                    kind: activeBuiltinAction,
-                    onClose: closeBuiltinActionPanel
-                )
-                .frame(width: builtinActionPanelWidth, height: height)
-                .offset(x: 0, y: -(height + 8))
-                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
-                .zIndex(9)
-            }
-        }
-        .animation(.easeOut(duration: 0.10), value: slashMenuVisible)
         .animation(.easeOut(duration: 0.10), value: activeBuiltinAction)
         .animation(.easeOut(duration: 0.10), value: goalActionActive)
     }
@@ -246,15 +203,15 @@ struct ComposerView: View {
     }
 
     private func composedPrompt() -> String {
-        Self.serializeComposerText(text,
-                                   skillChips: selectedSkills,
-                                   vendor: selectedVendor)
+        ComposerPromptSerializer.serialize(text,
+                                           skillChips: selectedSkills,
+                                           vendor: selectedVendor)
     }
 
     private func composerDisplayParts() -> [Part] {
-        Self.displayPartsForComposerText(text,
-                                         skillChips: selectedSkills,
-                                         fallbackText: composedPrompt())
+        ComposerPromptSerializer.displayParts(text,
+                                              skillChips: selectedSkills,
+                                              fallbackText: composedPrompt())
     }
 
     private var selectedVendor: Vendor {
@@ -270,359 +227,10 @@ struct ComposerView: View {
         return store.project(for: session.id)
     }
 
-    private var currentSkillCatalogContext: ComposerSkillCatalog.Context? {
-        guard let profile = selectedProfile,
-              let project = selectedProject
-        else { return nil }
-
-        let sshHost: String?
-        if case .ssh(let host, _, _) = project.location {
-            sshHost = host
-        } else {
-            sshHost = nil
-        }
-        return ComposerSkillCatalog.Context(
-            vendor: profile.vendor,
-            projectPath: project.location.pathString,
-            sshHost: sshHost,
-            configRoot: profile.configRoot
-        )
-    }
-
-    private static func serializeComposerText(_ text: String,
-                                              skillChips: [ComposerSkill],
-                                              vendor: Vendor) -> String {
-        var output = ""
-        var skillIndex = 0
-        for character in text {
-            if String(character) == ComposerTextView.attachmentPlaceholder,
-               skillIndex < skillChips.count {
-                output += skillCommand(for: skillChips[skillIndex], vendor: vendor)
-                skillIndex += 1
-            } else {
-                output.append(character)
-            }
-        }
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func skillCommand(for skill: ComposerSkill, vendor: Vendor) -> String {
-        switch vendor {
-        case .claude:
-            return "/\(skill.name)"
-        case .codex:
-            return "$\(skill.name)"
-        }
-    }
-
     private static func promptWithGoalAction(_ prompt: String) -> String {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "/goal" }
         return "/goal \(trimmed)"
-    }
-
-    private static func displayPartsForComposerText(_ text: String,
-                                                    skillChips: [ComposerSkill],
-                                                    fallbackText: String) -> [Part] {
-        guard text.contains(ComposerTextView.attachmentPlaceholder),
-              !skillChips.isEmpty
-        else {
-            return fallbackText.isEmpty ? [] : [.text(fallbackText)]
-        }
-
-        var segments: [SkillTextSegment] = []
-        var textBuffer = ""
-        var skillIndex = 0
-
-        func flushText() {
-            guard !textBuffer.isEmpty else { return }
-            segments.append(.text(textBuffer))
-            textBuffer = ""
-        }
-
-        for character in text {
-            if String(character) == ComposerTextView.attachmentPlaceholder,
-               skillIndex < skillChips.count {
-                flushText()
-                segments.append(.skill(skillChips[skillIndex].name))
-                skillIndex += 1
-            } else {
-                textBuffer.append(character)
-            }
-        }
-        flushText()
-        trimOuterWhitespace(in: &segments)
-        return segments.isEmpty ? [] : [.skillText(segments)]
-    }
-
-    private static func trimOuterWhitespace(in segments: inout [SkillTextSegment]) {
-        while let first = segments.first,
-              first.skillName == nil,
-              (first.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            segments.removeFirst()
-        }
-        if let first = segments.first,
-           first.skillName == nil,
-           let text = first.text {
-            segments[0] = .text(trimLeadingWhitespace(text))
-        }
-
-        while let last = segments.last,
-              last.skillName == nil,
-              (last.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            segments.removeLast()
-        }
-        if let last = segments.last,
-           last.skillName == nil,
-           let text = last.text {
-            segments[segments.count - 1] = .text(trimTrailingWhitespace(text))
-        }
-    }
-
-    private static func trimLeadingWhitespace(_ value: String) -> String {
-        String(value.drop(while: { $0.isWhitespace }))
-    }
-
-    private static func trimTrailingWhitespace(_ value: String) -> String {
-        var result = value
-        while result.last?.isWhitespace == true {
-            result.removeLast()
-        }
-        return result
-    }
-
-    // MARK: - Slash skill picker
-
-    private var slashQuery: String? {
-        slashContext?.query
-    }
-
-    private var slashMenuVisible: Bool {
-        guard let slashContext else { return false }
-        return slashSuppressedSignature != slashContext.signature
-    }
-
-    private var currentSlashHighlight: String? {
-        if let slashHighlightedId,
-           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
-            return slashHighlightedId
-        }
-        return slashFilteredSkills.first?.id
-    }
-
-    private var slashMenuWidth: CGFloat {
-        guard footerWidth > 0 else { return 560 }
-        return min(560, max(300, footerWidth))
-    }
-
-    private var slashMenuHeight: CGFloat {
-        let visibleRows = max(1, min(6, slashFilteredSkills.count))
-        return CGFloat(visibleRows * 54 + 41)
-    }
-
-    private func refreshSkillsAsync(force: Bool = false) {
-        guard let context = currentSkillCatalogContext else {
-            skills = []
-            updateSlashResults()
-            return
-        }
-        guard force || skillCatalogSignature != context.signature || skills.isEmpty else { return }
-        skillRefreshToken += 1
-        let token = skillRefreshToken
-        skillCatalogSignature = context.signature
-        isRefreshingSkills = true
-
-        Task.detached(priority: .userInitiated) {
-            let loadedSkills = await ComposerSkillCatalog.load(context: context)
-            await MainActor.run {
-                guard token == skillRefreshToken else { return }
-                skills = loadedSkills
-                isRefreshingSkills = false
-
-                if let slashContext,
-                   let skill = exactSkillMatch(for: slashContext) {
-                    requestSkillInsertion(skill)
-                }
-                updateSlashResults()
-            }
-        }
-    }
-
-    private func configureSkillCatalogWatcher() {
-        guard let context = currentSkillCatalogContext else {
-            skillCatalogWatcher?.invalidate()
-            skillCatalogWatcher = nil
-            skillWatchSignature = nil
-            return
-        }
-
-        let roots = ComposerSkillCatalog.watchRoots(context: context)
-        let signature = SkillCatalogWatcher.signature(for: roots)
-        guard signature != skillWatchSignature else { return }
-
-        skillCatalogWatcher?.invalidate()
-        skillWatchSignature = signature
-        skillCatalogWatcher = SkillCatalogWatcher(roots: roots) {
-            skillCatalogSignature = nil
-            skillWatchSignature = nil
-            refreshSkillsAsync(force: true)
-            configureSkillCatalogWatcher()
-        }
-    }
-
-    private func handleSlashContextChange(_ context: ComposerSlashContext?) {
-        let oldContext = slashContext
-        slashContext = context
-        if context != nil {
-            activeBuiltinAction = nil
-        }
-        if oldContext?.signature != context?.signature {
-            slashHighlightedId = nil
-            slashScrollTargetId = nil
-        }
-        if slashSuppressedSignature != context?.signature {
-            slashSuppressedSignature = nil
-        }
-        if context != nil && oldContext == nil {
-            refreshSkillsAsync()
-        }
-        if let context,
-           let skill = exactSkillMatch(for: context) {
-            requestSkillInsertion(skill)
-            return
-        }
-        updateSlashResults()
-    }
-
-    private func updateSlashResults() {
-        guard let query = slashQuery else {
-            if !slashFilteredSkills.isEmpty {
-                slashFilteredSkills = []
-            }
-            syncSlashHighlight()
-            return
-        }
-
-        let filtered: [ComposerSkill]
-        if query.isEmpty {
-            filtered = skills
-        } else {
-            filtered = skills
-                .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
-                    guard let score = skill.matchScore(for: query) else { return nil }
-                    return (skill, score)
-                }
-                .sorted {
-                    if $0.score != $1.score {
-                        return $0.score < $1.score
-                    }
-                    return $0.skill.name.localizedCaseInsensitiveCompare($1.skill.name) == .orderedAscending
-                }
-                .map(\.skill)
-        }
-
-        if slashFilteredSkills.map(\.id) != filtered.map(\.id) {
-            slashFilteredSkills = filtered
-        }
-        syncSlashHighlight()
-    }
-
-    private func syncSlashHighlight() {
-        guard slashQuery != nil else {
-            slashHighlightedId = nil
-            slashScrollTargetId = nil
-            return
-        }
-        if let slashHighlightedId,
-           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
-            return
-        }
-        let firstId = slashFilteredSkills.first?.id
-        slashHighlightedId = firstId
-        slashScrollTargetId = firstId
-    }
-
-    private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags.isEmpty else { return false }
-
-        guard slashMenuVisible else { return false }
-
-        switch event.keyCode {
-        case 125:
-            moveSlashHighlight(by: 1)
-            return true
-        case 126:
-            moveSlashHighlight(by: -1)
-            return true
-        case 36, 76:
-            return insertHighlightedSkillCommand()
-        case 48:
-            return insertHighlightedSkillCommand()
-        case 53:
-            slashSuppressedSignature = slashContext?.signature
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func handleComposerTextCommand(_ command: ComposerTextCommand) -> Bool {
-        guard slashMenuVisible else { return false }
-        switch command {
-        case .moveUp:
-            moveSlashHighlight(by: -1)
-            return true
-        case .moveDown:
-            moveSlashHighlight(by: 1)
-            return true
-        case .accept:
-            return insertHighlightedSkillCommand()
-        case .complete:
-            return insertHighlightedSkillCommand()
-        case .cancel:
-            slashSuppressedSignature = slashContext?.signature
-            return true
-        }
-    }
-
-    private func moveSlashHighlight(by offset: Int) {
-        let list = slashFilteredSkills
-        guard !list.isEmpty else { return }
-        let current = currentSlashHighlight.flatMap { id in
-            list.firstIndex { $0.id == id }
-        } ?? 0
-        let nextId = list[(current + offset + list.count) % list.count].id
-        slashHighlightedId = nextId
-        slashScrollTargetId = nextId
-    }
-
-    private func insertHighlightedSkillCommand() -> Bool {
-        guard let id = currentSlashHighlight,
-              let skill = slashFilteredSkills.first(where: { $0.id == id })
-        else { return false }
-        insertSkillCommand(skill)
-        return true
-    }
-
-    private func insertSkillCommand(_ skill: ComposerSkill) {
-        requestSkillInsertion(skill)
-    }
-
-    private func requestSkillInsertion(_ skill: ComposerSkill) {
-        skillInsertionRequest = ComposerSkillInsertionRequest(skill: skill)
-        requestComposerFocus()
-        resetSlashPickerState()
-    }
-
-    private func resetSlashPickerState() {
-        slashHighlightedId = nil
-        slashScrollTargetId = nil
-        slashSuppressedSignature = nil
-        slashContext = nil
-        if !slashFilteredSkills.isEmpty {
-            slashFilteredSkills = []
-        }
     }
 
     // MARK: - Built-in actions
@@ -670,7 +278,7 @@ struct ComposerView: View {
     }
 
     private func selectBuiltinAction(_ kind: BuiltinAction.Kind) {
-        resetSlashPickerState()
+        composerInteractionResetRequest &+= 1
         switch kind {
         case .compact:
             sendBuiltinCommand(BuiltinAction.definition(for: kind, vendor: selectedVendor).commandName)
@@ -741,18 +349,6 @@ struct ComposerView: View {
             .help("Send the next prompt to \(selectedVendor.displayName) as /goal")
             .accessibilityLabel("Goal action active")
         }
-    }
-
-    private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
-        guard !context.query.isEmpty else { return nil }
-        let exactMatches = skills.filter { $0.searchName == context.query }
-        guard exactMatches.count == 1,
-              let skill = exactMatches.first
-        else { return nil }
-        if skills.contains(where: { $0.searchName != context.query && $0.searchName.hasPrefix(context.query) }) {
-            return nil
-        }
-        return skill
     }
 
     private var attachmentRow: some View {
@@ -1297,20 +893,514 @@ struct ComposerView: View {
 
     private func loadDraft(for sessionId: UUID?) {
         draftSessionId = sessionId
-        resetSlashPickerState()
+        composerInteractionResetRequest &+= 1
         guard let sessionId, let draft = drafts[sessionId] else {
             text = ""
             attachments = []
             selectedSkills = []
             goalActionActive = false
-            updateSlashResults()
             return
         }
         text = draft.text
         attachments = draft.attachments
         selectedSkills = draft.selectedSkills
         goalActionActive = draft.goalActionActive
+    }
+}
+
+enum ComposerPromptSerializer {
+    static func serialize(_ text: String,
+                          skillChips: [ComposerSkill],
+                          vendor: Vendor) -> String {
+        var output = ""
+        var skillIndex = 0
+        for character in text {
+            if String(character) == ComposerTextView.attachmentPlaceholder,
+               skillIndex < skillChips.count {
+                output += skillCommand(for: skillChips[skillIndex], vendor: vendor)
+                skillIndex += 1
+            } else {
+                output.append(character)
+            }
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func displayParts(_ text: String,
+                             skillChips: [ComposerSkill],
+                             fallbackText: String) -> [Part] {
+        guard text.contains(ComposerTextView.attachmentPlaceholder),
+              !skillChips.isEmpty
+        else {
+            return fallbackText.isEmpty ? [] : [.text(fallbackText)]
+        }
+
+        var segments: [SkillTextSegment] = []
+        var textBuffer = ""
+        var skillIndex = 0
+
+        func flushText() {
+            guard !textBuffer.isEmpty else { return }
+            segments.append(.text(textBuffer))
+            textBuffer = ""
+        }
+
+        for character in text {
+            if String(character) == ComposerTextView.attachmentPlaceholder,
+               skillIndex < skillChips.count {
+                flushText()
+                segments.append(.skill(skillChips[skillIndex].name))
+                skillIndex += 1
+            } else {
+                textBuffer.append(character)
+            }
+        }
+        flushText()
+        trimOuterWhitespace(in: &segments)
+        return segments.isEmpty ? [] : [.skillText(segments)]
+    }
+
+    private static func skillCommand(for skill: ComposerSkill, vendor: Vendor) -> String {
+        switch vendor {
+        case .claude:
+            return "/\(skill.name)"
+        case .codex:
+            return "$\(skill.name)"
+        }
+    }
+
+    private static func trimOuterWhitespace(in segments: inout [SkillTextSegment]) {
+        while let first = segments.first,
+              first.skillName == nil,
+              (first.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.removeFirst()
+        }
+        if let first = segments.first,
+           first.skillName == nil,
+           let text = first.text {
+            segments[0] = .text(trimLeadingWhitespace(text))
+        }
+
+        while let last = segments.last,
+              last.skillName == nil,
+              (last.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.removeLast()
+        }
+        if let last = segments.last,
+           last.skillName == nil,
+           let text = last.text {
+            segments[segments.count - 1] = .text(trimTrailingWhitespace(text))
+        }
+    }
+
+    private static func trimLeadingWhitespace(_ value: String) -> String {
+        String(value.drop(while: { $0.isWhitespace }))
+    }
+
+    private static func trimTrailingWhitespace(_ value: String) -> String {
+        var result = value
+        while result.last?.isWhitespace == true {
+            result.removeLast()
+        }
+        return result
+    }
+}
+
+struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
+    @Binding var text: String
+    @Binding var skillChips: [ComposerSkill]
+
+    let placeholder: String
+    let minLines: Int
+    let maxLines: Int
+    let focusRequest: Int
+    let resetRequest: Int
+    let menuWidthSource: CGFloat
+    let textTopPadding: CGFloat
+    let skillProfile: Profile?
+    let skillProject: Project?
+    let onSlashActivityChange: (Bool) -> Void
+    let onSend: () -> Void
+    let topContent: () -> TopContent
+    let accessoryOverlay: (Bool) -> AccessoryOverlay
+
+    @State private var localFocusRequest = 0
+    @State private var skillInsertionRequest: ComposerSkillInsertionRequest?
+    @State private var skills: [ComposerSkill] = []
+    @State private var isRefreshingSkills = false
+    @State private var skillRefreshToken = 0
+    @State private var skillCatalogSignature: String?
+    @State private var skillCatalogWatcher: SkillCatalogWatcher?
+    @State private var skillWatchSignature: String?
+    @State private var slashFilteredSkills: [ComposerSkill] = []
+    @State private var slashHighlightedId: String?
+    @State private var slashScrollTargetId: String?
+    @State private var slashContext: ComposerSlashContext?
+    @State private var slashSuppressedSignature: String?
+
+    init(text: Binding<String>,
+         skillChips: Binding<[ComposerSkill]>,
+         placeholder: String,
+         minLines: Int,
+         maxLines: Int,
+         focusRequest: Int,
+         resetRequest: Int,
+         menuWidthSource: CGFloat,
+         textTopPadding: CGFloat,
+         skillProfile: Profile?,
+         skillProject: Project?,
+         onSlashActivityChange: @escaping (Bool) -> Void,
+         onSend: @escaping () -> Void,
+         @ViewBuilder topContent: @escaping () -> TopContent,
+         @ViewBuilder accessoryOverlay: @escaping (Bool) -> AccessoryOverlay) {
+        self._text = text
+        self._skillChips = skillChips
+        self.placeholder = placeholder
+        self.minLines = minLines
+        self.maxLines = maxLines
+        self.focusRequest = focusRequest
+        self.resetRequest = resetRequest
+        self.menuWidthSource = menuWidthSource
+        self.textTopPadding = textTopPadding
+        self.skillProfile = skillProfile
+        self.skillProject = skillProject
+        self.onSlashActivityChange = onSlashActivityChange
+        self.onSend = onSend
+        self.topContent = topContent
+        self.accessoryOverlay = accessoryOverlay
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            topContent()
+            ComposerTextView(
+                text: $text,
+                skillChips: $skillChips,
+                placeholder: placeholder,
+                minLines: minLines,
+                maxLines: maxLines,
+                focusRequest: focusRequest &+ localFocusRequest,
+                skillInsertionRequest: skillInsertionRequest,
+                onKeyDown: handleComposerKeyDown,
+                onTextCommand: handleComposerTextCommand,
+                onSlashContextChange: handleSlashContextChange,
+                onSend: onSend
+            )
+            .padding(.horizontal, 10)
+            .padding(.top, textTopPadding)
+            .padding(.bottom, 8)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
+                .fill(Color.helmCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
+                        .stroke(Color.helmBorderStrong, lineWidth: 1)
+                )
+        )
+        .overlay(alignment: .topLeading) {
+            if slashMenuVisible {
+                SlashSkillMenu(
+                    skills: slashFilteredSkills,
+                    isLoading: isRefreshingSkills && slashFilteredSkills.isEmpty,
+                    highlightedId: currentSlashHighlight,
+                    scrollTargetId: slashScrollTargetId,
+                    query: slashQuery ?? "",
+                    onHover: { slashHighlightedId = $0 },
+                    onSelect: insertSkillCommand
+                )
+                .frame(width: slashMenuWidth, height: slashMenuHeight)
+                .offset(x: 0, y: -(slashMenuHeight + 8))
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .bottomLeading)))
+                .zIndex(10)
+            }
+            accessoryOverlay(slashMenuVisible)
+        }
+        .animation(.easeOut(duration: 0.10), value: slashMenuVisible)
+        .onAppear {
+            refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
+        }
+        .onChange(of: currentSkillCatalogContext?.signature) { _, _ in
+            resetSlashPickerState()
+            refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
+        }
+        .onChange(of: resetRequest) { _, _ in
+            resetSlashPickerState()
+        }
+        .onDisappear {
+            skillCatalogWatcher?.invalidate()
+            skillCatalogWatcher = nil
+            skillWatchSignature = nil
+        }
+    }
+
+    private var currentSkillCatalogContext: ComposerSkillCatalog.Context? {
+        guard let profile = skillProfile,
+              let project = skillProject
+        else { return nil }
+
+        let sshHost: String?
+        if case .ssh(let host, _, _) = project.location {
+            sshHost = host
+        } else {
+            sshHost = nil
+        }
+        return ComposerSkillCatalog.Context(
+            vendor: profile.vendor,
+            projectPath: project.location.pathString,
+            sshHost: sshHost,
+            configRoot: profile.configRoot
+        )
+    }
+
+    private var slashQuery: String? {
+        slashContext?.query
+    }
+
+    private var slashMenuVisible: Bool {
+        guard let slashContext else { return false }
+        return slashSuppressedSignature != slashContext.signature
+    }
+
+    private var currentSlashHighlight: String? {
+        if let slashHighlightedId,
+           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
+            return slashHighlightedId
+        }
+        return slashFilteredSkills.first?.id
+    }
+
+    private var slashMenuWidth: CGFloat {
+        guard menuWidthSource > 0 else { return 560 }
+        return min(560, max(300, menuWidthSource))
+    }
+
+    private var slashMenuHeight: CGFloat {
+        let visibleRows = max(1, min(6, slashFilteredSkills.count))
+        return CGFloat(visibleRows * 54 + 41)
+    }
+
+    private func refreshSkillsAsync(force: Bool = false) {
+        guard let context = currentSkillCatalogContext else {
+            skills = []
+            isRefreshingSkills = false
+            updateSlashResults()
+            return
+        }
+        guard force || skillCatalogSignature != context.signature || skills.isEmpty else { return }
+        skillRefreshToken += 1
+        let token = skillRefreshToken
+        skillCatalogSignature = context.signature
+        isRefreshingSkills = true
+
+        Task.detached(priority: .userInitiated) {
+            let loadedSkills = await ComposerSkillCatalog.load(context: context)
+            await MainActor.run {
+                guard token == skillRefreshToken else { return }
+                skills = loadedSkills
+                isRefreshingSkills = false
+
+                if let slashContext,
+                   let skill = exactSkillMatch(for: slashContext) {
+                    requestSkillInsertion(skill)
+                }
+                updateSlashResults()
+            }
+        }
+    }
+
+    private func configureSkillCatalogWatcher() {
+        guard let context = currentSkillCatalogContext else {
+            skillCatalogWatcher?.invalidate()
+            skillCatalogWatcher = nil
+            skillWatchSignature = nil
+            return
+        }
+
+        let roots = ComposerSkillCatalog.watchRoots(context: context)
+        let signature = SkillCatalogWatcher.signature(for: roots)
+        guard signature != skillWatchSignature else { return }
+
+        skillCatalogWatcher?.invalidate()
+        skillWatchSignature = signature
+        skillCatalogWatcher = SkillCatalogWatcher(roots: roots) {
+            skillCatalogSignature = nil
+            skillWatchSignature = nil
+            refreshSkillsAsync(force: true)
+            configureSkillCatalogWatcher()
+        }
+    }
+
+    private func handleSlashContextChange(_ context: ComposerSlashContext?) {
+        let oldContext = slashContext
+        slashContext = context
+        if oldContext == nil, context != nil {
+            onSlashActivityChange(true)
+        } else if oldContext != nil, context == nil {
+            onSlashActivityChange(false)
+        }
+        if oldContext?.signature != context?.signature {
+            slashHighlightedId = nil
+            slashScrollTargetId = nil
+        }
+        if slashSuppressedSignature != context?.signature {
+            slashSuppressedSignature = nil
+        }
+        if context != nil && oldContext == nil {
+            refreshSkillsAsync()
+        }
+        if let context,
+           let skill = exactSkillMatch(for: context) {
+            requestSkillInsertion(skill)
+            return
+        }
         updateSlashResults()
+    }
+
+    private func updateSlashResults() {
+        guard let query = slashQuery else {
+            if !slashFilteredSkills.isEmpty {
+                slashFilteredSkills = []
+            }
+            syncSlashHighlight()
+            return
+        }
+
+        let filtered: [ComposerSkill]
+        if query.isEmpty {
+            filtered = skills
+        } else {
+            filtered = skills
+                .compactMap { skill -> (skill: ComposerSkill, score: ComposerSkillMatchScore)? in
+                    guard let score = skill.matchScore(for: query) else { return nil }
+                    return (skill, score)
+                }
+                .sorted {
+                    if $0.score != $1.score {
+                        return $0.score < $1.score
+                    }
+                    return $0.skill.name.localizedCaseInsensitiveCompare($1.skill.name) == .orderedAscending
+                }
+                .map(\.skill)
+        }
+
+        if slashFilteredSkills.map(\.id) != filtered.map(\.id) {
+            slashFilteredSkills = filtered
+        }
+        syncSlashHighlight()
+    }
+
+    private func syncSlashHighlight() {
+        guard slashQuery != nil else {
+            slashHighlightedId = nil
+            slashScrollTargetId = nil
+            return
+        }
+        if let slashHighlightedId,
+           slashFilteredSkills.contains(where: { $0.id == slashHighlightedId }) {
+            return
+        }
+        let firstId = slashFilteredSkills.first?.id
+        slashHighlightedId = firstId
+        slashScrollTargetId = firstId
+    }
+
+    private func handleComposerKeyDown(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.isEmpty else { return false }
+
+        guard slashMenuVisible else { return false }
+
+        switch event.keyCode {
+        case 125:
+            moveSlashHighlight(by: 1)
+            return true
+        case 126:
+            moveSlashHighlight(by: -1)
+            return true
+        case 36, 76:
+            return insertHighlightedSkillCommand()
+        case 48:
+            return insertHighlightedSkillCommand()
+        case 53:
+            slashSuppressedSignature = slashContext?.signature
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func handleComposerTextCommand(_ command: ComposerTextCommand) -> Bool {
+        guard slashMenuVisible else { return false }
+        switch command {
+        case .moveUp:
+            moveSlashHighlight(by: -1)
+            return true
+        case .moveDown:
+            moveSlashHighlight(by: 1)
+            return true
+        case .accept:
+            return insertHighlightedSkillCommand()
+        case .complete:
+            return insertHighlightedSkillCommand()
+        case .cancel:
+            slashSuppressedSignature = slashContext?.signature
+            return true
+        }
+    }
+
+    private func moveSlashHighlight(by offset: Int) {
+        let list = slashFilteredSkills
+        guard !list.isEmpty else { return }
+        let current = currentSlashHighlight.flatMap { id in
+            list.firstIndex { $0.id == id }
+        } ?? 0
+        let nextId = list[(current + offset + list.count) % list.count].id
+        slashHighlightedId = nextId
+        slashScrollTargetId = nextId
+    }
+
+    private func insertHighlightedSkillCommand() -> Bool {
+        guard let id = currentSlashHighlight,
+              let skill = slashFilteredSkills.first(where: { $0.id == id })
+        else { return false }
+        insertSkillCommand(skill)
+        return true
+    }
+
+    private func insertSkillCommand(_ skill: ComposerSkill) {
+        requestSkillInsertion(skill)
+    }
+
+    private func requestSkillInsertion(_ skill: ComposerSkill) {
+        skillInsertionRequest = ComposerSkillInsertionRequest(skill: skill)
+        localFocusRequest &+= 1
+        resetSlashPickerState()
+    }
+
+    private func resetSlashPickerState() {
+        slashHighlightedId = nil
+        slashScrollTargetId = nil
+        slashSuppressedSignature = nil
+        slashContext = nil
+        if !slashFilteredSkills.isEmpty {
+            slashFilteredSkills = []
+        }
+        onSlashActivityChange(false)
+    }
+
+    private func exactSkillMatch(for context: ComposerSlashContext) -> ComposerSkill? {
+        guard !context.query.isEmpty else { return nil }
+        let exactMatches = skills.filter { $0.searchName == context.query }
+        guard exactMatches.count == 1,
+              let skill = exactMatches.first
+        else { return nil }
+        if skills.contains(where: { $0.searchName != context.query && $0.searchName.hasPrefix(context.query) }) {
+            return nil
+        }
+        return skill
     }
 }
 

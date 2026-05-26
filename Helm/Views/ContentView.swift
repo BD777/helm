@@ -654,18 +654,21 @@ private struct ProjectSchedulerView: View {
         return .waiting
     }
 
-    private func submitIdea(workerProfileId: UUID, runConfiguration: SessionRunConfiguration) {
-        let trimmed = ideaText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard store.submitProjectIdea(trimmed,
+    private func submitIdea(prompt: String,
+                            displayParts: [Part],
+                            workerProfileId: UUID,
+                            runConfiguration: SessionRunConfiguration) -> Bool {
+        guard store.submitProjectIdea(prompt,
+                                      displayParts: displayParts,
                                       projectId: project.id,
                                       workerProfileId: workerProfileId,
                                       runConfiguration: runConfiguration) != nil else {
             store.showProfilesSheet = true
-            return
+            return false
         }
         ideaText = ""
         composerFocusRequest &+= 1
+        return true
     }
 
     private func displayPath(for project: Project) -> String {
@@ -853,7 +856,7 @@ private struct ProjectSchedulerComposer: View {
     let project: Project
     @Binding var text: String
     let focusRequest: Int
-    var onSubmit: (UUID, SessionRunConfiguration) -> Void
+    var onSubmit: (String, [Part], UUID, SessionRunConfiguration) -> Bool
 
     @State private var skillChips: [ComposerSkill] = []
     @State private var pickerOpen = false
@@ -861,9 +864,22 @@ private struct ProjectSchedulerComposer: View {
     @State private var runConfiguration = SessionRunConfiguration()
     @State private var footerWidth: CGFloat = 0
     @State private var localFocusRequest = 0
+    @State private var composerInteractionResetRequest = 0
 
-    private var hasText: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private var composedPrompt: String {
+        ComposerPromptSerializer.serialize(text,
+                                           skillChips: skillChips,
+                                           vendor: selectedProfile?.vendor ?? .codex)
+    }
+
+    private var displayParts: [Part] {
+        ComposerPromptSerializer.displayParts(text,
+                                              skillChips: skillChips,
+                                              fallbackText: composedPrompt)
+    }
+
+    private var hasComposerContent: Bool {
+        !composedPrompt.isEmpty
     }
 
     private var selectedProfile: Profile? {
@@ -880,7 +896,7 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var canSubmit: Bool {
-        hasText && selectedProfile != nil && sshSendBlockReason == nil
+        hasComposerContent && selectedProfile != nil && sshSendBlockReason == nil
     }
 
     var body: some View {
@@ -893,6 +909,8 @@ private struct ProjectSchedulerComposer: View {
         .onAppear { syncSelectedProfileIfNeeded(resetConfiguration: true) }
         .onChange(of: project.id) { _, _ in
             workerProfileId = nil
+            skillChips = []
+            composerInteractionResetRequest &+= 1
             syncSelectedProfileIfNeeded(resetConfiguration: true)
         }
         .onChange(of: store.profiles.map(\.id)) { _, _ in
@@ -901,29 +919,26 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var box: some View {
-        ComposerTextView(
+        SkillAwareComposerBox(
             text: $text,
             skillChips: $skillChips,
             placeholder: "Drop an idea into this project inbox...",
             minLines: 2,
             maxLines: 11,
             focusRequest: focusRequest &+ localFocusRequest,
-            skillInsertionRequest: nil,
-            onKeyDown: { _ in false },
-            onTextCommand: { _ in false },
-            onSlashContextChange: { _ in },
-            onSend: submitIfPossible
-        )
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .background(
-            RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
-                .fill(Color.helmCard)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusLarge)
-                        .stroke(Color.helmBorderStrong, lineWidth: 1)
-                )
+            resetRequest: composerInteractionResetRequest,
+            menuWidthSource: footerWidth,
+            textTopPadding: 8,
+            skillProfile: selectedProfile,
+            skillProject: project,
+            onSlashActivityChange: { _ in },
+            onSend: submitIfPossible,
+            topContent: {
+                EmptyView()
+            },
+            accessoryOverlay: { _ in
+                EmptyView()
+            }
         )
     }
 
@@ -1290,7 +1305,11 @@ private struct ProjectSchedulerComposer: View {
         syncSelectedProfileIfNeeded(resetConfiguration: false)
         guard canSubmit, let selectedProfile else { return }
         store.setDefaultWorkerProfile(selectedProfile.id, for: project.id)
-        onSubmit(selectedProfile.id, runConfiguration)
+        if onSubmit(composedPrompt, displayParts, selectedProfile.id, runConfiguration) {
+            text = ""
+            skillChips = []
+            composerInteractionResetRequest &+= 1
+        }
     }
 }
 
