@@ -796,7 +796,8 @@ struct ProfilesSheet: View {
                     header
                     localProfilesSection
                     createdProfilesSection
-                    remoteProvidersSection
+                    remoteClaudeConfigSection
+                    remoteCodexConfigSection
                     SavedIndicator(source: .state)
                 }
                 .padding(20)
@@ -895,8 +896,36 @@ struct ProfilesSheet: View {
             }
         }
 
-        private var remoteProvidersSection: some View {
-            section("Detected remote providers") {
+        private var remoteClaudeConfigSection: some View {
+            section("Remote Claude config") {
+                if isScanning {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Checking \(host)'s Claude Code installation")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let scanError {
+                    Label(scanError, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.red)
+                } else if let claude = scan?.claude {
+                    remoteClaudeBlock(claude)
+                } else if scan != nil {
+                    Text("No Claude Code CLI found on this SSH host.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Scan this SSH host to list its Claude Code subscription profile.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        private var remoteCodexConfigSection: some View {
+            section("Remote Codex config") {
                 if isScanning {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -910,7 +939,7 @@ struct ProfilesSheet: View {
                         .font(.system(size: 11.5))
                         .foregroundStyle(.red)
                 } else if let scan, scan.providers.isEmpty {
-                    Text("No Codex providers found in \(scan.configPath).")
+                    Text("No Codex config found in \(scan.configPath).")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 } else if let scan {
@@ -920,15 +949,89 @@ struct ProfilesSheet: View {
                         }
                     }
                 } else {
-                    Text("Scan this SSH host to list its Codex providers and profiles.")
+                    Text("Scan this SSH host to list its Codex config provider and profiles.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
             }
         }
 
+        private func remoteClaudeBlock(_ candidate: RemoteClaudeProviderCandidate) -> some View {
+            let exists = createdProfiles.contains { profile in
+                profile.vendor == .claude &&
+                profile.commandPath == candidate.commandPath &&
+                store.model(profile.primaryModelId)?.providerModelId == RemoteClaudeProviderCandidate.defaultModelId
+            }
+            return VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Provider")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 8) {
+                        VendorBadge(vendor: .claude).frame(width: 16, height: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(candidate.displayName)
+                                .font(.system(size: 12.5, weight: .semibold))
+                            Text(candidate.authDescription)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                    }
+                    infoRow("Command", candidate.commandPath)
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: exists ? "checkmark.circle.fill" : "plus.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(exists ? .green : .secondary)
+                        .frame(width: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Default Claude Code config")
+                            .font(.system(size: 12))
+                        Text("Uses remote subscription and model defaults")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button(exists ? "Created" : "Create profile") {
+                        _ = store.createRemoteClaudeProfile(candidate,
+                                                            forSSHProject: project.id)
+                    }
+                    .controlSize(.small)
+                    .disabled(exists)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
         private func remoteProviderBlock(_ provider: RemoteCodexProviderCandidate) -> some View {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 9) {
+                remoteProviderSummary(provider)
+                if provider.profiles.isEmpty {
+                    Text("No profiles reference this provider.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Profiles")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        ForEach(provider.profiles) { candidate in
+                            remoteProfileCandidateRow(candidate, provider: provider)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+
+        private func remoteProviderSummary(_ provider: RemoteCodexProviderCandidate) -> some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Provider")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
                 HStack(spacing: 8) {
                     VendorBadge(vendor: .codex).frame(width: 16, height: 16)
                     VStack(alignment: .leading, spacing: 1) {
@@ -944,26 +1047,14 @@ struct ProfilesSheet: View {
                 if !provider.baseURL.isEmpty {
                     infoRow("Base URL", provider.baseURL)
                 }
-                if provider.profiles.isEmpty {
-                    Text("No profiles reference this provider.")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    VStack(alignment: .leading, spacing: 5) {
-                        ForEach(provider.profiles) { candidate in
-                            remoteProfileCandidateRow(candidate, provider: provider)
-                        }
-                    }
-                }
             }
-            .padding(.vertical, 2)
         }
 
         private func remoteProfileCandidateRow(_ candidate: RemoteCodexProfileCandidate,
                                                provider: RemoteCodexProviderCandidate) -> some View {
             let exists = createdProfiles.contains { profile in
                 profile.delegateVendorProfile == candidate.profileName &&
-                store.provider(profile.providerId)?.remoteCodexProviderKey == provider.key &&
+                store.provider(profile.providerId)?.remoteCodexProviderKey == provider.remoteConfigKey &&
                 store.model(profile.primaryModelId)?.providerModelId == candidate.modelId
             }
             return HStack(spacing: 8) {
@@ -981,7 +1072,7 @@ struct ProfilesSheet: View {
                         .truncationMode(.middle)
                 }
                 Spacer()
-                Button(exists ? "Created" : "Create") {
+                Button(exists ? "Created" : "Create profile") {
                     _ = store.createRemoteCodexProfile(candidate,
                                                        provider: provider,
                                                        forSSHProject: project.id)
@@ -1008,8 +1099,14 @@ struct ProfilesSheet: View {
             if profile.sshProjectId == nil {
                 return "\(profile.vendor.displayName) · \(model)"
             }
+            if profile.vendor == .claude {
+                return "Remote Claude Code · \(model)"
+            }
             if let delegate = profile.delegateVendorProfile, !delegate.isEmpty {
                 return "Remote Codex profile \(delegate) · \(model)"
+            }
+            if store.provider(profile.providerId)?.remoteCodexProviderKey == nil {
+                return "Remote Codex default · \(model)"
             }
             return "Remote Codex provider · \(model)"
         }

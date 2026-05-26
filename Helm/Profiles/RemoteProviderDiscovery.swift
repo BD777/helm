@@ -8,10 +8,15 @@ struct RemoteCodexProviderCandidate: Identifiable, Hashable, Sendable {
     var requiresOpenAIAuth: Bool
     var profiles: [RemoteCodexProfileCandidate]
 
-    var id: String { key }
+    var id: String { key.isEmpty ? "__default__" : key }
 
     var displayName: String {
-        name.isEmpty ? key : name
+        if !name.isEmpty { return name }
+        return key.isEmpty ? "Default Codex provider" : key
+    }
+
+    var remoteConfigKey: String? {
+        key.isEmpty ? nil : key
     }
 }
 
@@ -25,7 +30,8 @@ struct RemoteCodexProfileCandidate: Identifiable, Hashable, Sendable {
     var sandboxMode: Profile.SandboxMode?
 
     var id: String {
-        [profileName ?? "__default__", providerKey, modelId].joined(separator: "|")
+        [profileName ?? "__default__", providerKey.isEmpty ? "__default_provider__" : providerKey, modelId]
+            .joined(separator: "|")
     }
 
     var displayName: String {
@@ -36,9 +42,27 @@ struct RemoteCodexProfileCandidate: Identifiable, Hashable, Sendable {
     }
 }
 
+struct RemoteClaudeProviderCandidate: Identifiable, Hashable, Sendable {
+    static let defaultModelId = "remote default"
+
+    var commandPath: String
+    var hasSubscriptionAuth: Bool
+
+    var id: String { commandPath }
+
+    var displayName: String {
+        hasSubscriptionAuth ? "Claude Code subscription" : "Claude Code"
+    }
+
+    var authDescription: String {
+        hasSubscriptionAuth ? "Subscription OAuth" : "Remote Claude Code default auth"
+    }
+}
+
 struct RemoteCodexProviderScan: Sendable {
     var providers: [RemoteCodexProviderCandidate]
     var configPath: String
+    var claude: RemoteClaudeProviderCandidate?
 }
 
 enum RemoteCodexProviderDiscovery {
@@ -48,11 +72,14 @@ enum RemoteCodexProviderDiscovery {
             throw SSHRemoteError(message: "Missing SSH host.")
         }
 
-        let text = try await readRemoteCodexConfig(host: host)
+        async let codexText = readRemoteCodexConfig(host: host)
+        async let claude = detectRemoteClaude(host: host)
+        let text = try await codexText
         let providers = RemoteCodexConfigParser.parse(text)
         return RemoteCodexProviderScan(
             providers: providers,
-            configPath: "~/.codex/config.toml"
+            configPath: "~/.codex/config.toml",
+            claude: try await claude
         )
     }
 
@@ -90,6 +117,66 @@ enum RemoteCodexProviderDiscovery {
                 throw SSHRemoteError(message: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
             }
             return String(data: data, encoding: .utf8) ?? ""
+        }.value
+    }
+
+    private static func detectRemoteClaude(host: String) async throws -> RemoteClaudeProviderCandidate? {
+        try await Task.detached(priority: .utility) {
+            let command = """
+            export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+            claude_path="$(command -v claude 2>/dev/null || true)"
+            if [ -z "$claude_path" ]; then exit 0; fi
+            printf '__HELM_CLAUDE_PATH__%s\\n' "$claude_path"
+            if [ -r "$HOME/.claude/.credentials.json" ] && grep -q '"claudeAiOauth"' "$HOME/.claude/.credentials.json"; then
+              printf '__HELM_CLAUDE_AUTH__subscription\\n'
+            else
+              printf '__HELM_CLAUDE_AUTH__default\\n'
+            fi
+            """
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: command,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+
+            do {
+                try proc.run()
+            } catch {
+                throw SSHRemoteError(message: error.localizedDescription)
+            }
+            proc.waitUntilExit()
+
+            let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            guard proc.terminationStatus == 0 else {
+                let reason = lastNonEmptyLine(stderrText)
+                throw SSHRemoteError(message: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
+            }
+
+            var commandPath = ""
+            var hasSubscriptionAuth = false
+            for line in stdoutText.split(separator: "\n").map(String.init) {
+                if line.hasPrefix("__HELM_CLAUDE_PATH__") {
+                    commandPath = String(line.dropFirst("__HELM_CLAUDE_PATH__".count))
+                } else if line == "__HELM_CLAUDE_AUTH__subscription" {
+                    hasSubscriptionAuth = true
+                }
+            }
+            guard !commandPath.isEmpty else { return nil }
+            return RemoteClaudeProviderCandidate(
+                commandPath: commandPath,
+                hasSubscriptionAuth: hasSubscriptionAuth
+            )
         }.value
     }
 
@@ -188,12 +275,17 @@ private enum RemoteCodexConfigParser {
             )
         }
 
-        let defaultProviderKey = topLevel["model_provider"]
+        let hasTopLevelCodexConfig = topLevel["model"] != nil ||
+            topLevel["model_reasoning_effort"] != nil ||
+            topLevel["service_tier"] != nil ||
+            topLevel["sandbox_mode"] != nil
+        let defaultProviderKey = topLevel["model_provider"] ?? (hasTopLevelCodexConfig ? "" : nil)
         let defaultModel = topLevel["model"]
         var candidatesByProvider: [String: [RemoteCodexProfileCandidate]] = [:]
 
         if let defaultProviderKey {
-            let provider = providers[defaultProviderKey] ?? ProviderDraft(key: defaultProviderKey, name: defaultProviderKey)
+            let fallbackName = defaultProviderKey.isEmpty ? "Default Codex provider" : defaultProviderKey
+            let provider = providers[defaultProviderKey] ?? ProviderDraft(key: defaultProviderKey, name: fallbackName)
             candidatesByProvider[defaultProviderKey, default: []].append(
                 RemoteCodexProfileCandidate(
                     profileName: nil,
@@ -218,7 +310,8 @@ private enum RemoteCodexConfigParser {
 
         for (_, profile) in profiles {
             guard let providerKey = profile.providerKey ?? defaultProviderKey else { continue }
-            let provider = providers[providerKey] ?? ProviderDraft(key: providerKey, name: providerKey)
+            let fallbackName = providerKey.isEmpty ? "Default Codex provider" : providerKey
+            let provider = providers[providerKey] ?? ProviderDraft(key: providerKey, name: fallbackName)
             candidatesByProvider[providerKey, default: []].append(
                 RemoteCodexProfileCandidate(
                     profileName: profile.name,

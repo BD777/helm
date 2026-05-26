@@ -359,11 +359,12 @@ final class AppStore {
                                   forSSHProject projectId: UUID) -> UUID? {
         guard projects.contains(where: { $0.id == projectId && $0.location.isSSH }) else { return nil }
 
+        let remoteProviderKey = provider.remoteConfigKey
         let providerId: UUID
         if let existing = providers.first(where: {
             $0.sshProjectId == projectId &&
             $0.vendor == .codex &&
-            $0.remoteCodexProviderKey == provider.key
+            $0.remoteCodexProviderKey == remoteProviderKey
         }) {
             providerId = existing.id
         } else {
@@ -372,7 +373,7 @@ final class AppStore {
                 name: provider.displayName,
                 vendor: .codex,
                 sshProjectId: projectId,
-                remoteCodexProviderKey: provider.key,
+                remoteCodexProviderKey: remoteProviderKey,
                 baseURL: provider.baseURL,
                 authToken: "",
                 wireAPI: provider.wireAPI,
@@ -426,6 +427,85 @@ final class AppStore {
             serviceTier: candidate.serviceTier,
             sandboxMode: candidate.sandboxMode,
             delegateVendorProfile: candidate.profileName
+        )
+        profiles.append(profile)
+        scheduleProfilesSave()
+        return profile.id
+    }
+
+    @discardableResult
+    func createRemoteClaudeProfile(_ candidate: RemoteClaudeProviderCandidate,
+                                   forSSHProject projectId: UUID) -> UUID? {
+        guard projects.contains(where: { $0.id == projectId && $0.location.isSSH }) else { return nil }
+
+        let providerId: UUID
+        if let existing = providers.first(where: {
+            $0.sshProjectId == projectId &&
+            $0.vendor == .claude &&
+            $0.name == candidate.displayName
+        }) {
+            providerId = existing.id
+        } else {
+            let provider = Provider(
+                id: UUID(),
+                name: candidate.displayName,
+                vendor: .claude,
+                sshProjectId: projectId,
+                remoteCodexProviderKey: nil,
+                baseURL: "",
+                authToken: "",
+                wireAPI: .responses,
+                httpHeaders: [:],
+                requiresOpenAIAuth: false,
+                extraEnv: [:]
+            )
+            providers.append(provider)
+            providerId = provider.id
+        }
+
+        let modelId: UUID
+        if let existing = models.first(where: {
+            $0.providerId == providerId &&
+            $0.providerModelId == RemoteClaudeProviderCandidate.defaultModelId
+        }) {
+            modelId = existing.id
+        } else {
+            let model = Model(
+                id: UUID(),
+                providerId: providerId,
+                providerModelId: RemoteClaudeProviderCandidate.defaultModelId,
+                alias: "Default Claude Code model"
+            )
+            models.append(model)
+            modelId = model.id
+        }
+
+        if let existing = profiles.first(where: {
+            $0.sshProjectId == projectId &&
+            $0.vendor == .claude &&
+            $0.providerId == providerId &&
+            $0.primaryModelId == modelId &&
+            $0.commandPath == candidate.commandPath
+        }) {
+            return existing.id
+        }
+
+        let profile = Profile(
+            id: UUID(),
+            name: candidate.displayName,
+            vendor: .claude,
+            sshProjectId: projectId,
+            providerId: providerId,
+            primaryModelId: modelId,
+            commandPath: candidate.commandPath,
+            configRoot: nil,
+            opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
+            subagentModelId: nil,
+            autoCompactWindow: nil,
+            reasoningEffort: nil,
+            serviceTier: nil,
+            sandboxMode: nil,
+            delegateVendorProfile: nil
         )
         profiles.append(profile)
         scheduleProfilesSave()

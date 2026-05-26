@@ -40,6 +40,7 @@ enum SSHRemote {
     static let executable = "/usr/bin/ssh"
     private static let pathPrefix = [
         "$HOME/.local/bin",
+        "$HOME/.npm-global/bin",
         "/opt/homebrew/bin",
         "/usr/local/bin",
         "/usr/bin",

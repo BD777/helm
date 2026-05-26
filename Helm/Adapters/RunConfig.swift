@@ -87,16 +87,24 @@ enum RunConfigResolver {
         if !provider.authToken.isEmpty {
             env["ANTHROPIC_AUTH_TOKEN"] = provider.authToken
         }
-        env["ANTHROPIC_MODEL"] = primary.providerModelId
+        let usesRemoteDefaultModel = isRemoteProject &&
+            primary.providerModelId == RemoteClaudeProviderCandidate.defaultModelId
+        if !usesRemoteDefaultModel {
+            env["ANTHROPIC_MODEL"] = primary.providerModelId
+        }
 
         let opus   = lookupModel(profile.opusModelId,   models: models) ?? primary
         let sonnet = lookupModel(profile.sonnetModelId, models: models) ?? primary
         let haiku  = lookupModel(profile.haikuModelId,  models: models) ?? primary
-        env["ANTHROPIC_DEFAULT_OPUS_MODEL"]   = opus.providerModelId
-        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = sonnet.providerModelId
-        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]  = haiku.providerModelId
+        if !usesRemoteDefaultModel {
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"]   = opus.providerModelId
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = sonnet.providerModelId
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]  = haiku.providerModelId
+        }
 
-        if let sub = lookupModel(profile.subagentModelId, models: models) {
+        if usesRemoteDefaultModel {
+            // Leave Claude Code's remote subscription/default model selection intact.
+        } else if let sub = lookupModel(profile.subagentModelId, models: models) {
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = sub.providerModelId
         } else {
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = primary.providerModelId
@@ -111,7 +119,7 @@ enum RunConfigResolver {
 
         // CLI args: --model is also passed for clarity; CLI honors env first
         // but the explicit flag makes the chosen model visible in `ps`.
-        var args = ["--model", primary.providerModelId]
+        var args: [String] = usesRemoteDefaultModel ? [] : ["--model", primary.providerModelId]
         args.append(contentsOf: ["--permission-mode",
                                  session.claudePermissionMode.rawValue])
         args.append(contentsOf: ["--effort", session.claudeEffort.rawValue])
@@ -159,6 +167,12 @@ enum RunConfigResolver {
                   let remoteProviderKey = provider.remoteCodexProviderKey,
                   !remoteProviderKey.isEmpty {
             args.append(contentsOf: ["-c", "model_provider=\(tomlStringLiteral(remoteProviderKey))"])
+            appendCodexRuntimeConfig(profile: profile,
+                                     session: session,
+                                     primary: primary,
+                                     to: &args)
+        } else if isRemoteProject,
+                  profile.sshProjectId != nil {
             appendCodexRuntimeConfig(profile: profile,
                                      session: session,
                                      primary: primary,
