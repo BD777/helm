@@ -323,6 +323,8 @@ struct SidebarView: View {
 
 private struct ProjectSection: View {
     @Environment(AppStore.self) private var store
+    private static let collapsedSessionLimit = 4
+
     let project: Project
     let searchText: String
     let isDragging: Bool
@@ -336,6 +338,8 @@ private struct ProjectSection: View {
     @State private var pendingRename: SidebarSession?
     @State private var renameTitle = ""
     @State private var pendingProjectDelete = false
+    @State private var sessionsExpanded = false
+    @State private var sessionsToggleHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -354,7 +358,7 @@ private struct ProjectSection: View {
                     }
                     .buttonStyle(.plain)
                 }
-                ForEach(visibleSessions) { s in
+                ForEach(displayedSessions) { s in
                     let isRunning = store.isSessionStreaming(s.id)
                     Button {
                         store.selectedSessionId = s.id
@@ -397,6 +401,9 @@ private struct ProjectSection: View {
                         }
                         .disabled(isRunning)
                     }
+                }
+                if showsSessionOverflowToggle {
+                    sessionOverflowToggle
                 }
             }
         }
@@ -465,10 +472,29 @@ private struct ProjectSection: View {
         !normalizedSearch.isEmpty
     }
 
-    private var visibleSessions: [SidebarSession] {
+    private var filteredSessions: [SidebarSession] {
         let sessions = store.sidebarSessions(in: project.id)
         guard isFiltering, !projectMatchesSearch else { return sessions }
         return sessions.filter(sessionMatchesSearch)
+    }
+
+    private var displayedSessions: [SidebarSession] {
+        guard limitsSessions else { return filteredSessions }
+        return Array(filteredSessions.prefix(Self.collapsedSessionLimit))
+    }
+
+    private var limitsSessions: Bool {
+        !isFiltering &&
+        !sessionsExpanded &&
+        filteredSessions.count > Self.collapsedSessionLimit
+    }
+
+    private var showsSessionOverflowToggle: Bool {
+        !isFiltering && filteredSessions.count > Self.collapsedSessionLimit
+    }
+
+    private var hiddenSessionCount: Int {
+        max(0, filteredSessions.count - Self.collapsedSessionLimit)
     }
 
     private var showSchedulerRow: Bool {
@@ -564,6 +590,32 @@ private struct ProjectSection: View {
             }
         }
         .simultaneousGesture(projectDragGesture)
+    }
+
+    private var sessionOverflowToggle: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.14)) {
+                sessionsExpanded.toggle()
+            }
+        } label: {
+            Text(sessionsExpanded ? "Show less" : "Show more")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.leading, 44)
+                .padding(.trailing, 8)
+                .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                        .fill(sessionsToggleHovered ? Color.helmHover : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { sessionsToggleHovered = $0 }
+        .help(sessionsExpanded ? "Hide older sessions" : "Show \(hiddenSessionCount) more sessions")
+        .accessibilityLabel(sessionsExpanded ? "Show fewer sessions" : "Show more sessions")
+        .accessibilityValue(sessionsExpanded ? "" : "\(hiddenSessionCount) hidden")
     }
 
     private var projectDragGesture: some Gesture {
