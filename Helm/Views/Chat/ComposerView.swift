@@ -131,6 +131,9 @@ struct ComposerView: View {
         let vendor = store.selectedSession
             .flatMap { store.profile($0.profileId) }?
             .vendor.displayName ?? "agent"
+        if store.selectedSessionIsStreaming {
+            return "Guide \(vendor) while it runs (\(messageSendShortcut.glyph) to send)"
+        }
         return "Message \(vendor) (⌘V to attach image · \(messageSendShortcut.glyph) to send)"
     }
 
@@ -139,25 +142,28 @@ struct ComposerView: View {
     }
 
     private var canSubmit: Bool {
-        if store.selectedSessionIsStreaming { return true }
         if selectedSSHSendBlockReason != nil { return false }
+        if store.selectedSessionIsStreaming {
+            return hasComposerContent && store.selectedSessionCanAppendPrompt
+        }
         return hasComposerContent
     }
 
     private var submitButtonTitle: String {
-        if store.selectedSessionIsStreaming { return "Stop" }
         return "Send"
     }
 
     private var submitButtonColor: Color {
-        if store.selectedSessionIsStreaming { return .red }
-        if selectedSSHSendBlockReason != nil { return .secondary.opacity(0.45) }
+        if !canSubmit { return .secondary.opacity(0.45) }
         return .accentColor
     }
 
     private var submitButtonHelp: String {
-        if store.selectedSessionIsStreaming { return "Stop current response" }
         if let reason = selectedSSHSendBlockReason { return reason }
+        if store.selectedSessionIsStreaming && !store.selectedSessionCanAppendPrompt {
+            return "This agent cannot accept more input while running"
+        }
+        if store.selectedSessionIsStreaming { return "Send guidance to the running response" }
         return "Send message"
     }
 
@@ -176,11 +182,10 @@ struct ComposerView: View {
     }
 
     private func sendIfPossible() {
-        if store.selectedSessionIsStreaming {
-            store.cancelStreaming()
+        if !hasComposerContent || selectedSSHSendBlockReason != nil {
             return
         }
-        if !hasComposerContent || selectedSSHSendBlockReason != nil {
+        if store.selectedSessionIsStreaming && !store.selectedSessionCanAppendPrompt {
             return
         }
         let toSend = composedPrompt()
@@ -193,6 +198,12 @@ struct ComposerView: View {
                            vendor: selectedVendor,
                            appliedAt: Date())
             : nil
+        let accepted = store.send(toSend,
+                                  displayParts: displayParts,
+                                  attachments: toSendAttachments,
+                                  agentPrompt: agentPrompt,
+                                  preUserEvents: goalEvent.map { [$0] } ?? [])
+        guard accepted else { return }
         text = ""
         selectedSkills = []
         attachments = []
@@ -201,11 +212,6 @@ struct ComposerView: View {
         if let sessionId = draftSessionId {
             drafts[sessionId] = nil
         }
-        store.send(toSend,
-                   displayParts: displayParts,
-                   attachments: toSendAttachments,
-                   agentPrompt: agentPrompt,
-                   preUserEvents: goalEvent.map { [$0] } ?? [])
     }
 
     private func composedPrompt() -> String {

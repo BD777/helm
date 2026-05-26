@@ -348,6 +348,29 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
         }
     }
 
+    var supportsPromptAppend: Bool { true }
+
+    func append(prompt: String, attachments: [ImageAttachment]) throws {
+        let threadId: String?
+        let turnId: String?
+        lock.lock()
+        threadId = activeThreadId
+        turnId = activeTurnId
+        lock.unlock()
+
+        guard let threadId, let turnId else {
+            throw AdapterError.promptAppendUnavailable("Codex")
+        }
+
+        let input = Self.turnInput(prompt: prompt, attachments: attachments)
+        _ = sendRequest(method: "turn/steer",
+                        params: [
+                            "threadId": threadId,
+                            "expectedTurnId": turnId,
+                            "input": input.isEmpty ? [["type": "text", "text": ""]] : input,
+                        ])
+    }
+
     func cancel() {
         let threadId: String?
         let turnId: String?
@@ -647,19 +670,7 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
               let projectSnapshot
         else { return }
 
-        var input: [[String: Any]] = []
-        if !prompt.isEmpty {
-            input.append([
-                "type": "text",
-                "text": prompt,
-            ])
-        }
-        for attachment in attachments {
-            input.append([
-                "type": "localImage",
-                "path": attachment.fileURL.path,
-            ])
-        }
+        let input = Self.turnInput(prompt: prompt, attachments: attachments)
 
         var params: [String: Any] = [
             "threadId": threadId,
@@ -673,6 +684,24 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
             params["input"] = [["type": "text", "text": ""]]
         }
         turnStartRequestId = sendRequest(method: "turn/start", params: params)
+    }
+
+    private static func turnInput(prompt: String,
+                                  attachments: [ImageAttachment]) -> [[String: Any]] {
+        var input: [[String: Any]] = []
+        if !prompt.isEmpty {
+            input.append([
+                "type": "text",
+                "text": prompt,
+            ])
+        }
+        for attachment in attachments {
+            input.append([
+                "type": "localImage",
+                "path": attachment.fileURL.path,
+            ])
+        }
+        return input
     }
 
     private func threadParams(session: Session,

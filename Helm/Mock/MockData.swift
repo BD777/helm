@@ -45,6 +45,12 @@ final class AppStore {
         guard let selectedSessionId else { return false }
         return isSessionStreaming(selectedSessionId)
     }
+    var selectedSessionCanAppendPrompt: Bool {
+        guard let selectedSessionId,
+              isSessionStreaming(selectedSessionId)
+        else { return false }
+        return activeRuns[selectedSessionId]?.adapter.supportsPromptAppend ?? false
+    }
     var selectedSessionIsLoadingHistory: Bool {
         guard let selectedSessionId else { return false }
         return loadingHistorySessionIds.contains(selectedSessionId)
@@ -1620,18 +1626,26 @@ else:
     private var pendingApprovalQueue: [PendingApprovalEntry] = []
     private static let assistantTextFlushDelayNanos: UInt64 = 50_000_000
 
+    @discardableResult
     func send(_ prompt: String,
               displayParts: [Part]? = nil,
               attachments: [ImageAttachment] = [],
               agentPrompt: String? = nil,
               preUserEvents: [SessionEvent] = [],
-              sessionId targetSessionId: UUID? = nil) {
+              sessionId targetSessionId: UUID? = nil) -> Bool {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptForAgent = (agentPrompt ?? prompt).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !promptForAgent.isEmpty || !attachments.isEmpty else { return }
+        guard !promptForAgent.isEmpty || !attachments.isEmpty else { return false }
         let targetSessionId = targetSessionId ?? selectedSessionId
-        guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) else { return }
-        guard !isSessionStreaming(sessions[sIdx].id) else { return }
+        guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) else { return false }
+        if isSessionStreaming(sessions[sIdx].id) {
+            return appendToActiveRun(prompt: promptForAgent,
+                                     displayParts: displayParts,
+                                     fallbackDisplayText: trimmed,
+                                     attachments: attachments,
+                                     preUserEvents: preUserEvents,
+                                     sessionIndex: sIdx)
+        }
         // Promote a draft to a real session — first send is what makes the
         // sidebar row appear.
         if sessions[sIdx].isDraft {
@@ -1644,10 +1658,10 @@ else:
         sessions[sIdx].lastUpdate = "now"
         upsertSidebarSession(for: sessions[sIdx])
         guard let project = projects.first(where: { $0.id == sessions[sIdx].projectId }) else {
-            appendError(to: sIdx, "Session has no project (id=\(sessions[sIdx].projectId))."); return
+            appendError(to: sIdx, "Session has no project (id=\(sessions[sIdx].projectId))."); return false
         }
         guard let profile = profile(sessions[sIdx].profileId) else {
-            appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return
+            appendError(to: sIdx, "Session's profile is missing — open Profiles and bind one."); return false
         }
 
         let session = sessions[sIdx]
@@ -1661,14 +1675,12 @@ else:
                                                      models: models)
         } catch {
             appendError(to: sIdx, error.localizedDescription)
-            return
+            return false
         }
 
-        var userParts: [Part] = displayParts ?? []
-        if userParts.isEmpty, !trimmed.isEmpty {
-            userParts.append(.text(trimmed))
-        }
-        for att in attachments { userParts.append(.image(att.fileURL)) }
+        let userParts = makeUserParts(displayParts: displayParts,
+                                      fallbackText: trimmed,
+                                      attachments: attachments)
         let userMsg = Message(
             id: UUID(), role: .user, who: "you", meta: nil,
             parts: userParts
@@ -1691,16 +1703,9 @@ else:
 
         // Append a manifest entry indexed by the user-message ordinal so we
         // can rehydrate thumbnails after restart without paying base64 cost.
-        if !attachments.isEmpty {
-            let userOrdinal = sessions[sIdx].transcript
-                .dropLast() // exclude the assistant placeholder we just added
-                .compactMap { $0.message }
-                .filter { if case .user = $0.role { return true } else { return false } }
-                .count - 1
-            ImageManifestStore.append(sessionId: session.id,
-                                      userMessageOrdinal: userOrdinal,
-                                      filenames: attachments.map { $0.fileURL.lastPathComponent })
-        }
+        appendImageManifestEntries(sessionIndex: sIdx,
+                                   userMessageId: userMsg.id,
+                                   attachments: attachments)
 
         let runId = UUID()
         let adapter: AgentAdapter
@@ -1743,6 +1748,92 @@ else:
             appendError(to: sIdx, "Failed to start agent: \(error.localizedDescription)")
             finishStreaming(sessionId: sessionId, runId: runId)
         }
+        return true
+    }
+
+    private func appendToActiveRun(prompt: String,
+                                   displayParts: [Part]?,
+                                   fallbackDisplayText: String,
+                                   attachments: [ImageAttachment],
+                                   preUserEvents: [SessionEvent],
+                                   sessionIndex sIdx: Int) -> Bool {
+        let sessionId = sessions[sIdx].id
+        guard let run = activeRuns[sessionId] else { return false }
+        guard run.adapter.supportsPromptAppend else {
+            appendError(to: sIdx, "This agent cannot accept more input while a response is running.")
+            return false
+        }
+
+        do {
+            try run.adapter.append(prompt: prompt, attachments: attachments)
+        } catch {
+            appendError(to: sIdx, error.localizedDescription)
+            return false
+        }
+
+        let userMsg = Message(
+            id: UUID(),
+            role: .user,
+            who: "you",
+            meta: nil,
+            parts: makeUserParts(displayParts: displayParts,
+                                 fallbackText: fallbackDisplayText,
+                                 attachments: attachments)
+        )
+        let insertionIndex = sessions[sIdx].transcript.firstIndex {
+            $0.message?.id == run.assistantId
+        } ?? sessions[sIdx].transcript.count
+        let insertedItems = preUserEvents.map(TranscriptItem.event) + [.message(userMsg)]
+        sessions[sIdx].transcript.insert(contentsOf: insertedItems, at: insertionIndex)
+        sessions[sIdx].lastUpdate = "now"
+        upsertSidebarSession(for: sessions[sIdx])
+        appendImageManifestEntries(sessionIndex: sIdx,
+                                   userMessageId: userMsg.id,
+                                   attachments: attachments)
+        sendTick &+= 1
+        persistTranscriptSnapshot(for: sessionId)
+        return true
+    }
+
+    private func makeUserParts(displayParts: [Part]?,
+                               fallbackText: String,
+                               attachments: [ImageAttachment]) -> [Part] {
+        var userParts: [Part] = displayParts ?? []
+        if userParts.isEmpty, !fallbackText.isEmpty {
+            userParts.append(.text(fallbackText))
+        }
+        for attachment in attachments {
+            userParts.append(.image(attachment.fileURL))
+        }
+        return userParts
+    }
+
+    private func appendImageManifestEntries(sessionIndex sIdx: Int,
+                                            userMessageId: UUID,
+                                            attachments: [ImageAttachment]) {
+        guard !attachments.isEmpty,
+              let userOrdinal = userMessageOrdinal(sessionIndex: sIdx,
+                                                   userMessageId: userMessageId)
+        else { return }
+
+        ImageManifestStore.append(sessionId: sessions[sIdx].id,
+                                  userMessageOrdinal: userOrdinal,
+                                  filenames: attachments.map { $0.fileURL.lastPathComponent })
+    }
+
+    private func userMessageOrdinal(sessionIndex sIdx: Int,
+                                    userMessageId: UUID) -> Int? {
+        var ordinal = 0
+        for item in sessions[sIdx].transcript {
+            guard let message = item.message,
+                  case .user = message.role
+            else { continue }
+            if message.id == userMessageId {
+                return ordinal
+            }
+            ordinal += 1
+        }
+        return nil
     }
 
     func cancelStreaming() {

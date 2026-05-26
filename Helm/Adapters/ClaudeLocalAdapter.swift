@@ -8,6 +8,8 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     private var process: Process?
     private var descendantTracker: ProcessDescendantTracker?
     private var permissionBridge: ClaudePermissionBridge?
+    private var stdinHandle: FileHandle?
+    private var isRemoteProject = false
     private let lock = NSLock()
 
     func start(prompt: String,
@@ -90,6 +92,8 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         lock.lock()
         process = proc
         self.permissionBridge = permissionBridge
+        stdinHandle = stdin.fileHandleForWriting
+        isRemoteProject = project.location.isSSH
         lock.unlock()
 
         return AsyncThrowingStream { continuation in
@@ -132,6 +136,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
                 stderrHandle.readabilityHandler = nil
                 permissionBridge?.stop(responding: .cancel)
                 let tracked = self.stopTrackingDescendants()
+                self.clearProcessIfCurrent(p)
                 ProcessTreeTerminator.terminate(pids: tracked, killAfter: 0.5)
                 NSLog("[helm.claude] exit status=%d", p.terminationStatus)
                 for event in parser.flush() {
@@ -160,40 +165,10 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
                 return
             }
 
-            // Send the user's prompt as a single stream-json record, then
-            // close stdin so the CLI knows the input is done. Image
-            // attachments become base64 image content blocks alongside the
-            // text — the Anthropic API's only on-disk option (URL sources
-            // require HTTP, no file://). This base64 ends up in Claude's own
-            // session JSONL on disk; Helm uses its own image manifest for
-            // history rehydration so we don't pay that cost twice.
-            var content: [[String: Any]] = [["type": "text", "text": prompt]]
-            for att in attachments {
-                guard let bytes = try? Data(contentsOf: att.fileURL) else {
-                    continuation.yield(.error("failed to read attachment: \(att.fileURL.lastPathComponent)"))
-                    continue
-                }
-                content.append([
-                    "type": "image",
-                    "source": [
-                        "type": "base64",
-                        "media_type": att.mediaType,
-                        "data": bytes.base64EncodedString(),
-                    ],
-                ])
-            }
-            let record: [String: Any] = [
-                "type": "user",
-                "message": [
-                    "role": "user",
-                    "content": content,
-                ],
-            ]
             do {
-                let json = try JSONSerialization.data(withJSONObject: record, options: [])
-                try stdin.fileHandleForWriting.write(contentsOf: json)
-                try stdin.fileHandleForWriting.write(contentsOf: Data([0x0A]))
-                try stdin.fileHandleForWriting.close()
+                let data = try Self.userRecordData(prompt: prompt,
+                                                   attachments: attachments)
+                try self.writeUserRecordData(data)
             } catch {
                 continuation.yield(.error("stdin write failed: \(error.localizedDescription)"))
                 self.cancel()
@@ -201,17 +176,37 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         }
     }
 
+    var supportsPromptAppend: Bool { true }
+
+    func append(prompt: String, attachments: [ImageAttachment]) throws {
+        lock.lock()
+        let isRemoteProject = isRemoteProject
+        lock.unlock()
+        guard !isRemoteProject || attachments.isEmpty else {
+            throw AdapterError.unsupportedRemoteAttachments("Claude")
+        }
+        let data = try Self.userRecordData(prompt: prompt,
+                                           attachments: attachments)
+        try writeUserRecordData(data)
+    }
+
     func cancel() {
         lock.lock()
         let p = process
         let bridge = permissionBridge
+        let stdin = stdinHandle
         let tracked = stopTrackingDescendantsLocked()
         process = nil
         permissionBridge = nil
+        stdinHandle = nil
+        isRemoteProject = false
         lock.unlock()
         bridge?.stop(responding: .cancel)
-        guard let p else { return }
-        ProcessTreeTerminator.terminate(p, trackedDescendants: tracked)
+        guard let p else {
+            try? stdin?.close()
+            return
+        }
+        ProcessTreeTerminator.terminate(p, closing: stdin, trackedDescendants: tracked)
     }
 
     func respondToApproval(id: String, decision: AgentApprovalDecision) {
@@ -241,6 +236,59 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
         let tracker = descendantTracker
         descendantTracker = nil
         return tracker?.stop() ?? []
+    }
+
+    private func clearProcessIfCurrent(_ process: Process) {
+        lock.lock()
+        if self.process === process {
+            self.process = nil
+            stdinHandle = nil
+            permissionBridge = nil
+            isRemoteProject = false
+        }
+        lock.unlock()
+    }
+
+    private static func userRecordData(prompt: String,
+                                       attachments: [ImageAttachment]) throws -> Data {
+        // Claude Code's stream-json input accepts additional user records while
+        // the process is running; images must be embedded as base64 blocks.
+        var content: [[String: Any]] = [["type": "text", "text": prompt]]
+        for attachment in attachments {
+            let bytes: Data
+            do {
+                bytes = try Data(contentsOf: attachment.fileURL)
+            } catch {
+                throw AdapterError.attachmentReadFailed(attachment.fileURL.lastPathComponent)
+            }
+            content.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": attachment.mediaType,
+                    "data": bytes.base64EncodedString(),
+                ],
+            ])
+        }
+        let record: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": content,
+            ],
+        ]
+        var data = try JSONSerialization.data(withJSONObject: record, options: [])
+        data.append(0x0A)
+        return data
+    }
+
+    private func writeUserRecordData(_ data: Data) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle = stdinHandle else {
+            throw AdapterError.promptAppendUnavailable("Claude")
+        }
+        try handle.write(contentsOf: data)
     }
 
     // MARK: -
@@ -623,6 +671,9 @@ private final class ClaudePermissionBridge: @unchecked Sendable {
 enum AdapterError: LocalizedError {
     case commandNotFound(String)
     case unsupportedRemoteAttachments(String)
+    case attachmentReadFailed(String)
+    case promptAppendUnavailable(String)
+    case promptAppendUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -630,6 +681,12 @@ enum AdapterError: LocalizedError {
             return "Command not found on PATH: \(c). Install the CLI or set commandPath in the profile to an absolute path."
         case .unsupportedRemoteAttachments(let vendor):
             return "\(vendor) image attachments are not supported for SSH projects yet."
+        case .attachmentReadFailed(let filename):
+            return "Failed to read attachment: \(filename)."
+        case .promptAppendUnavailable(let vendor):
+            return "\(vendor) is not ready to accept more input for this response."
+        case .promptAppendUnsupported:
+            return "This agent cannot accept more input while a response is running."
         }
     }
 }

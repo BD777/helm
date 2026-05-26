@@ -245,6 +245,14 @@ protocol AgentAdapter: AnyObject {
                run: RunConfig,
                project: Project) throws -> AsyncThrowingStream<AgentEvent, Error>
 
+    /// Whether this adapter can accept additional user guidance while a turn is
+    /// already running.
+    var supportsPromptAppend: Bool { get }
+
+    /// Send an additional user message into the active turn. Adapters that
+    /// cannot steer an active turn should leave the default implementation.
+    func append(prompt: String, attachments: [ImageAttachment]) throws
+
     /// Best-effort cancellation. Adapters should SIGTERM the child and let
     /// the stream finish with `.error("cancelled")` or similar.
     func cancel()
@@ -256,6 +264,11 @@ protocol AgentAdapter: AnyObject {
 }
 
 extension AgentAdapter {
+    var supportsPromptAppend: Bool { false }
+    func append(prompt: String, attachments: [ImageAttachment]) throws {
+        throw AdapterError.promptAppendUnsupported
+    }
+
     func respondToApproval(id: String, decision: AgentApprovalDecision) {}
 }
 
