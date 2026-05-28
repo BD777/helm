@@ -118,6 +118,10 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
                     stderrLock.unlock()
                     let suffix = tail.isEmpty ? "" : ": \(tail)"
                     continuation.yield(.error("codex exited \(p.terminationStatus)\(suffix)"))
+                } else {
+                    for event in parser.finish() {
+                        continuation.yield(event)
+                    }
                 }
                 continuation.finish()
             }
@@ -910,6 +914,8 @@ final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
 final class CodexStreamParser {
     private var pending = ""
     private var startedToolIds: Set<String> = []
+    private var latestAgentText = ""
+    private var sawTurnCompletion = false
 
     func feed(_ data: Data) -> [AgentEvent] {
         guard let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty else {
@@ -935,6 +941,12 @@ final class CodexStreamParser {
         return parseLine(data)
     }
 
+    func finish() -> [AgentEvent] {
+        guard !sawTurnCompletion, !latestAgentText.isEmpty else { return [] }
+        sawTurnCompletion = true
+        return [.messageStop, .finalResult(text: latestAgentText, isError: false)]
+    }
+
     private func parseLine(_ data: Data) -> [AgentEvent] {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
@@ -954,7 +966,17 @@ final class CodexStreamParser {
             guard let item = obj["item"] as? [String: Any] else { return [] }
             return parseItemCompleted(item)
 
+        case "turn.completed":
+            sawTurnCompletion = true
+            let status = obj["status"] as? String ?? "completed"
+            let error = obj["error"]
+            let isError = status != "completed" || jsonErrorIsPresent(error)
+            let errorText = CodexToolPresentation.resultOutput(result: nil, error: error)
+            let text = isError ? (errorText.isEmpty ? "Codex turn failed." : errorText) : latestAgentText
+            return [.messageStop, .finalResult(text: text, isError: isError)]
+
         case "turn.failed":
+            sawTurnCompletion = true
             let message = obj["message"] as? String
                 ?? obj["error"] as? String
                 ?? "Codex turn failed."
@@ -1065,10 +1087,10 @@ final class CodexStreamParser {
             let text = item["text"] as? String ?? ""
             var out: [AgentEvent] = []
             if !text.isEmpty {
+                latestAgentText = text
                 out.append(.assistantTextDelta(text))
             }
             out.append(.messageStop)
-            out.append(.finalResult(text: text, isError: false))
             return out
 
         default:
