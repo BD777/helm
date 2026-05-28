@@ -659,10 +659,12 @@ private struct ProjectSchedulerView: View {
 
     private func submitIdea(prompt: String,
                             displayParts: [Part],
+                            attachments: [ImageAttachment],
                             workerProfileId: UUID,
                             runConfiguration: SessionRunConfiguration) -> Bool {
         guard store.submitProjectIdea(prompt,
                                       displayParts: displayParts,
+                                      attachments: attachments,
                                       projectId: project.id,
                                       workerProfileId: workerProfileId,
                                       runConfiguration: runConfiguration) != nil else {
@@ -860,15 +862,18 @@ private struct ProjectSchedulerComposer: View {
     let project: Project
     @Binding var text: String
     let focusRequest: Int
-    var onSubmit: (String, [Part], UUID, SessionRunConfiguration) -> Bool
+    var onSubmit: (String, [Part], [ImageAttachment], UUID, SessionRunConfiguration) -> Bool
 
     @State private var skillChips: [ComposerSkill] = []
+    @State private var attachments: [ImageAttachment] = []
     @State private var pickerOpen = false
     @State private var workerProfileId: UUID?
     @State private var runConfiguration = SessionRunConfiguration()
     @State private var footerWidth: CGFloat = 0
     @State private var localFocusRequest = 0
     @State private var composerInteractionResetRequest = 0
+    @State private var pasteMonitor: Any? = nil
+    @State private var attachmentStorageId = UUID()
 
     private var composedPrompt: String {
         ComposerPromptSerializer.serialize(text,
@@ -883,7 +888,7 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var hasComposerContent: Bool {
-        !composedPrompt.isEmpty
+        !composedPrompt.isEmpty || !attachments.isEmpty
     }
 
     private var selectedProfile: Profile? {
@@ -909,6 +914,13 @@ private struct ProjectSchedulerComposer: View {
         hasComposerContent && selectedProfile != nil && sshSendBlockReason == nil
     }
 
+    private var composerPlaceholder: String {
+        if let reason = sshSendBlockReason {
+            return reason
+        }
+        return "Drop an idea into this project inbox (⌘V to attach image · \(messageSendShortcut.glyph) to add)"
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             box
@@ -916,15 +928,25 @@ private struct ProjectSchedulerComposer: View {
         }
         .frame(maxWidth: DS.messageMaxWidth)
         .background(ProjectSchedulerComposerWidthReader(width: $footerWidth))
-        .onAppear { syncSelectedProfileIfNeeded(resetConfiguration: true) }
+        .onAppear {
+            syncSelectedProfileIfNeeded(resetConfiguration: true)
+            installPasteMonitor()
+        }
         .onChange(of: project.id) { _, _ in
             workerProfileId = nil
             skillChips = []
+            removeAllAttachments()
+            attachmentStorageId = UUID()
             composerInteractionResetRequest &+= 1
             syncSelectedProfileIfNeeded(resetConfiguration: true)
         }
         .onChange(of: store.profiles.map(\.id)) { _, _ in
             syncSelectedProfileIfNeeded(resetConfiguration: false)
+        }
+        .onDisappear {
+            removePasteMonitor()
+            removeAllAttachments()
+            attachmentStorageId = UUID()
         }
     }
 
@@ -932,20 +954,23 @@ private struct ProjectSchedulerComposer: View {
         SkillAwareComposerBox(
             text: $text,
             skillChips: $skillChips,
-            placeholder: "Drop an idea into this project inbox...",
+            placeholder: composerPlaceholder,
             minLines: 2,
             maxLines: 11,
             focusRequest: focusRequest &+ localFocusRequest,
             resetRequest: composerInteractionResetRequest,
             sendShortcut: messageSendShortcut,
             menuWidthSource: footerWidth,
-            textTopPadding: 8,
+            textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,
             skillProject: project,
             onSlashActivityChange: { _ in },
             onSend: submitIfPossible,
             topContent: {
-                EmptyView()
+                if !attachments.isEmpty {
+                    ComposerAttachmentRow(attachments: attachments,
+                                          onRemove: removeAttachment)
+                }
             },
             accessoryOverlay: { _ in
                 EmptyView()
@@ -1313,13 +1338,46 @@ private struct ProjectSchedulerComposer: View {
         }
     }
 
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard ComposerImagePasteboard.isCommandV(event) else { return event }
+            return tryPasteImagesFromPasteboard() ? nil : event
+        }
+    }
+
+    private func removePasteMonitor() {
+        if let monitor = pasteMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        pasteMonitor = nil
+    }
+
+    private func tryPasteImagesFromPasteboard() -> Bool {
+        ComposerImagePasteboard.pasteImages(into: &attachments,
+                                            imagesDirectory: AppPaths.imagesDir(for: attachmentStorageId),
+                                            logPrefix: "[helm.project-inbox]")
+    }
+
+    private func removeAttachment(_ attachment: ImageAttachment) {
+        ComposerImagePasteboard.remove(attachment, from: &attachments)
+    }
+
+    private func removeAllAttachments() {
+        ComposerImagePasteboard.removeFiles(attachments)
+        attachments = []
+    }
+
     private func submitIfPossible() {
         syncSelectedProfileIfNeeded(resetConfiguration: false)
         guard canSubmit, let selectedProfile else { return }
         store.setDefaultWorkerProfile(selectedProfile.id, for: project.id)
-        if onSubmit(composedPrompt, displayParts, selectedProfile.id, runConfiguration) {
+        let submittedAttachments = attachments
+        if onSubmit(composedPrompt, displayParts, submittedAttachments, selectedProfile.id, runConfiguration) {
             text = ""
             skillChips = []
+            removeAllAttachments()
+            attachmentStorageId = UUID()
             composerInteractionResetRequest &+= 1
         }
     }

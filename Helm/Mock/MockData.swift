@@ -982,11 +982,12 @@ final class AppStore {
     @discardableResult
     func submitProjectIdea(_ text: String,
                            displayParts: [Part]? = nil,
+                           attachments: [ImageAttachment] = [],
                            projectId: UUID,
                            workerProfileId: UUID? = nil,
                            runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
+        guard !trimmed.isEmpty || !attachments.isEmpty,
               let project = projects.first(where: { $0.id == projectId })
         else { return nil }
         let workerProfile = workerProfileId.flatMap(profile)
@@ -994,19 +995,35 @@ final class AppStore {
         guard let workerProfile else { return nil }
 
         let now = Date()
-        let title = Self.title(for: trimmed, attachments: [], maxLength: 48)
+        let sessionId = UUID()
+        let expectedAttachmentCount = Set(attachments.map(\.contentHash)).count
+        let sessionAttachments = ComposerImagePasteboard.copyAttachments(
+            attachments,
+            to: AppPaths.imagesDir(for: sessionId),
+            logPrefix: "[helm.project-inbox]"
+        )
+        if !attachments.isEmpty && sessionAttachments.count != expectedAttachmentCount {
+            ComposerImagePasteboard.removeFiles(sessionAttachments)
+            return nil
+        }
+        let title = Self.title(for: trimmed, attachments: sessionAttachments, maxLength: 48)
+        let inboxText = trimmed.isEmpty ? title : trimmed
         let layout = schedulerWorkspaceLayout(for: project)
-        guard let sessionId = createSession(in: projectId,
-                                            title: title,
-                                            profileId: workerProfile.id,
-                                            isDraft: false,
-                                            select: false,
-                                            runConfiguration: runConfiguration ?? .defaults(for: workerProfile))
-        else { return nil }
+        guard createSession(in: projectId,
+                            title: title,
+                            profileId: workerProfile.id,
+                            isDraft: false,
+                            select: false,
+                            runConfiguration: runConfiguration ?? .defaults(for: workerProfile),
+                            id: sessionId) != nil
+        else {
+            ComposerImagePasteboard.removeFiles(sessionAttachments)
+            return nil
+        }
         let taskId = UUID()
         let inboxItem = ProjectSchedulerInboxItem(
             id: UUID(),
-            text: trimmed,
+            text: inboxText,
             createdAt: now,
             status: .accepted,
             taskId: taskId
@@ -1016,6 +1033,7 @@ final class AppStore {
             title: title,
             idea: trimmed,
             displayParts: displayParts,
+            attachments: sessionAttachments.isEmpty ? nil : sessionAttachments,
             sessionId: sessionId,
             phase: .planned,
             summary: "Waiting to start.",
@@ -1093,9 +1111,10 @@ final class AppStore {
 
         let task = projectSchedulers[idx].tasks[taskIndex]
         let prompt = task.idea
+        let displayParts = task.displayParts ?? (prompt.isEmpty ? [] : [.text(prompt)])
         send(prompt,
-             displayParts: task.displayParts ?? [.text(prompt)],
-             attachments: [],
+             displayParts: displayParts,
+             attachments: task.attachments ?? [],
              agentPrompt: Self.workerPrompt(for: task),
              sessionId: sessionId)
         return isSessionStreaming(sessionId)
@@ -1713,7 +1732,8 @@ else:
                                profileId: UUID? = nil,
                                isDraft: Bool,
                                select: Bool,
-                               runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
+                               runConfiguration: SessionRunConfiguration? = nil,
+                               id: UUID = UUID()) -> UUID? {
         guard projects.contains(where: { $0.id == projectId }) else { return nil }
         let projectProfiles = availableProfiles(for: projectId)
         let pickedProfile: Profile? = {
@@ -1728,7 +1748,7 @@ else:
         // create a real worker with the same per-send choices as the composer.
         let resolvedRunConfiguration = runConfiguration ?? .defaults(for: profile)
         var session = Session(
-            id: UUID(),
+            id: id,
             projectId: projectId,
             title: "New chat",
             profileId: profile.id,

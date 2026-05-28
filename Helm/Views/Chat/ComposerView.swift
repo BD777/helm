@@ -364,51 +364,8 @@ struct ComposerView: View {
     }
 
     private var attachmentRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(attachments) { att in
-                    attachmentChip(att)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-        }
-    }
-
-    private func attachmentChip(_ att: ImageAttachment) -> some View {
-        Group {
-            if let img = NSImage(contentsOf: att.fileURL) {
-                Image(nsImage: img)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color.secondary.opacity(0.15)
-            }
-        }
-        .frame(width: 56, height: 56)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-        )
-        .overlay(alignment: .topTrailing) {
-            // .overlay (not ZStack + offset) keeps the button's hit area
-            // inside the chip's layout frame; offset moves visuals but leaves
-            // hit-testing at the original position, which is why the earlier
-            // version of this button looked clickable but did nothing.
-            Button {
-                removeAttachment(att)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.7))
-            }
-            .buttonStyle(.plain)
-            .padding(2)
-        }
-        .padding(.top, 6)
-        .padding(.trailing, 6)
+        ComposerAttachmentRow(attachments: attachments,
+                              onRemove: removeAttachment)
     }
 
     private var footer: some View {
@@ -804,7 +761,7 @@ struct ComposerView: View {
     private func installPasteMonitor() {
         guard pasteMonitor == nil else { return }
         pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard isCommandV(event) else { return event }
+            guard ComposerImagePasteboard.isCommandV(event) else { return event }
             return tryPasteImagesFromPasteboard() ? nil : event
         }
     }
@@ -814,78 +771,16 @@ struct ComposerView: View {
         pasteMonitor = nil
     }
 
-    private func isCommandV(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard flags.contains(.command), !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control) else {
-            return false
-        }
-        let chars = (event.charactersIgnoringModifiers ?? "").lowercased()
-        return chars == "v"
-    }
-
     /// Returns true if the pasteboard had image data and we consumed it.
     private func tryPasteImagesFromPasteboard() -> Bool {
-        let pb = NSPasteboard.general
-        guard pb.canReadObject(forClasses: [NSImage.self], options: nil) else { return false }
-
-        var pngs: [Data] = []
-        if let items = pb.pasteboardItems {
-            for item in items {
-                if let png = item.data(forType: .png) {
-                    pngs.append(png)
-                } else if let tiff = item.data(forType: .tiff),
-                          let rep = NSBitmapImageRep(data: tiff),
-                          let png = rep.representation(using: .png, properties: [:]) {
-                    pngs.append(png)
-                } else if let jpeg = item.data(forType: NSPasteboard.PasteboardType("public.jpeg")),
-                          let rep = NSBitmapImageRep(data: jpeg),
-                          let png = rep.representation(using: .png, properties: [:]) {
-                    pngs.append(png)
-                }
-            }
-        }
-        // Fallback: NSImage round-trip if direct items didn't yield bytes.
-        if pngs.isEmpty,
-           let images = pb.readObjects(forClasses: [NSImage.self]) as? [NSImage] {
-            for img in images {
-                guard let tiff = img.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff),
-                      let png = rep.representation(using: .png, properties: [:]) else { continue }
-                pngs.append(png)
-            }
-        }
-        guard !pngs.isEmpty else { return false }
-        for png in pngs { saveAndAppend(png: png) }
-        return true
-    }
-
-    private func saveAndAppend(png: Data) {
-        guard let session = store.selectedSession else { return }
-        let hash = md5Hex(png)
-        // Dedupe: if the same image is already attached (e.g. user pastes the
-        // same screenshot twice), drop it silently — the second paste is
-        // almost always a finger-stutter, not a deliberate re-attach.
-        if attachments.contains(where: { $0.contentHash == hash }) { return }
-
-        let dir = AppPaths.imagesDir(for: session.id)
-        let url = dir.appendingPathComponent("\(UUID().uuidString.lowercased()).png")
-        do {
-            try png.write(to: url, options: .atomic)
-            attachments.append(ImageAttachment(fileURL: url,
-                                               mediaType: "image/png",
-                                               contentHash: hash))
-        } catch {
-            NSLog("[helm.composer] paste write failed: %@", error.localizedDescription)
-        }
-    }
-
-    private func md5Hex(_ data: Data) -> String {
-        Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard let session = store.selectedSession else { return false }
+        return ComposerImagePasteboard.pasteImages(into: &attachments,
+                                                   imagesDirectory: AppPaths.imagesDir(for: session.id),
+                                                   logPrefix: "[helm.composer]")
     }
 
     private func removeAttachment(_ att: ImageAttachment) {
-        attachments.removeAll { $0.id == att.id }
-        try? FileManager.default.removeItem(at: att.fileURL)
+        ComposerImagePasteboard.remove(att, from: &attachments)
     }
 
     private func saveCurrentDraft() {
@@ -917,6 +812,197 @@ struct ComposerView: View {
         attachments = draft.attachments
         selectedSkills = draft.selectedSkills
         goalActionActive = draft.goalActionActive
+    }
+}
+
+struct ComposerAttachmentRow: View {
+    let attachments: [ImageAttachment]
+    var onRemove: (ImageAttachment) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { attachment in
+                    ComposerAttachmentChip(attachment: attachment,
+                                           onRemove: onRemove)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+        }
+    }
+}
+
+private struct ComposerAttachmentChip: View {
+    let attachment: ImageAttachment
+    var onRemove: (ImageAttachment) -> Void
+
+    var body: some View {
+        Group {
+            if let image = NSImage(contentsOf: attachment.fileURL) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.secondary.opacity(0.15)
+            }
+        }
+        .frame(width: 56, height: 56)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+        )
+        .overlay(alignment: .topTrailing) {
+            // .overlay keeps the button's hit area inside the chip frame.
+            Button {
+                onRemove(attachment)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .padding(2)
+        }
+        .padding(.top, 6)
+        .padding(.trailing, 6)
+    }
+}
+
+enum ComposerImagePasteboard {
+    static func isCommandV(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command),
+              !flags.contains(.shift),
+              !flags.contains(.option),
+              !flags.contains(.control)
+        else {
+            return false
+        }
+        let chars = (event.charactersIgnoringModifiers ?? "").lowercased()
+        return chars == "v"
+    }
+
+    /// Returns true if the pasteboard had image data and we consumed it.
+    static func pasteImages(into attachments: inout [ImageAttachment],
+                            imagesDirectory: URL,
+                            pasteboard: NSPasteboard = .general,
+                            logPrefix: String) -> Bool {
+        let pngs = pngData(from: pasteboard)
+        guard !pngs.isEmpty else { return false }
+        for png in pngs {
+            saveAndAppend(png: png,
+                          into: &attachments,
+                          imagesDirectory: imagesDirectory,
+                          logPrefix: logPrefix)
+        }
+        return true
+    }
+
+    static func copyAttachments(_ attachments: [ImageAttachment],
+                                to imagesDirectory: URL,
+                                logPrefix: String) -> [ImageAttachment] {
+        var copied: [ImageAttachment] = []
+        var seenHashes: Set<String> = []
+        for attachment in attachments {
+            guard seenHashes.insert(attachment.contentHash).inserted else { continue }
+            let source = attachment.fileURL
+            let destination = destinationURL(for: source, in: imagesDirectory)
+            if source.standardizedFileURL.path != destination.standardizedFileURL.path {
+                do {
+                    try FileManager.default.copyItem(at: source, to: destination)
+                } catch {
+                    NSLog("%@ attachment copy failed: %@", logPrefix, error.localizedDescription)
+                    continue
+                }
+            }
+            copied.append(ImageAttachment(fileURL: destination,
+                                          mediaType: attachment.mediaType,
+                                          contentHash: attachment.contentHash))
+        }
+        return copied
+    }
+
+    static func remove(_ attachment: ImageAttachment,
+                       from attachments: inout [ImageAttachment]) {
+        attachments.removeAll { $0.id == attachment.id }
+        try? FileManager.default.removeItem(at: attachment.fileURL)
+    }
+
+    static func removeFiles(_ attachments: [ImageAttachment]) {
+        for attachment in attachments {
+            try? FileManager.default.removeItem(at: attachment.fileURL)
+        }
+    }
+
+    private static func destinationURL(for source: URL, in directory: URL) -> URL {
+        var destination = directory.appendingPathComponent(source.lastPathComponent)
+        guard FileManager.default.fileExists(atPath: destination.path),
+              source.standardizedFileURL.path != destination.standardizedFileURL.path
+        else {
+            return destination
+        }
+        let pathExtension = source.pathExtension.isEmpty ? "png" : source.pathExtension
+        repeat {
+            destination = directory.appendingPathComponent("\(UUID().uuidString.lowercased()).\(pathExtension)")
+        } while FileManager.default.fileExists(atPath: destination.path)
+        return destination
+    }
+
+    private static func pngData(from pasteboard: NSPasteboard) -> [Data] {
+        var pngs: [Data] = []
+        if let items = pasteboard.pasteboardItems {
+            for item in items {
+                if let png = item.data(forType: .png) {
+                    pngs.append(png)
+                } else if let tiff = item.data(forType: .tiff),
+                          let rep = NSBitmapImageRep(data: tiff),
+                          let png = rep.representation(using: .png, properties: [:]) {
+                    pngs.append(png)
+                } else if let jpeg = item.data(forType: NSPasteboard.PasteboardType("public.jpeg")),
+                          let rep = NSBitmapImageRep(data: jpeg),
+                          let png = rep.representation(using: .png, properties: [:]) {
+                    pngs.append(png)
+                }
+            }
+        }
+
+        // Fallback: NSImage round-trip if direct items didn't yield bytes.
+        if pngs.isEmpty,
+           pasteboard.canReadObject(forClasses: [NSImage.self], options: nil),
+           let images = pasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage] {
+            for image in images {
+                guard let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let png = rep.representation(using: .png, properties: [:]) else { continue }
+                pngs.append(png)
+            }
+        }
+        return pngs
+    }
+
+    private static func saveAndAppend(png: Data,
+                                      into attachments: inout [ImageAttachment],
+                                      imagesDirectory: URL,
+                                      logPrefix: String) {
+        let hash = md5Hex(png)
+        if attachments.contains(where: { $0.contentHash == hash }) { return }
+
+        let url = imagesDirectory.appendingPathComponent("\(UUID().uuidString.lowercased()).png")
+        do {
+            try png.write(to: url, options: .atomic)
+            attachments.append(ImageAttachment(fileURL: url,
+                                               mediaType: "image/png",
+                                               contentHash: hash))
+        } catch {
+            NSLog("%@ paste write failed: %@", logPrefix, error.localizedDescription)
+        }
+    }
+
+    private static func md5Hex(_ data: Data) -> String {
+        Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

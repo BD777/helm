@@ -639,6 +639,7 @@ struct ProjectSchedulerTask: Identifiable, Hashable, Codable {
     var title: String
     var idea: String
     var displayParts: [Part]? = nil
+    var attachments: [ImageAttachment]? = nil
     var sessionId: UUID?
     var phase: ProjectSchedulerTaskPhase
     var summary: String
@@ -778,11 +779,11 @@ struct SkillTextSegment: Hashable, Codable {
     }
 }
 
-/// Composer-side, in-flight reference to a pasted image. Points at an
+/// Composer-side or scheduler-side reference to a pasted image. Points at an
 /// already-on-disk file so Send doesn't have to re-encode bytes.
 /// `contentHash` is the hex MD5 of the PNG payload — used for dedupe so
 /// pasting the same image twice doesn't add a second thumbnail.
-struct ImageAttachment: Identifiable, Hashable {
+struct ImageAttachment: Identifiable, Hashable, Codable {
     let id: UUID
     let fileURL: URL
     let mediaType: String   // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
