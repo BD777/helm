@@ -204,3 +204,364 @@ enum TranscriptSnapshotStore {
         try? FileManager.default.removeItem(at: url)
     }
 }
+
+enum TargetSessionIndexLocation: Hashable {
+    case local
+    case ssh(host: String)
+}
+
+struct TargetSessionIndexEntry: Codable, Hashable, Identifiable {
+    var id: UUID
+    var projectPath: String
+    var projectName: String
+    var vendor: Vendor
+    var title: String
+    var lastUpdate: String
+    var updatedAt: String
+    var vendorSessionId: String
+    var profileName: String
+    var claudePermissionMode: ClaudePermissionMode
+    var codexSandboxMode: Profile.SandboxMode
+    var codexApprovalMode: CodexApprovalMode
+    var claudeEffort: ClaudeEffort
+    var codexEffort: Profile.ReasoningEffort
+}
+
+struct TargetSessionIndexFile: Codable {
+    var version: Int
+    var updatedAt: String
+    var sessions: [TargetSessionIndexEntry]
+
+    static let currentVersion = 1
+    static let empty = TargetSessionIndexFile(version: currentVersion,
+                                              updatedAt: TargetSessionIndexStore.timestamp(),
+                                              sessions: [])
+}
+
+private struct TargetSessionIndexDeletionPayload: Encodable {
+    var updatedAt: String
+    var ids: [UUID]
+}
+
+/// Small target-machine mirror of Helm-owned session metadata.
+///
+/// Helm's full app state stays in the macOS app-support state file. This index
+/// only mirrors enough information to show/rebind restorable sessions when a
+/// different client connects to the same local or SSH target.
+enum TargetSessionIndexStore {
+    static func localURL() -> URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".helm", isDirectory: true)
+            .appendingPathComponent("sessions.json", isDirectory: false)
+    }
+
+    static func timestamp(_ date: Date = Date()) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
+    static func canonicalProjectPath(for project: Project) -> String {
+        switch project.location {
+        case .local(let path):
+            return normalizedLocalPath(path)
+        case .ssh(_, let path, let status):
+            return normalizedRemotePath(status.resolvedPath ?? path)
+        }
+    }
+
+    static func projectPathCandidates(for project: Project) -> Set<String> {
+        switch project.location {
+        case .local(let path):
+            return Set([path, normalizedLocalPath(path)])
+        case .ssh(_, let path, let status):
+            var values = Set([path, normalizedRemotePath(path)])
+            if let resolved = status.resolvedPath, !resolved.isEmpty {
+                values.insert(resolved)
+                values.insert(normalizedRemotePath(resolved))
+            }
+            return values
+        }
+    }
+
+    static func targetLocation(for project: Project) -> TargetSessionIndexLocation? {
+        switch project.location {
+        case .local:
+            return .local
+        case .ssh(let host, _, let status):
+            guard status.isConnected else { return nil }
+            return .ssh(host: host)
+        }
+    }
+
+    static func loadLocal() -> TargetSessionIndexFile {
+        decodeFile(at: localURL())
+    }
+
+    static func loadRemote(host: String) async throws -> TargetSessionIndexFile {
+        let command = """
+        file="$HOME/.helm/sessions.json"
+        if [ -f "$file" ]; then cat -- "$file"; fi
+        """
+        let data = try await sshOutput(host: host, remoteCommand: command)
+        guard !data.isEmpty else { return .empty }
+        return try decode(data)
+    }
+
+    static func upsert(_ entriesByTarget: [TargetSessionIndexLocation: [TargetSessionIndexEntry]]) async {
+        for (target, entries) in entriesByTarget where !entries.isEmpty {
+            do {
+                switch target {
+                case .local:
+                    try upsertLocal(entries)
+                case .ssh(let host):
+                    try await upsertRemote(host: host, entries: entries)
+                }
+            } catch {
+                NSLog("[helm.target-sessions] save failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    static func remove(_ idsByTarget: [TargetSessionIndexLocation: [UUID]]) async {
+        for (target, ids) in idsByTarget where !ids.isEmpty {
+            do {
+                switch target {
+                case .local:
+                    try removeLocal(ids)
+                case .ssh(let host):
+                    try await removeRemote(host: host, ids: ids)
+                }
+            } catch {
+                NSLog("[helm.target-sessions] delete failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    static func upsertLocal(_ entries: [TargetSessionIndexEntry]) throws {
+        let url = localURL()
+        let existing = decodeFile(at: url)
+        let merged = merge(existing: existing, entries: entries)
+        try write(merged, to: url)
+    }
+
+    static func upsertRemote(host: String, entries: [TargetSessionIndexEntry]) async throws {
+        let payload = TargetSessionIndexFile(version: TargetSessionIndexFile.currentVersion,
+                                             updatedAt: timestamp(),
+                                             sessions: entries)
+        let data = try encode(payload)
+        let script = #"""
+import json
+import os
+import sys
+
+path = os.path.expanduser("~/.helm/sessions.json")
+payload = json.load(sys.stdin)
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        existing = json.load(handle)
+except Exception:
+    existing = {}
+
+sessions = existing.get("sessions", [])
+if not isinstance(sessions, list):
+    sessions = []
+
+by_id = {}
+for item in sessions:
+    if isinstance(item, dict) and item.get("id"):
+        by_id[str(item["id"])] = item
+
+for item in payload.get("sessions", []):
+    if isinstance(item, dict) and item.get("id"):
+        by_id[str(item["id"])] = item
+
+out = dict(existing) if isinstance(existing, dict) else {}
+out["version"] = 1
+out["updatedAt"] = payload.get("updatedAt", "")
+out["sessions"] = sorted(
+    by_id.values(),
+    key=lambda item: str(item.get("updatedAt") or ""),
+    reverse=True,
+)
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = f"{path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(out, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, path)
+"""#
+        let command = """
+        py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+        if [ -z "$py" ]; then echo "python not found" >&2; exit 127; fi
+        "$py" -c \(SSHRemote.shellQuote(script))
+        """
+        try await sshInput(host: host, remoteCommand: command, input: data)
+    }
+
+    static func removeLocal(_ ids: [UUID]) throws {
+        let url = localURL()
+        let existing = decodeFile(at: url)
+        let idSet = Set(ids)
+        let updated = TargetSessionIndexFile(
+            version: TargetSessionIndexFile.currentVersion,
+            updatedAt: timestamp(),
+            sessions: existing.sessions.filter { !idSet.contains($0.id) }
+        )
+        try write(updated, to: url)
+    }
+
+    static func removeRemote(host: String, ids: [UUID]) async throws {
+        let payload = TargetSessionIndexDeletionPayload(updatedAt: timestamp(), ids: ids)
+        let data = try encode(payload)
+        let script = #"""
+import json
+import os
+import sys
+
+path = os.path.expanduser("~/.helm/sessions.json")
+payload = json.load(sys.stdin)
+ids = set(str(item) for item in payload.get("ids", []))
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        existing = json.load(handle)
+except Exception:
+    existing = {}
+
+sessions = existing.get("sessions", [])
+if not isinstance(sessions, list):
+    sessions = []
+
+out = dict(existing) if isinstance(existing, dict) else {}
+out["version"] = 1
+out["updatedAt"] = payload.get("updatedAt", "")
+out["sessions"] = [
+    item for item in sessions
+    if not (isinstance(item, dict) and str(item.get("id")) in ids)
+]
+
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = f"{path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(out, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, path)
+"""#
+        let command = """
+        py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+        if [ -z "$py" ]; then echo "python not found" >&2; exit 127; fi
+        "$py" -c \(SSHRemote.shellQuote(script))
+        """
+        try await sshInput(host: host, remoteCommand: command, input: data)
+    }
+
+    private static func merge(existing: TargetSessionIndexFile,
+                              entries: [TargetSessionIndexEntry]) -> TargetSessionIndexFile {
+        var byId = Dictionary(uniqueKeysWithValues:
+            existing.sessions.map { ($0.id, $0) })
+        for entry in entries {
+            byId[entry.id] = entry
+        }
+        let sessions = byId.values.sorted { lhs, rhs in
+            lhs.updatedAt > rhs.updatedAt
+        }
+        return TargetSessionIndexFile(version: TargetSessionIndexFile.currentVersion,
+                                      updatedAt: timestamp(),
+                                      sessions: sessions)
+    }
+
+    private static func write(_ file: TargetSessionIndexFile, to url: URL) throws {
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try encode(file)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private static func decodeFile(at url: URL) -> TargetSessionIndexFile {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url)
+        else { return .empty }
+        do {
+            return try decode(data)
+        } catch {
+            NSLog("[helm.target-sessions] load failed %@: %@",
+                  url.path, error.localizedDescription)
+            return .empty
+        }
+    }
+
+    private static func encode<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(value)
+    }
+
+    private static func decode(_ data: Data) throws -> TargetSessionIndexFile {
+        try JSONDecoder().decode(TargetSessionIndexFile.self, from: data)
+    }
+
+    private static func normalizedLocalPath(_ path: String) -> String {
+        ((path as NSString).expandingTildeInPath as NSString).standardizingPath
+    }
+
+    private static func normalizedRemotePath(_ path: String) -> String {
+        path.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func sshOutput(host: String, remoteCommand: String) async throws -> Data {
+        try await runSSH(host: host, remoteCommand: remoteCommand, input: nil)
+    }
+
+    private static func sshInput(host: String,
+                                 remoteCommand: String,
+                                 input: Data) async throws {
+        _ = try await runSSH(host: host, remoteCommand: remoteCommand, input: input)
+    }
+
+    private static func runSSH(host: String,
+                               remoteCommand: String,
+                               input: Data?) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: remoteCommand,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+            if input != nil {
+                proc.standardInput = Pipe()
+            }
+
+            try proc.run()
+
+            if let input, let stdin = proc.standardInput as? Pipe {
+                stdin.fileHandleForWriting.write(input)
+                try? stdin.fileHandleForWriting.close()
+            }
+
+            proc.waitUntilExit()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            guard proc.terminationStatus == 0 else {
+                let reason = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                throw NSError(
+                    domain: "Helm.TargetSessionIndex",
+                    code: Int(proc.terminationStatus),
+                    userInfo: [
+                        NSLocalizedDescriptionKey: reason?.isEmpty == false
+                            ? reason!
+                            : "ssh exited \(proc.terminationStatus)"
+                    ]
+                )
+            }
+            return data
+        }.value
+    }
+}

@@ -92,6 +92,7 @@ final class AppStore {
 
     private let profileStore: ProfileStore
     private let stateStore: StateStore
+    private var pendingTargetSessionIndexSaveTask: Task<Void, Never>?
     private var loadingHistorySessionIds: Set<UUID> = []
     private var probingSSHProjectIds: Set<UUID> = []
     /// One vendor-specific session store per vendor, used to lazily load
@@ -197,12 +198,20 @@ final class AppStore {
             }
         }
 
+        let localTargetIndex = TargetSessionIndexStore.loadLocal()
+        var importedTargetSessions = false
+        for project in self.projects where !project.location.isSSH {
+            importedTargetSessions = importTargetSessionIndex(localTargetIndex,
+                                                             for: project)
+                || importedTargetSessions
+        }
+
         // If we filtered any invalid records during load, persist the cleaned
         // table so the JSON on disk stops carrying the orphan.
         if cleanModels.count != profilesFile.models.count {
             scheduleProfilesSave()
         }
-        if cleanSessions.count != stateFile.sessions.count {
+        if cleanSessions.count != stateFile.sessions.count || importedTargetSessions {
             scheduleStateSave()
         }
         for project in self.projects where project.location.isSSH {
@@ -549,6 +558,7 @@ final class AppStore {
             schedulers: projectSchedulers,
             sshProfileAccess: sshProfileAccess
         ))
+        scheduleTargetSessionIndexSave()
     }
 
     /// Synchronously persist everything in-flight. Call from
@@ -570,6 +580,167 @@ final class AppStore {
             schedulers: projectSchedulers,
             sshProfileAccess: sshProfileAccess
         ))
+        pendingTargetSessionIndexSaveTask?.cancel()
+        pendingTargetSessionIndexSaveTask = nil
+        let entriesByTarget = targetSessionIndexEntriesByTarget()
+        if !entriesByTarget.isEmpty {
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                await TargetSessionIndexStore.upsert(entriesByTarget)
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 5)
+        }
+    }
+
+    private func scheduleTargetSessionIndexSave() {
+        pendingTargetSessionIndexSaveTask?.cancel()
+        let entriesByTarget = targetSessionIndexEntriesByTarget()
+        guard !entriesByTarget.isEmpty else { return }
+        pendingTargetSessionIndexSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await TargetSessionIndexStore.upsert(entriesByTarget)
+        }
+    }
+
+    private func targetSessionIndexEntriesByTarget() -> [TargetSessionIndexLocation: [TargetSessionIndexEntry]] {
+        let updatedAt = TargetSessionIndexStore.timestamp()
+        var grouped: [TargetSessionIndexLocation: [TargetSessionIndexEntry]] = [:]
+
+        for session in sessions where !session.isDraft {
+            guard let project = projects.first(where: { $0.id == session.projectId }),
+                  let profile = profile(session.profileId),
+                  let target = TargetSessionIndexStore.targetLocation(for: project),
+                  let vendorSessionId = restorableVendorSessionId(for: session,
+                                                                  vendor: profile.vendor)
+            else { continue }
+
+            let entry = TargetSessionIndexEntry(
+                id: session.id,
+                projectPath: TargetSessionIndexStore.canonicalProjectPath(for: project),
+                projectName: project.name,
+                vendor: profile.vendor,
+                title: session.title,
+                lastUpdate: session.lastUpdate,
+                updatedAt: updatedAt,
+                vendorSessionId: vendorSessionId,
+                profileName: profile.name,
+                claudePermissionMode: session.claudePermissionMode,
+                codexSandboxMode: session.codexSandboxMode,
+                codexApprovalMode: session.codexApprovalMode,
+                claudeEffort: session.claudeEffort,
+                codexEffort: session.codexEffort
+            )
+            grouped[target, default: []].append(entry)
+        }
+        return grouped
+    }
+
+    private func restorableVendorSessionId(for session: Session,
+                                           vendor: Vendor) -> String? {
+        if let vendorSessionId = session.vendorSessionId,
+           !vendorSessionId.isEmpty {
+            return vendorSessionId
+        }
+        switch vendor {
+        case .claude:
+            return session.id.uuidString.lowercased()
+        case .codex:
+            return nil
+        }
+    }
+
+    @discardableResult
+    private func importTargetSessionIndex(_ index: TargetSessionIndexFile,
+                                          for project: Project) -> Bool {
+        let projectPaths = TargetSessionIndexStore.projectPathCandidates(for: project)
+        var imported = false
+
+        for entry in index.sessions where projectPaths.contains(entry.projectPath) {
+            if let existingIdx = sessions.firstIndex(where: { $0.id == entry.id }) {
+                guard sessions[existingIdx].projectId == project.id,
+                      profile(sessions[existingIdx].profileId)?.vendor == entry.vendor
+                else { continue }
+                var changed = false
+                if sessions[existingIdx].vendorSessionId == nil {
+                    sessions[existingIdx].vendorSessionId = entry.vendorSessionId
+                    changed = true
+                }
+                if sessions[existingIdx].title == "New chat",
+                   entry.title != "New chat" {
+                    sessions[existingIdx].title = entry.title
+                    changed = true
+                }
+                if changed {
+                    upsertSidebarSession(for: sessions[existingIdx])
+                    imported = true
+                }
+                continue
+            }
+
+            guard let profile = profileForImportedTargetSession(entry,
+                                                                projectId: project.id)
+            else { continue }
+
+            let session = Session(
+                id: entry.id,
+                projectId: project.id,
+                title: entry.title,
+                profileId: profile.id,
+                claudePermissionMode: entry.claudePermissionMode,
+                codexSandboxMode: entry.codexSandboxMode,
+                codexApprovalMode: entry.codexApprovalMode,
+                claudeEffort: entry.claudeEffort,
+                codexEffort: entry.codexEffort,
+                lastUpdate: entry.lastUpdate,
+                vendorSessionId: entry.vendorSessionId,
+                isDraft: false
+            )
+            sessions.append(session)
+            upsertSidebarSession(for: session)
+            imported = true
+        }
+
+        if imported {
+            NSLog("[helm.target-sessions] imported sessions for %@",
+                  project.name)
+        }
+        return imported
+    }
+
+    private func profileForImportedTargetSession(_ entry: TargetSessionIndexEntry,
+                                                 projectId: UUID) -> Profile? {
+        let candidates = availableProfiles(for: projectId, vendor: entry.vendor)
+        if let exact = candidates.first(where: { $0.name == entry.profileName }) {
+            return exact
+        }
+        return candidates.first
+    }
+
+    private func importRemoteTargetSessionIndex(for project: Project) async -> Bool {
+        guard case .ssh(let host, _, let status) = project.location,
+              status.isConnected
+        else { return false }
+        do {
+            let index = try await TargetSessionIndexStore.loadRemote(host: host)
+            return importTargetSessionIndex(index, for: project)
+        } catch {
+            NSLog("[helm.target-sessions] remote load failed for %@: %@",
+                  host, error.localizedDescription)
+            return false
+        }
+    }
+
+    private func removeTargetSessionIndexEntries(_ ids: [UUID],
+                                                 for project: Project) {
+        guard let target = TargetSessionIndexStore.targetLocation(for: project),
+              !ids.isEmpty
+        else { return }
+        let idsByTarget = [target: ids]
+        Task.detached {
+            await TargetSessionIndexStore.remove(idsByTarget)
+        }
     }
 
     // MARK: - Session helpers
@@ -705,6 +876,9 @@ final class AppStore {
               let idx = sessions.firstIndex(where: { $0.id == id })
         else { return }
         let projectId = sessions[idx].projectId
+        if let project = projects.first(where: { $0.id == projectId }) {
+            removeTargetSessionIndexEntries([id], for: project)
+        }
         let wasSelected = selectedSessionId == id
         sessions.remove(at: idx)
         removeSidebarSession(id)
@@ -728,6 +902,8 @@ final class AppStore {
         guard let idx = projects.firstIndex(where: { $0.id == projectId }) else { return }
         let removedSessionIds = sessions.filter { $0.projectId == projectId }.map(\.id)
         if removedSessionIds.contains(where: isSessionStreaming) { return }
+        let removedProject = projects[idx]
+        removeTargetSessionIndexEntries(removedSessionIds, for: removedProject)
 
         projects.remove(at: idx)
         sessions.removeAll { $0.projectId == projectId }
@@ -1577,6 +1753,8 @@ else:
         projects.append(project)
         projectSchedulers.append(ProjectSchedulerState(projectId: project.id))
         selectedProjectId = project.id
+        _ = importTargetSessionIndex(TargetSessionIndexStore.loadLocal(),
+                                     for: project)
         scheduleStateSave()
         return project.id
     }
@@ -1619,6 +1797,12 @@ else:
         NSLog("[helm.ssh] probe result host=%@ status=%@",
               host, status.helpText)
         if status.isConnected {
+            let imported = await importRemoteTargetSessionIndex(for: projects[latestIdx])
+            if imported {
+                scheduleStateSave()
+            } else {
+                scheduleTargetSessionIndexSave()
+            }
             await refreshSchedulerWorkspaceLayout(projectId: projectId)
         }
     }
