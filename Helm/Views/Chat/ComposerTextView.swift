@@ -74,7 +74,9 @@ struct ComposerTextView: NSViewRepresentable {
         tv.onSlashContextChange = onSlashContextChange
         tv.onSendShortcut = onSend
         var insertedSkill = false
-        if let skillInsertionRequest,
+        let isComposingMarkedText = tv.hasMarkedText()
+        if !isComposingMarkedText,
+           let skillInsertionRequest,
            context.coordinator.consumeSkillInsertionRequest(skillInsertionRequest.id) {
             tv.insertSkillChip(skillInsertionRequest.skill)
             insertedSkill = true
@@ -84,7 +86,8 @@ struct ComposerTextView: NSViewRepresentable {
                   tv.string != text || tv.skillChips() != skillChips {
             tv.setComposerText(text, skillChips: skillChips)
         }
-        if context.coordinator.consumeFocusRequest(focusRequest) {
+        if !isComposingMarkedText,
+           context.coordinator.consumeFocusRequest(focusRequest) {
             context.coordinator.focus(tv, moveCursorToEnd: !insertedSkill)
         }
     }
@@ -125,6 +128,7 @@ struct ComposerTextView: NSViewRepresentable {
         private var pendingExternalTextBeforeLocalEdit: String?
         private var pendingExternalSkillChipsBeforeLocalEdit: [ComposerSkill]?
         private var pendingLocalEditDeadline: Date?
+        private var localEditGeneration = 0
 
         init(_ p: ComposerTextView) {
             self.parent = p
@@ -139,12 +143,14 @@ struct ComposerTextView: NSViewRepresentable {
             let localSlashContext = tv.currentSlashContext()
             let externalTextBeforeLocalEdit = parent.text
             let externalSkillChipsBeforeLocalEdit = parent.skillChips
-            markPendingLocalEdit(text: localText,
-                                 skillChips: localSkillChips,
-                                 externalText: externalTextBeforeLocalEdit,
-                                 externalSkillChips: externalSkillChipsBeforeLocalEdit)
+            let generation = markPendingLocalEdit(
+                text: localText,
+                skillChips: localSkillChips,
+                externalText: externalTextBeforeLocalEdit,
+                externalSkillChips: externalSkillChipsBeforeLocalEdit
+            )
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, self.localEditGeneration == generation else { return }
                 self.parent.text = localText
                 self.parent.skillChips = localSkillChips
                 self.parent.onSlashContextChange(localSlashContext)
@@ -174,6 +180,11 @@ struct ComposerTextView: NSViewRepresentable {
         func shouldDeferExternalSync(text: String,
                                      skillChips: [ComposerSkill],
                                      textView: PlaceholderTextView) -> Bool {
+            // AppKit owns marked text until the input method commits it.
+            // Replacing the storage here cancels the user's active composition.
+            if textView.hasMarkedText() {
+                return true
+            }
             guard let pendingLocalText,
                   let pendingLocalSkillChips,
                   let pendingExternalTextBeforeLocalEdit,
@@ -186,40 +197,45 @@ struct ComposerTextView: NSViewRepresentable {
                 return false
             }
             guard Date() < deadline else {
-                clearPendingLocalEdit()
+                clearPendingLocalEdit(invalidateQueuedUpdate: true)
                 return false
             }
             guard text == pendingExternalTextBeforeLocalEdit &&
                 skillChips == pendingExternalSkillChipsBeforeLocalEdit
             else {
-                clearPendingLocalEdit()
+                clearPendingLocalEdit(invalidateQueuedUpdate: true)
                 return false
             }
             if textView.string == pendingLocalText &&
                 textView.skillChips() == pendingLocalSkillChips {
                 return true
             }
-            clearPendingLocalEdit()
+            clearPendingLocalEdit(invalidateQueuedUpdate: true)
             return false
         }
 
         private func markPendingLocalEdit(text: String,
                                           skillChips: [ComposerSkill],
                                           externalText: String,
-                                          externalSkillChips: [ComposerSkill]) {
+                                          externalSkillChips: [ComposerSkill]) -> Int {
+            localEditGeneration &+= 1
             pendingLocalText = text
             pendingLocalSkillChips = skillChips
             pendingExternalTextBeforeLocalEdit = externalText
             pendingExternalSkillChipsBeforeLocalEdit = externalSkillChips
             pendingLocalEditDeadline = Date().addingTimeInterval(0.35)
+            return localEditGeneration
         }
 
-        private func clearPendingLocalEdit() {
+        private func clearPendingLocalEdit(invalidateQueuedUpdate: Bool = false) {
             pendingLocalText = nil
             pendingLocalSkillChips = nil
             pendingExternalTextBeforeLocalEdit = nil
             pendingExternalSkillChipsBeforeLocalEdit = nil
             pendingLocalEditDeadline = nil
+            if invalidateQueuedUpdate {
+                localEditGeneration &+= 1
+            }
         }
 
         func focus(_ tv: NSTextView, moveCursorToEnd: Bool) {
@@ -326,6 +342,7 @@ final class PlaceholderTextView: NSTextView {
     }
 
     func currentSlashContext() -> ComposerSlashContext? {
+        guard !hasMarkedText() else { return nil }
         let selected = selectedRange()
         guard selected.length == 0 else { return nil }
 
@@ -382,6 +399,10 @@ final class PlaceholderTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if hasMarkedText() {
+            super.keyDown(with: event)
+            return
+        }
         if onKeyDown(event) {
             return
         }
@@ -393,42 +414,42 @@ final class PlaceholderTextView: NSTextView {
     }
 
     override func moveUp(_ sender: Any?) {
-        if onTextCommand(.moveUp) {
+        if !hasMarkedText(), onTextCommand(.moveUp) {
             return
         }
         super.moveUp(sender)
     }
 
     override func moveDown(_ sender: Any?) {
-        if onTextCommand(.moveDown) {
+        if !hasMarkedText(), onTextCommand(.moveDown) {
             return
         }
         super.moveDown(sender)
     }
 
     override func insertNewline(_ sender: Any?) {
-        if onTextCommand(.accept) {
+        if !hasMarkedText(), onTextCommand(.accept) {
             return
         }
         super.insertNewline(sender)
     }
 
     override func insertTab(_ sender: Any?) {
-        if onTextCommand(.complete) {
+        if !hasMarkedText(), onTextCommand(.complete) {
             return
         }
         super.insertTab(sender)
     }
 
     override func cancelOperation(_ sender: Any?) {
-        if onTextCommand(.cancel) {
+        if !hasMarkedText(), onTextCommand(.cancel) {
             return
         }
         super.cancelOperation(sender)
     }
 
     override func deleteBackward(_ sender: Any?) {
-        if deleteSkillChipBackward() {
+        if !hasMarkedText(), deleteSkillChipBackward() {
             return
         }
         super.deleteBackward(sender)
