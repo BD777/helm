@@ -144,24 +144,20 @@ final class AppStore {
                 project.id == access.projectId && project.location.isSSH
             }
         }
-        let schedulerSessionIds = Set(loadedSchedulers.flatMap { scheduler -> [UUID] in
-            var ids = scheduler.tasks.compactMap(\.sessionId)
-            if let schedulerSessionId = scheduler.schedulerSessionId {
-                ids.append(schedulerSessionId)
-            }
-            return ids
+        let managedWorkerSessionIds = Set(loadedSchedulers.flatMap { scheduler in
+            scheduler.tasks.compactMap(\.sessionId)
         })
         // Drop sessions that were never sent. Keep sessions with either a
         // vendor-issued id or Helm's own transcript snapshot; a failed launch
         // can still produce useful chat context before the vendor reports an id.
-        // Scheduler-created worker sessions are also kept even before their
+        // Project Inbox worker sessions are also kept even before their
         // first run because the scheduler state owns them by reference.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
             .filter {
                 !$0.transcript.isEmpty ||
                 $0.vendorSessionId != nil ||
                 Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
-                schedulerSessionIds.contains($0.id)
+                managedWorkerSessionIds.contains($0.id)
             }
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
@@ -851,10 +847,7 @@ final class AppStore {
 
     func unmanagedProjectSessions(in projectId: UUID) -> [Session] {
         let state = schedulerState(for: projectId)
-        var managedSessionIds = Set(state.tasks.compactMap(\.sessionId))
-        if let schedulerSessionId = state.schedulerSessionId {
-            managedSessionIds.insert(schedulerSessionId)
-        }
+        let managedSessionIds = Set(state.tasks.compactMap(\.sessionId))
         return sessions(in: projectId)
             .filter { !managedSessionIds.contains($0.id) }
             .sorted { lhs, rhs in
@@ -891,29 +884,6 @@ final class AppStore {
         }.count
     }
 
-    func setSchedulerProfile(_ profileId: UUID, for projectId: UUID) {
-        guard let profile = profile(profileId),
-              isProfileAvailable(profileId, for: projectId)
-        else { return }
-        let idx = ensureSchedulerStateIndex(for: projectId)
-        projectSchedulers[idx].schedulerProfileId = profileId
-        if let sessionId = projectSchedulers[idx].schedulerSessionId,
-           let sessionIndex = sessions.firstIndex(where: { $0.id == sessionId }),
-           !isSessionStreaming(sessionId),
-           sessions[sessionIndex].transcript.isEmpty {
-            let runConfiguration = SessionRunConfiguration.defaults(for: profile)
-            sessions[sessionIndex].profileId = profileId
-            sessions[sessionIndex].claudePermissionMode = runConfiguration.claudePermissionMode
-            sessions[sessionIndex].codexSandboxMode = runConfiguration.codexSandboxMode
-            sessions[sessionIndex].codexApprovalMode = runConfiguration.codexApprovalMode
-            sessions[sessionIndex].claudeEffort = runConfiguration.claudeEffort
-            sessions[sessionIndex].codexEffort = runConfiguration.codexEffort
-            upsertSidebarSession(for: sessions[sessionIndex])
-        }
-        projectSchedulers[idx].updatedAt = Date()
-        scheduleStateSave()
-    }
-
     func setDefaultWorkerProfile(_ profileId: UUID, for projectId: UUID) {
         guard profile(profileId) != nil,
               isProfileAvailable(profileId, for: projectId)
@@ -923,16 +893,6 @@ final class AppStore {
         projectSchedulers[idx].updatedAt = Date()
         scheduleStateSave()
         startRunnableSchedulerTasks(projectId: projectId)
-    }
-
-    func schedulerProfile(for projectId: UUID) -> Profile? {
-        let state = schedulerState(for: projectId)
-        let available = availableProfiles(for: projectId)
-        return state.schedulerProfileId.flatMap { id in
-            available.first { $0.id == id }
-        }
-            ?? available.first { $0.vendor == .codex }
-            ?? available.first
     }
 
     func defaultWorkerProfile(for projectId: UUID) -> Profile? {
@@ -953,30 +913,6 @@ final class AppStore {
         return schedulerStartBlockers(forTaskAt: taskIndex,
                                       schedulerIndex: schedulerIndex,
                                       project: project).isEmpty
-    }
-
-    @discardableResult
-    func openSchedulerSession(for projectId: UUID) -> UUID? {
-        guard let project = projects.first(where: { $0.id == projectId }),
-              let schedulerProfile = schedulerProfile(for: projectId)
-        else { return nil }
-        let idx = ensureSchedulerStateIndex(for: projectId)
-        if let sessionId = projectSchedulers[idx].schedulerSessionId,
-           sessions.contains(where: { $0.id == sessionId }) {
-            selectedSessionId = sessionId
-            return sessionId
-        }
-
-        let sessionId = createSession(in: projectId,
-                                      title: "Scheduler · \(project.name)",
-                                      profileId: schedulerProfile.id,
-                                      isDraft: false,
-                                      select: true)
-        projectSchedulers[idx].schedulerSessionId = sessionId
-        projectSchedulers[idx].schedulerProfileId = schedulerProfile.id
-        projectSchedulers[idx].updatedAt = Date()
-        scheduleStateSave()
-        return sessionId
     }
 
     @discardableResult
@@ -1061,7 +997,6 @@ final class AppStore {
               schedulerTask(for: sessionId) == nil
         else { return nil }
         let idx = ensureSchedulerStateIndex(for: projectId)
-        if projectSchedulers[idx].schedulerSessionId == sessionId { return nil }
 
         let now = Date()
         let taskId = UUID()

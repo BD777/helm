@@ -664,8 +664,6 @@ struct ProjectSchedulerHumanAction: Identifiable, Hashable, Codable {
 
 struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var projectId: UUID
-    var schedulerSessionId: UUID?
-    var schedulerProfileId: UUID?
     var defaultWorkerProfileId: UUID?
     var inbox: [ProjectSchedulerInboxItem]
     var tasks: [ProjectSchedulerTask]
@@ -675,16 +673,12 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var id: UUID { projectId }
 
     init(projectId: UUID,
-         schedulerSessionId: UUID? = nil,
-         schedulerProfileId: UUID? = nil,
          defaultWorkerProfileId: UUID? = nil,
          inbox: [ProjectSchedulerInboxItem] = [],
          tasks: [ProjectSchedulerTask] = [],
          humanActions: [ProjectSchedulerHumanAction] = [],
          updatedAt: Date = Date()) {
         self.projectId = projectId
-        self.schedulerSessionId = schedulerSessionId
-        self.schedulerProfileId = schedulerProfileId
         self.defaultWorkerProfileId = defaultWorkerProfileId
         self.inbox = inbox
         self.tasks = tasks

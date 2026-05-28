@@ -320,57 +320,18 @@ private struct ProjectSchedulerView: View {
                         .frame(height: 20)
                         .background(Color.helmHover, in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
                 }
-                HStack(spacing: 6) {
-                    Text("Scheduler: \(profileDisplayName(store.schedulerProfile(for: project.id)))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Text(displayPath(for: project))
-                        .font(DS.monoFontSmall)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .help(displayPath(for: project))
+                Text(displayPath(for: project))
+                    .font(DS.monoFontSmall)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(displayPath(for: project))
             }
 
             Spacer(minLength: 0)
 
             metric("\(tasks.filter { effectivePhase($0) == .running }.count)", "Running")
             metric("\(activeTasks.filter { effectivePhase($0) == .waiting }.count)", "Waiting")
-
-            schedulerProfileMenu(projectId: project.id,
-                                 profile: store.schedulerProfile(for: project.id),
-                                 setProfile: { store.setSchedulerProfile($0.id, for: project.id) })
-
-            Button {
-                if store.openSchedulerSession(for: project.id) == nil {
-                    store.showProfilesSheet = true
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "bubble.left.and.text.bubble.right")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text("Open Scheduler")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 9)
-                .frame(height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                        .fill(Color.helmCard)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                                .stroke(Color.helmBorder, lineWidth: 1)
-                        )
-                )
-            }
-            .buttonStyle(.plain)
-            .help("Open scheduler session")
-            .accessibilityLabel("Open scheduler session")
         }
         .padding(.horizontal, 16)
         .frame(height: 58)
@@ -386,83 +347,6 @@ private struct ProjectSchedulerView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(minWidth: 54, alignment: .trailing)
-    }
-
-    private func schedulerProfileMenu(projectId: UUID,
-                                      profile: Profile?,
-                                      setProfile: @escaping (Profile) -> Void) -> some View {
-        let candidates = store.availableProfiles(for: projectId)
-        return Menu {
-            ForEach(candidates) { candidate in
-                Button {
-                    setProfile(candidate)
-                } label: {
-                    menuSelectionLabel(candidate.name,
-                                       selected: candidate.id == profile?.id)
-                }
-            }
-            if candidates.isEmpty {
-                Button("Open Settings") {
-                    store.showProfilesSheet = true
-                }
-            }
-        } label: {
-            let displayName = profileDisplayName(profile)
-            HStack(spacing: 7) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text("Scheduler:")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text(displayName)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(profile == nil ? .tertiary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 9)
-            .frame(minWidth: 230, maxWidth: 300, minHeight: 28, alignment: .leading)
-            .fixedSize(horizontal: true, vertical: false)
-            .background(
-                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                    .fill(Color.helmCard)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                            .stroke(Color.helmBorder, lineWidth: 1)
-                    )
-            )
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .accessibilityLabel("Scheduler \(profileDisplayName(profile))")
-        .help("Scheduler profile")
-    }
-
-    private func profileDisplayName(_ profile: Profile?) -> String {
-        guard let profile else { return "No profile" }
-        return store.model(profile.primaryModelId)?.label ?? profile.name
-    }
-
-    @ViewBuilder
-    private func menuSelectionLabel(_ text: String,
-                                    selected: Bool) -> some View {
-        if selected {
-            Label {
-                Text(text)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Color.accentColor)
-            } icon: {
-                Image(systemName: "checkmark")
-                    .foregroundStyle(Color.accentColor)
-            }
-        } else {
-            Text(text)
-        }
     }
 
     private var schedulerBoard: some View {
