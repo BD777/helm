@@ -11,9 +11,8 @@ import SwiftUI
 ///   onSubmit (the field commits and grabs select-all focus) instead of
 ///   inserting a newline. Option+Return becomes the only way to break a line.
 ///
-/// This wrapper drops down to NSTextView, which has the right defaults
-/// (Return → newline, AppKit-managed IME) and lets us forward ⌘+Return to a
-/// send callback.
+/// This wrapper drops down to NSTextView for AppKit-managed IME handling and
+/// configurable Return-key shortcuts for sending and line breaks.
 struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var skillChips: [ComposerSkill]
@@ -23,6 +22,7 @@ struct ComposerTextView: NSViewRepresentable {
     let focusRequest: Int
     let skillInsertionRequest: ComposerSkillInsertionRequest?
     let sendShortcut: MessageSendShortcut
+    let lineBreakShortcut: MessageSendShortcut
     let onKeyDown: (NSEvent) -> Bool
     let onTextCommand: (ComposerTextCommand) -> Bool
     let onSlashContextChange: (ComposerSlashContext?) -> Void
@@ -51,6 +51,7 @@ struct ComposerTextView: NSViewRepresentable {
         tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         tv.placeholder = placeholder
         tv.sendShortcut = sendShortcut
+        tv.lineBreakShortcut = lineBreakShortcut
         tv.onKeyDown = onKeyDown
         tv.onTextCommand = onTextCommand
         tv.onSlashContextChange = onSlashContextChange
@@ -69,6 +70,7 @@ struct ComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         tv.placeholder = placeholder
         tv.sendShortcut = sendShortcut
+        tv.lineBreakShortcut = lineBreakShortcut
         tv.onKeyDown = onKeyDown
         tv.onTextCommand = onTextCommand
         tv.onSlashContextChange = onSlashContextChange
@@ -290,6 +292,7 @@ final class PlaceholderTextView: NSTextView {
         }
     }
     var sendShortcut: MessageSendShortcut = .defaultValue
+    var lineBreakShortcut: MessageSendShortcut = .defaultLineBreakValue
     var onSendShortcut: () -> Void = {}
     var onKeyDown: (NSEvent) -> Bool = { _ in false }
     var onTextCommand: (ComposerTextCommand) -> Bool = { _ in false }
@@ -410,7 +413,15 @@ final class PlaceholderTextView: NSTextView {
             onSendShortcut()
             return
         }
+        if lineBreakShortcut.matches(event) {
+            insertConfiguredLineBreak()
+            return
+        }
         super.keyDown(with: event)
+    }
+
+    private func insertConfiguredLineBreak() {
+        super.insertNewline(nil)
     }
 
     override func moveUp(_ sender: Any?) {

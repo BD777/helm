@@ -9,6 +9,7 @@ struct ProfilesSheet: View {
     @AppStorage("helmAppearance") private var appearanceRawValue = HelmAppearance.system.rawValue
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
     @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
+    @AppStorage(MessageSendShortcut.lineBreakUserDefaultsKey) private var messageLineBreakShortcutRawValue = MessageSendShortcut.defaultLineBreakValue.rawValue
     @State private var selection: Selection? = nil
     /// Set when the user clicks a provider's [+] — drives the AddModelsSheet
     /// presentation. Cleared on dismiss.
@@ -37,7 +38,10 @@ struct ProfilesSheet: View {
                 case .appearance:
                     AppearanceSettingsView(appearanceRawValue: $appearanceRawValue)
                 case .keyboardShortcuts:
-                    KeyboardShortcutsSettingsView(sendShortcutRawValue: $messageSendShortcutRawValue)
+                    KeyboardShortcutsSettingsView(
+                        sendShortcutRawValue: $messageSendShortcutRawValue,
+                        lineBreakShortcutRawValue: $messageLineBreakShortcutRawValue
+                    )
                 case .computerUse:
                     ComputerUseSettingsView(modeRawValue: $computerUseModeRawValue)
                 case .sshProject(let id):
@@ -104,7 +108,7 @@ struct ProfilesSheet: View {
                         selection: .keyboardShortcuts,
                         symbolName: "keyboard",
                         title: "Shortcuts",
-                        subtitle: "Send \(MessageSendShortcut.normalized(messageSendShortcutRawValue).glyph)"
+                        subtitle: shortcutsSubtitle
                     )
                     settingsRow(
                         selection: .computerUse,
@@ -182,6 +186,13 @@ struct ProfilesSheet: View {
             }
         }
         .background(Color.helmSidebarBg)
+    }
+
+    private var shortcutsSubtitle: String {
+        let send = MessageSendShortcut.normalized(messageSendShortcutRawValue)
+        let lineBreak = MessageSendShortcut.normalizedLineBreak(messageLineBreakShortcutRawValue,
+                                                                sendShortcut: send)
+        return "Send \(send.glyph) · New line \(lineBreak.glyph)"
     }
 
     private func section(title: String, addMenu: AnyView? = nil) -> some View {
@@ -495,15 +506,28 @@ struct ProfilesSheet: View {
 
     private struct KeyboardShortcutsSettingsView: View {
         @Binding var sendShortcutRawValue: String
+        @Binding var lineBreakShortcutRawValue: String
 
         private var sendShortcut: MessageSendShortcut {
             MessageSendShortcut.normalized(sendShortcutRawValue)
         }
 
+        private var lineBreakShortcut: MessageSendShortcut {
+            MessageSendShortcut.normalizedLineBreak(lineBreakShortcutRawValue,
+                                                    sendShortcut: sendShortcut)
+        }
+
         private var sendShortcutBinding: Binding<MessageSendShortcut> {
             Binding(
                 get: { sendShortcut },
-                set: { sendShortcutRawValue = $0.rawValue }
+                set: { setSendShortcut($0) }
+            )
+        }
+
+        private var lineBreakShortcutBinding: Binding<MessageSendShortcut> {
+            Binding(
+                get: { lineBreakShortcut },
+                set: { setLineBreakShortcut($0) }
             )
         }
 
@@ -511,39 +535,29 @@ struct ProfilesSheet: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 section("Messages") {
-                    HStack(spacing: 10) {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18, height: 18)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Send message")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(sendShortcut.glyph)
-                                .font(DS.monoFontSmall)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 12)
-                        Picker("", selection: sendShortcutBinding) {
-                            ForEach(MessageSendShortcut.allCases) { shortcut in
-                                Text("\(shortcut.glyph)  \(shortcut.displayName)")
-                                    .tag(shortcut)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(width: 220)
-                    }
+                    shortcutRow(symbolName: "paperplane.fill",
+                                title: "Send message",
+                                value: sendShortcut,
+                                selection: sendShortcutBinding)
+
+                    Divider()
+
+                    shortcutRow(symbolName: "arrow.turn.down.left",
+                                title: "New line",
+                                value: lineBreakShortcut,
+                                selection: lineBreakShortcutBinding)
 
                     Divider()
 
                     Button {
+                        lineBreakShortcutRawValue = MessageSendShortcut.defaultLineBreakValue.rawValue
                         sendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
                     } label: {
-                        Label("Restore Default", systemImage: "arrow.counterclockwise")
+                        Label("Restore Defaults", systemImage: "arrow.counterclockwise")
                     }
                     .controlSize(.small)
-                    .disabled(sendShortcut == .defaultValue)
+                    .disabled(sendShortcut == .defaultValue &&
+                              lineBreakShortcut == .defaultLineBreakValue)
                 }
                 Spacer(minLength: 0)
             }
@@ -561,12 +575,65 @@ struct ProfilesSheet: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Shortcuts")
                         .font(.system(size: 16, weight: .semibold))
-                    Text("Message sending")
+                    Text("Message composer")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
+        }
+
+        private func shortcutRow(symbolName: String,
+                                 title: String,
+                                 value: MessageSendShortcut,
+                                 selection: Binding<MessageSendShortcut>) -> some View {
+            HStack(spacing: 10) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(value.glyph)
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Picker("", selection: selection) {
+                    ForEach(MessageSendShortcut.allCases) { shortcut in
+                        Text("\(shortcut.glyph)  \(shortcut.displayName)")
+                            .tag(shortcut)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 220)
+            }
+        }
+
+        private func setSendShortcut(_ shortcut: MessageSendShortcut) {
+            let previousSendShortcut = sendShortcut
+            let currentLineBreakShortcut = lineBreakShortcut
+            sendShortcutRawValue = shortcut.rawValue
+            guard currentLineBreakShortcut == shortcut else { return }
+            lineBreakShortcutRawValue = MessageSendShortcut
+                .fallback(avoiding: shortcut,
+                          preferred: previousSendShortcut,
+                          defaultValue: .defaultLineBreakValue)
+                .rawValue
+        }
+
+        private func setLineBreakShortcut(_ shortcut: MessageSendShortcut) {
+            let currentSendShortcut = sendShortcut
+            let previousLineBreakShortcut = lineBreakShortcut
+            lineBreakShortcutRawValue = shortcut.rawValue
+            guard currentSendShortcut == shortcut else { return }
+            sendShortcutRawValue = MessageSendShortcut
+                .fallback(avoiding: shortcut,
+                          preferred: previousLineBreakShortcut,
+                          defaultValue: .defaultValue)
+                .rawValue
         }
 
         private func section<Content: View>(_ title: String,

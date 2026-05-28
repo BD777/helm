@@ -297,9 +297,7 @@ enum CodexComputerUseMode: String, CaseIterable, Hashable, Codable, Identifiable
     }
 }
 
-/// Device-level message send shortcut. Composer text input and the send button
-/// both read this so the footer hint, focused NSTextView handling, and SwiftUI
-/// keyboard shortcut stay in sync.
+/// Device-level Return-key shortcut choices for composer actions.
 enum MessageSendShortcut: String, CaseIterable, Hashable, Codable, Identifiable {
     case commandReturn = "commandReturn"
     case returnOnly = "return"
@@ -308,7 +306,9 @@ enum MessageSendShortcut: String, CaseIterable, Hashable, Codable, Identifiable 
     case controlReturn = "controlReturn"
 
     static let userDefaultsKey = "messageSendShortcut"
-    static let defaultValue: Self = .commandReturn
+    static let lineBreakUserDefaultsKey = "messageLineBreakShortcut"
+    static let defaultValue: Self = .returnOnly
+    static let defaultLineBreakValue: Self = .shiftReturn
 
     private static let returnKeyCodes: Set<UInt16> = [36, 76]
     private static let relevantAppKitModifiers: NSEvent.ModifierFlags = [
@@ -369,6 +369,26 @@ enum MessageSendShortcut: String, CaseIterable, Hashable, Codable, Identifiable 
 
     static func normalized(_ rawValue: String) -> Self {
         Self(rawValue: rawValue) ?? defaultValue
+    }
+
+    static func normalizedLineBreak(_ rawValue: String, sendShortcut: Self) -> Self {
+        let shortcut = Self(rawValue: rawValue) ?? defaultLineBreakValue
+        guard shortcut == sendShortcut else { return shortcut }
+        return fallback(avoiding: sendShortcut,
+                        preferred: defaultLineBreakValue,
+                        defaultValue: defaultLineBreakValue)
+    }
+
+    static func fallback(avoiding reserved: Self,
+                         preferred: Self?,
+                         defaultValue: Self) -> Self {
+        if let preferred, preferred != reserved {
+            return preferred
+        }
+        if defaultValue != reserved {
+            return defaultValue
+        }
+        return allCases.first { $0 != reserved } ?? .commandReturn
     }
 
     static func stored(in defaults: UserDefaults = .standard) -> Self {

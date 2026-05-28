@@ -742,6 +742,7 @@ private struct ProjectSchedulerComposer: View {
     @Environment(AppStore.self) private var store
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
     @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
+    @AppStorage(MessageSendShortcut.lineBreakUserDefaultsKey) private var messageLineBreakShortcutRawValue = MessageSendShortcut.defaultLineBreakValue.rawValue
 
     let project: Project
     @Binding var text: String
@@ -794,6 +795,11 @@ private struct ProjectSchedulerComposer: View {
         MessageSendShortcut.normalized(messageSendShortcutRawValue)
     }
 
+    private var messageLineBreakShortcut: MessageSendShortcut {
+        MessageSendShortcut.normalizedLineBreak(messageLineBreakShortcutRawValue,
+                                                sendShortcut: messageSendShortcut)
+    }
+
     private var canSubmit: Bool {
         hasComposerContent && selectedProfile != nil && sshSendBlockReason == nil
     }
@@ -844,6 +850,7 @@ private struct ProjectSchedulerComposer: View {
             focusRequest: focusRequest &+ localFocusRequest,
             resetRequest: composerInteractionResetRequest,
             sendShortcut: messageSendShortcut,
+            lineBreakShortcut: messageLineBreakShortcut,
             menuWidthSource: footerWidth,
             textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,

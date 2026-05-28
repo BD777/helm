@@ -7,6 +7,7 @@ struct ComposerView: View {
     @Environment(AppStore.self) private var store
     @AppStorage(CodexComputerUseMode.userDefaultsKey) private var computerUseModeRawValue = CodexComputerUseMode.automatic.rawValue
     @AppStorage(MessageSendShortcut.userDefaultsKey) private var messageSendShortcutRawValue = MessageSendShortcut.defaultValue.rawValue
+    @AppStorage(MessageSendShortcut.lineBreakUserDefaultsKey) private var messageLineBreakShortcutRawValue = MessageSendShortcut.defaultLineBreakValue.rawValue
     var externalFocusRequest: Int = 0
     @State private var text: String = ""
     @State private var pickerOpen: Bool = false
@@ -84,6 +85,7 @@ struct ComposerView: View {
             focusRequest: focusRequest,
             resetRequest: composerInteractionResetRequest,
             sendShortcut: messageSendShortcut,
+            lineBreakShortcut: messageLineBreakShortcut,
             menuWidthSource: footerWidth,
             textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,
@@ -139,6 +141,11 @@ struct ComposerView: View {
 
     private var messageSendShortcut: MessageSendShortcut {
         MessageSendShortcut.normalized(messageSendShortcutRawValue)
+    }
+
+    private var messageLineBreakShortcut: MessageSendShortcut {
+        MessageSendShortcut.normalizedLineBreak(messageLineBreakShortcutRawValue,
+                                                sendShortcut: messageSendShortcut)
     }
 
     private var canSubmit: Bool {
@@ -1114,6 +1121,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
     let focusRequest: Int
     let resetRequest: Int
     let sendShortcut: MessageSendShortcut
+    let lineBreakShortcut: MessageSendShortcut
     let menuWidthSource: CGFloat
     let textTopPadding: CGFloat
     let skillProfile: Profile?
@@ -1145,6 +1153,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
          focusRequest: Int,
          resetRequest: Int,
          sendShortcut: MessageSendShortcut,
+         lineBreakShortcut: MessageSendShortcut,
          menuWidthSource: CGFloat,
          textTopPadding: CGFloat,
          skillProfile: Profile?,
@@ -1161,6 +1170,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
         self.focusRequest = focusRequest
         self.resetRequest = resetRequest
         self.sendShortcut = sendShortcut
+        self.lineBreakShortcut = lineBreakShortcut
         self.menuWidthSource = menuWidthSource
         self.textTopPadding = textTopPadding
         self.skillProfile = skillProfile
@@ -1183,6 +1193,7 @@ struct SkillAwareComposerBox<TopContent: View, AccessoryOverlay: View>: View {
                 focusRequest: focusRequest &+ localFocusRequest,
                 skillInsertionRequest: skillInsertionRequest,
                 sendShortcut: sendShortcut,
+                lineBreakShortcut: lineBreakShortcut,
                 onKeyDown: handleComposerKeyDown,
                 onTextCommand: handleComposerTextCommand,
                 onSlashContextChange: handleSlashContextChange,
