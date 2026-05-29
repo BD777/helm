@@ -101,3 +101,181 @@ struct ToolCallCard: View {
         return false
     }
 }
+
+/// Compact wrapper for a run of adjacent tool calls. This keeps long command
+/// bursts as one transcript row while preserving the existing per-call detail
+/// view once the user expands the group.
+struct ToolCallGroupCard: View {
+    let calls: [ToolCall]
+    @State private var collapsed: Bool = true
+
+    var body: some View {
+        if let onlyCall = calls.first, calls.count == 1 {
+            ToolCallCard(call: onlyCall)
+        } else if !calls.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        collapsed.toggle()
+                    }
+                } label: {
+                    headerContent
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(summary)
+                        .accessibilityValue(collapsed ? "collapsed" : "expanded")
+                        .accessibilityHint(collapsed ? "Show tool calls" : "Hide tool calls")
+                }
+                .buttonStyle(.plain)
+
+                if !collapsed {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(calls) { call in
+                            ToolCallCard(call: call)
+                        }
+                    }
+                    .padding(.top, 2)
+                    .padding(.leading, 22)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var headerContent: some View {
+        HStack(spacing: 8) {
+            leadingIcon
+                .frame(width: 14, alignment: .center)
+            Text(summary)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                .stroke(Color.helmBorder.opacity(0.75), lineWidth: 0.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+    }
+
+    @ViewBuilder
+    private var leadingIcon: some View {
+        if hasRunningCall {
+            ProgressView()
+                .controlSize(.mini)
+                .scaleEffect(0.72)
+        } else if hasErrorCall {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.red.opacity(0.75))
+        } else if hasStoppedCall {
+            Image(systemName: "stop.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        } else {
+            Image(systemName: "terminal")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var summary: String {
+        "\(statusLabel) · \(toolSummary)"
+    }
+
+    private var statusLabel: String {
+        if hasRunningCall { return "处理中" }
+        if hasErrorCall { return "出错" }
+        if hasStoppedCall { return "已停止" }
+        return allShellCalls ? "已运行" : "已处理"
+    }
+
+    private var toolSummary: String {
+        var buckets: [(count: Int, label: String)] = []
+        let commandCount = calls.filter { bucket(for: $0) == .command }.count
+        let editCount = calls.filter { bucket(for: $0) == .edit }.count
+        let fileCount = calls.filter { bucket(for: $0) == .file }.count
+        let searchCount = calls.filter { bucket(for: $0) == .search }.count
+        let computerUseCount = calls.filter { bucket(for: $0) == .computerUse }.count
+        let knownCount = commandCount + editCount + fileCount + searchCount + computerUseCount
+        let otherCount = calls.count - knownCount
+
+        if fileCount > 0 { buckets.append((fileCount, "个文件")) }
+        if searchCount > 0 { buckets.append((searchCount, "次搜索")) }
+        if commandCount > 0 { buckets.append((commandCount, "条命令")) }
+        if editCount > 0 { buckets.append((editCount, "次改动")) }
+        if computerUseCount > 0 { buckets.append((computerUseCount, "次界面操作")) }
+        if otherCount > 0 { buckets.append((otherCount, "个工具调用")) }
+
+        guard !buckets.isEmpty else {
+            return "\(calls.count) 个工具调用"
+        }
+        return buckets
+            .map { "\($0.count) \($0.label)" }
+            .joined(separator: " · ")
+    }
+
+    private var allShellCalls: Bool {
+        !calls.isEmpty && calls.allSatisfy { bucket(for: $0) == .command }
+    }
+
+    private var hasRunningCall: Bool {
+        calls.contains { call in
+            if case .running = call.status { return true }
+            return false
+        }
+    }
+
+    private var hasErrorCall: Bool {
+        calls.contains { call in
+            if case .error = call.status { return true }
+            return false
+        }
+    }
+
+    private var hasStoppedCall: Bool {
+        calls.contains { call in
+            if case .stopped = call.status { return true }
+            return false
+        }
+    }
+
+    private enum ToolBucket {
+        case command
+        case edit
+        case file
+        case search
+        case computerUse
+        case other
+    }
+
+    private func bucket(for call: ToolCall) -> ToolBucket {
+        let name = call.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if name == "shell" || name == "bash" || name == "terminal" {
+            return .command
+        }
+        if name == "apply patch" || name.contains("edit") || name.contains("write") {
+            return .edit
+        }
+        if name.contains("search") || name == "rg" || name == "grep" || name.contains("find") {
+            return .search
+        }
+        if name.contains("read") || name.contains("open") || name.contains("file") || name.contains("view") {
+            return .file
+        }
+        if name == "computer use" {
+            return .computerUse
+        }
+        return .other
+    }
+}

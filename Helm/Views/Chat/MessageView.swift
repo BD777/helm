@@ -602,11 +602,7 @@ struct MessageView: View {
     let message: Message
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(message.parts.enumerated()), id: \.offset) { _, part in
-                partView(part)
-            }
-        }
+        MessagePartListView(parts: message.parts, spacing: 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, isUser ? 12 : 0)
         .padding(.vertical, isUser ? 8 : 0)
@@ -621,6 +617,46 @@ struct MessageView: View {
     private var isUser: Bool {
         if case .user = message.role { return true }
         return false
+    }
+}
+
+private enum MessagePartDisplayItem: Identifiable {
+    case single(id: String, part: Part)
+    case toolGroup(id: String, calls: [ToolCall])
+
+    var id: String {
+        switch self {
+        case .single(let id, _), .toolGroup(let id, _):
+            return id
+        }
+    }
+}
+
+private struct MessagePartListView: View {
+    let parts: [Part]
+    let spacing: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            ForEach(groupedParts) { item in
+                itemView(item)
+            }
+        }
+    }
+
+    private var groupedParts: [MessagePartDisplayItem] {
+        groupConsecutiveToolCalls(parts)
+    }
+
+    @ViewBuilder
+    private func itemView(_ item: MessagePartDisplayItem) -> some View {
+        switch item {
+        case .single(_, let part):
+            partView(part)
+        case .toolGroup(_, let calls):
+            ToolCallGroupCard(calls: calls)
+                .padding(.vertical, 4)
+        }
     }
 
     @ViewBuilder
@@ -642,6 +678,40 @@ struct MessageView: View {
     }
 }
 
+private func groupConsecutiveToolCalls(_ parts: [Part]) -> [MessagePartDisplayItem] {
+    var out: [MessagePartDisplayItem] = []
+    var pendingCalls: [(offset: Int, call: ToolCall)] = []
+
+    func flushPendingCalls() {
+        guard !pendingCalls.isEmpty else { return }
+        if pendingCalls.count == 1,
+           let pending = pendingCalls.first {
+            out.append(.single(
+                id: "p-\(pending.offset)-\(Part.toolCall(pending.call).id)",
+                part: .toolCall(pending.call)
+            ))
+        } else if let first = pendingCalls.first {
+            out.append(.toolGroup(
+                id: "tg-\(first.call.id.uuidString)",
+                calls: pendingCalls.map(\.call)
+            ))
+        }
+        pendingCalls = []
+    }
+
+    for (offset, part) in parts.enumerated() {
+        switch part {
+        case .toolCall(let call):
+            pendingCalls.append((offset, call))
+        default:
+            flushPendingCalls()
+            out.append(.single(id: "p-\(offset)-\(part.id)", part: part))
+        }
+    }
+    flushPendingCalls()
+    return out
+}
+
 /// Foldable container for an entire multi-step thinking phase (one or
 /// more consecutive assistant messages, each potentially with tool
 /// calls). Default state tracks the running flag — open while the agent
@@ -658,13 +728,13 @@ private struct ThinkingBlock: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             if !collapsed {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(messages) { msg in
-                        MessageView(message: msg)
-                    }
-                }
+                MessagePartListView(parts: flattenedParts, spacing: 10)
             }
         }
+    }
+
+    private var flattenedParts: [Part] {
+        messages.flatMap { $0.parts }
     }
 
     private var stepCount: Int {
