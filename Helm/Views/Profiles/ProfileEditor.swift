@@ -185,6 +185,20 @@ struct ProfileEditor: View {
                 .labelsHidden()
                 .frame(maxWidth: 280)
             }
+            field("Approval policy") {
+                Picker("", selection: Binding<CodexApprovalMode?>(
+                    get: { profile.approvalMode },
+                    set: { profile.approvalMode = $0 }
+                )) {
+                    Text("(default)").tag(CodexApprovalMode?.none)
+                    ForEach(CodexApprovalMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(CodexApprovalMode?.some(mode))
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 280)
+            }
             field("Delegate to vendor profile",
                   hint: "Local projects only. SSH projects always use Helm's local profile settings instead of remote [profiles.X].") {
                 TextField("optional — e.g. aidp", text: Binding(

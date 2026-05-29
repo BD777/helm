@@ -173,6 +173,7 @@ struct Profile: Identifiable, Hashable, Codable {
     var reasoningEffort: ReasoningEffort?
     var serviceTier: ServiceTier?
     var sandboxMode: SandboxMode?
+    var approvalMode: CodexApprovalMode?
     /// If non-nil, spawn `codex --profile X` and let codex resolve its own
     /// `[profiles.X]`. The other Codex-only fields are then ignored.
     var delegateVendorProfile: String?
@@ -555,6 +556,7 @@ struct SessionRunConfiguration: Hashable {
     static func defaults(for profile: Profile) -> SessionRunConfiguration {
         SessionRunConfiguration(
             codexSandboxMode: profile.sandboxMode ?? .workspace,
+            codexApprovalMode: profile.approvalMode ?? .onRequest,
             codexEffort: profile.reasoningEffort ?? .medium
         )
     }

@@ -1303,6 +1303,7 @@ struct ProfilesSheet: View {
             subagentModelId: nil,
             autoCompactWindow: nil,
             reasoningEffort: nil, serviceTier: nil, sandboxMode: nil,
+            approvalMode: nil,
             delegateVendorProfile: nil
         )
         store.upsertProfile(p)

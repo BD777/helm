@@ -28,6 +28,7 @@ struct RemoteCodexProfileCandidate: Identifiable, Hashable, Sendable {
     var reasoningEffort: Profile.ReasoningEffort?
     var serviceTier: Profile.ServiceTier?
     var sandboxMode: Profile.SandboxMode?
+    var approvalMode: CodexApprovalMode?
 
     var id: String {
         [profileName ?? "__default__", providerKey.isEmpty ? "__default_provider__" : providerKey, modelId]
@@ -204,6 +205,7 @@ private enum RemoteCodexConfigParser {
         var reasoningEffort: Profile.ReasoningEffort?
         var serviceTier: Profile.ServiceTier?
         var sandboxMode: Profile.SandboxMode?
+        var approvalMode: CodexApprovalMode?
     }
 
     static func parse(_ text: String) -> [RemoteCodexProviderCandidate] {
@@ -256,6 +258,8 @@ private enum RemoteCodexConfigParser {
                     profile.serviceTier = Profile.ServiceTier(rawValue: value)
                 case "sandbox_mode":
                     profile.sandboxMode = Profile.SandboxMode(rawValue: value)
+                case "approval_policy":
+                    profile.approvalMode = CodexApprovalMode(rawValue: value)
                 default:
                     break
                 }
@@ -278,7 +282,8 @@ private enum RemoteCodexConfigParser {
         let hasTopLevelCodexConfig = topLevel["model"] != nil ||
             topLevel["model_reasoning_effort"] != nil ||
             topLevel["service_tier"] != nil ||
-            topLevel["sandbox_mode"] != nil
+            topLevel["sandbox_mode"] != nil ||
+            topLevel["approval_policy"] != nil
         let defaultProviderKey = topLevel["model_provider"] ?? (hasTopLevelCodexConfig ? "" : nil)
         let defaultModel = topLevel["model"]
         var candidatesByProvider: [String: [RemoteCodexProfileCandidate]] = [:]
@@ -300,6 +305,9 @@ private enum RemoteCodexConfigParser {
                     },
                     sandboxMode: topLevel["sandbox_mode"].flatMap {
                         Profile.SandboxMode(rawValue: $0)
+                    },
+                    approvalMode: topLevel["approval_policy"].flatMap {
+                        CodexApprovalMode(rawValue: $0)
                     }
                 )
             )
@@ -320,7 +328,8 @@ private enum RemoteCodexConfigParser {
                     modelId: profile.modelId ?? defaultModel ?? "remote default",
                     reasoningEffort: profile.reasoningEffort,
                     serviceTier: profile.serviceTier,
-                    sandboxMode: profile.sandboxMode
+                    sandboxMode: profile.sandboxMode,
+                    approvalMode: profile.approvalMode
                 )
             )
             if providers[providerKey] == nil {

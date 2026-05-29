@@ -431,6 +431,7 @@ final class AppStore {
             reasoningEffort: candidate.reasoningEffort,
             serviceTier: candidate.serviceTier,
             sandboxMode: candidate.sandboxMode,
+            approvalMode: candidate.approvalMode,
             delegateVendorProfile: candidate.profileName
         )
         profiles.append(profile)
@@ -510,6 +511,7 @@ final class AppStore {
             reasoningEffort: nil,
             serviceTier: nil,
             sandboxMode: nil,
+            approvalMode: nil,
             delegateVendorProfile: nil
         )
         profiles.append(profile)
@@ -1909,6 +1911,7 @@ else:
         sessions[idx].profileId = profile.id
         if profile.vendor == .codex {
             sessions[idx].codexSandboxMode = profile.sandboxMode ?? .workspace
+            sessions[idx].codexApprovalMode = profile.approvalMode ?? .onRequest
             sessions[idx].codexEffort = profile.reasoningEffort ?? .medium
         }
         upsertSidebarSession(for: sessions[idx])
