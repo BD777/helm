@@ -22,6 +22,7 @@ struct ProfilesSheet: View {
         case appearance
         case keyboardShortcuts
         case computerUse
+        case archivedConversations
         case sshProject(UUID)
         case provider(UUID)
         case model(UUID)
@@ -44,6 +45,8 @@ struct ProfilesSheet: View {
                     )
                 case .computerUse:
                     ComputerUseSettingsView(modeRawValue: $computerUseModeRawValue)
+                case .archivedConversations:
+                    ArchivedConversationsSettingsView()
                 case .sshProject(let id):
                     if let project = store.projects.first(where: { $0.id == id }) {
                         SSHProfileSettingsView(project: project)
@@ -115,6 +118,12 @@ struct ProfilesSheet: View {
                         symbolName: "cursorarrow.motionlines",
                         title: "Computer Use",
                         subtitle: (CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic).displayName
+                    )
+                    settingsRow(
+                        selection: .archivedConversations,
+                        symbolName: "archivebox",
+                        title: "Archived Conversations",
+                        subtitle: archivedSubtitle
                     )
                     if !store.sshProjects.isEmpty {
                         section(title: "SSH Connections")
@@ -193,6 +202,11 @@ struct ProfilesSheet: View {
         let lineBreak = MessageSendShortcut.normalizedLineBreak(messageLineBreakShortcutRawValue,
                                                                 sendShortcut: send)
         return "Send \(send.glyph) · New line \(lineBreak.glyph)"
+    }
+
+    private var archivedSubtitle: String {
+        let count = store.archivedSessions.count
+        return count == 1 ? "1 archived" : "\(count) archived"
     }
 
     private func section(title: String, addMenu: AnyView? = nil) -> some View {
@@ -834,6 +848,159 @@ struct ProfilesSheet: View {
                     )
             )
         }
+    }
+
+    private struct ArchivedConversationsSettingsView: View {
+        @Environment(AppStore.self) private var store
+
+        private var archivedSessions: [Session] {
+            store.archivedSessions
+        }
+
+        var body: some View {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+                    if archivedSessions.isEmpty {
+                        emptyState
+                    } else {
+                        archivedList
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.helmChatBg)
+        }
+
+        private var header: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Archived Conversations")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text(archivedSessions.count == 1 ? "1 conversation" : "\(archivedSessions.count) conversations")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+
+        private var emptyState: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No archived conversations.")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Finished Project Inbox sessions will appear here.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: 560, alignment: .leading)
+            .background(listBackground)
+        }
+
+        private var archivedList: some View {
+            VStack(spacing: 0) {
+                ForEach(Array(archivedSessions.enumerated()), id: \.element.id) { pair in
+                    let index = pair.offset
+                    let session = pair.element
+                    archivedRow(session)
+                    if index < archivedSessions.count - 1 {
+                        Divider()
+                            .padding(.leading, 42)
+                    }
+                }
+            }
+            .frame(maxWidth: 620, alignment: .leading)
+            .background(listBackground)
+        }
+
+        private func archivedRow(_ session: Session) -> some View {
+            let project = store.projects.first { $0.id == session.projectId }
+            return HStack(alignment: .top, spacing: 10) {
+                Image(systemName: project?.location.isSSH == true ? "cloud" : "folder")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(session.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        Text(projectKind(project))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text(project?.name ?? "Missing project")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Text(projectPath(project))
+                        .font(DS.monoFontSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Text("Archived \(Self.archiveFormatter.string(from: session.archivedAt ?? .distantPast))")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer(minLength: 12)
+
+                Button {
+                    store.unarchiveSession(session.id)
+                } label: {
+                    Text("Unarchive")
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+
+        private var listBackground: some View {
+            RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                .fill(Color.helmCard)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                        .stroke(Color.helmBorder, lineWidth: 1)
+                )
+        }
+
+        private func projectKind(_ project: Project?) -> String {
+            guard let project else { return "missing" }
+            return project.location.isSSH ? "remote" : "local"
+        }
+
+        private func projectPath(_ project: Project?) -> String {
+            guard let project else { return "Project was removed" }
+            switch project.location {
+            case .local(let path):
+                return path
+            case .ssh(let host, let path, let status):
+                let resolvedPath = status.resolvedPath?.isEmpty == false
+                    ? status.resolvedPath!
+                    : path
+                return "\(host):\(resolvedPath)"
+            }
+        }
+
+        private static let archiveFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            return formatter
+        }()
     }
 
     private struct SSHProfileSettingsView: View {

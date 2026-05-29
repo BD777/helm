@@ -382,6 +382,12 @@ private struct ProjectSection: View {
                             Label("Rename", systemImage: "pencil")
                         }
                         Button {
+                            store.archiveSession(s.id)
+                        } label: {
+                            Label("Archive", systemImage: "archivebox")
+                        }
+                        .disabled(isRunning)
+                        Button {
                             copyToPasteboard(s.id.uuidString.lowercased())
                         } label: {
                             Label("Copy Helm ID", systemImage: "doc.on.doc")

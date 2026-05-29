@@ -32,6 +32,20 @@ struct ChatToolbar: View {
             }
             if let session {
                 Button {
+                    store.archiveSession(session.id)
+                } label: {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isSessionStreaming(session.id))
+                .help("Archive session")
+                .accessibilityLabel("Archive session")
+
+                Button {
                     pendingDelete = session
                 } label: {
                     Image(systemName: "trash")

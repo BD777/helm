@@ -466,6 +466,10 @@ struct Session: Identifiable, Hashable, Codable {
     /// Drafts are hidden from the sidebar and excluded from state.json so an
     /// accidental click doesn't litter persistent state with empty rows.
     var isDraft: Bool = false
+    /// Archived conversations stay in state.json but are hidden from normal
+    /// navigation until the user restores them from Settings.
+    var archivedAt: Date? = nil
+    var isArchived: Bool { archivedAt != nil }
 
     // Persistence: transcript items live in the vendor's own session log
     // (~/.claude/projects/...) and isDraft is transient by design — both are
@@ -474,7 +478,7 @@ struct Session: Identifiable, Hashable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, projectId, title, profileId, lastUpdate, vendorSessionId,
              claudePermissionMode, codexSandboxMode, codexApprovalMode,
-             claudeEffort, codexEffort
+             claudeEffort, codexEffort, archivedAt
     }
 
     init(id: UUID, projectId: UUID, title: String, profileId: UUID,
@@ -485,7 +489,8 @@ struct Session: Identifiable, Hashable, Codable {
          codexEffort: Profile.ReasoningEffort = .medium,
          lastUpdate: String,
          transcript: [TranscriptItem] = [], vendorSessionId: String? = nil,
-         isDraft: Bool = false) {
+         isDraft: Bool = false,
+         archivedAt: Date? = nil) {
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -499,6 +504,7 @@ struct Session: Identifiable, Hashable, Codable {
         self.transcript = transcript
         self.vendorSessionId = vendorSessionId
         self.isDraft = isDraft
+        self.archivedAt = archivedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -514,6 +520,7 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = try c.decodeIfPresent(CodexApprovalMode.self, forKey: .codexApprovalMode) ?? .onRequest
         self.claudeEffort = try c.decodeIfPresent(ClaudeEffort.self, forKey: .claudeEffort) ?? .medium
         self.codexEffort = try c.decodeIfPresent(Profile.ReasoningEffort.self, forKey: .codexEffort) ?? .medium
+        self.archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         self.transcript = []
         self.isDraft = false
     }
@@ -531,6 +538,7 @@ struct Session: Identifiable, Hashable, Codable {
         try c.encode(codexApprovalMode, forKey: .codexApprovalMode)
         try c.encode(claudeEffort, forKey: .claudeEffort)
         try c.encode(codexEffort, forKey: .codexEffort)
+        try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
     }
 }
 

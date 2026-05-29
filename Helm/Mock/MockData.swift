@@ -155,6 +155,7 @@ final class AppStore {
         // first run because the scheduler state owns them by reference.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
             .filter {
+                $0.isArchived ||
                 !$0.transcript.isEmpty ||
                 $0.vendorSessionId != nil ||
                 Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
@@ -163,7 +164,9 @@ final class AppStore {
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
         let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
-        self.selectedSessionId = cleanSessions.contains { $0.id == restoredSelection }
+        self.selectedSessionId = cleanSessions.contains {
+            $0.id == restoredSelection && !$0.isArchived
+        }
             ? restoredSelection
             : nil
         let restoredProjectId = stateFile.selectedProjectId
@@ -610,7 +613,7 @@ final class AppStore {
         let updatedAt = TargetSessionIndexStore.timestamp()
         var grouped: [TargetSessionIndexLocation: [TargetSessionIndexEntry]] = [:]
 
-        for session in sessions where !session.isDraft {
+        for session in sessions where !session.isDraft && !session.isArchived {
             guard let project = projects.first(where: { $0.id == session.projectId }),
                   let profile = profile(session.profileId),
                   let target = TargetSessionIndexStore.targetLocation(for: project),
@@ -752,7 +755,7 @@ final class AppStore {
     }
 
     var selectedSession: Session? {
-        get { sessions.first { $0.id == selectedSessionId } }
+        get { sessions.first { $0.id == selectedSessionId && !$0.isArchived } }
         set {
             guard let new = newValue, let idx = sessions.firstIndex(where: { $0.id == new.id }) else { return }
             sessions[idx] = new
@@ -795,11 +798,19 @@ final class AppStore {
     }
 
     func sessions(in projectId: UUID) -> [Session] {
-        sessions.filter { $0.projectId == projectId && !$0.isDraft }
+        sessions.filter { $0.projectId == projectId && !$0.isDraft && !$0.isArchived }
     }
 
     func sidebarSessions(in projectId: UUID) -> [SidebarSession] {
         sidebarSessions.filter { $0.projectId == projectId }
+    }
+
+    var archivedSessions: [Session] {
+        sessions
+            .filter(\.isArchived)
+            .sorted {
+                ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast)
+            }
     }
 
     var visibleSessions: [Session] {
@@ -873,6 +884,23 @@ final class AppStore {
         scheduleStateSave()
     }
 
+    @discardableResult
+    func archiveSession(_ id: UUID) -> Bool {
+        archiveSession(id, archivedAt: Date(), schedulesSave: true)
+    }
+
+    @discardableResult
+    func unarchiveSession(_ id: UUID) -> Bool {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }),
+              sessions[idx].isArchived
+        else { return false }
+
+        sessions[idx].archivedAt = nil
+        upsertSidebarSession(for: sessions[idx])
+        scheduleStateSave()
+        return true
+    }
+
     func deleteSession(_ id: UUID) {
         guard !isSessionStreaming(id),
               let idx = sessions.firstIndex(where: { $0.id == id })
@@ -887,11 +915,42 @@ final class AppStore {
         TranscriptSnapshotStore.delete(sessionId: id)
         if wasSelected {
             selectedSessionId = sessions.first {
-                $0.projectId == projectId && !$0.isDraft
+                $0.projectId == projectId && !$0.isDraft && !$0.isArchived
             }?.id
         } else {
             scheduleStateSave()
         }
+    }
+
+    @discardableResult
+    private func archiveSession(_ id: UUID,
+                                archivedAt: Date,
+                                schedulesSave: Bool) -> Bool {
+        guard !isSessionStreaming(id),
+              let idx = sessions.firstIndex(where: { $0.id == id })
+        else { return false }
+
+        if sessions[idx].archivedAt == archivedAt {
+            return false
+        }
+
+        let projectId = sessions[idx].projectId
+        if let project = projects.first(where: { $0.id == projectId }) {
+            removeTargetSessionIndexEntries([id], for: project)
+        }
+
+        sessions[idx].isDraft = false
+        sessions[idx].archivedAt = archivedAt
+        removeSidebarSession(id)
+
+        if selectedSessionId == id {
+            selectedProjectId = projectId
+            selectedSessionId = nil
+        } else if schedulesSave {
+            scheduleStateSave()
+        }
+
+        return true
     }
 
     func toggleCollapsed(_ projectId: UUID) {
@@ -971,7 +1030,7 @@ final class AppStore {
     }
 
     private static func sidebarSessions(from sessions: [Session]) -> [SidebarSession] {
-        sessions.filter { !$0.isDraft }.map(SidebarSession.init)
+        sessions.filter { !$0.isDraft && !$0.isArchived }.map(SidebarSession.init)
     }
 
     private static func hasRestorableTranscriptSnapshot(sessionId: UUID) -> Bool {
@@ -991,7 +1050,7 @@ final class AppStore {
     }
 
     private func upsertSidebarSession(for session: Session) {
-        if session.isDraft {
+        if session.isDraft || session.isArchived {
             removeSidebarSession(session.id)
             return
         }
@@ -1171,7 +1230,9 @@ final class AppStore {
 
     @discardableResult
     func adoptSessionIntoScheduler(_ sessionId: UUID, projectId: UUID) -> UUID? {
-        guard let session = sessions.first(where: { $0.id == sessionId && $0.projectId == projectId && !$0.isDraft }),
+        guard let session = sessions.first(where: {
+            $0.id == sessionId && $0.projectId == projectId && !$0.isDraft && !$0.isArchived
+        }),
               schedulerTask(for: sessionId) == nil
         else { return nil }
         let idx = ensureSchedulerStateIndex(for: projectId)
@@ -1237,7 +1298,7 @@ final class AppStore {
         let state = schedulerState(for: projectId)
         guard let task = state.tasks.first(where: { $0.id == taskId }),
               let sessionId = task.sessionId,
-              sessions.contains(where: { $0.id == sessionId })
+              sessions.contains(where: { $0.id == sessionId && !$0.isArchived })
         else { return }
         selectedSessionId = sessionId
     }
@@ -1247,12 +1308,21 @@ final class AppStore {
                            phase: ProjectSchedulerTaskPhase) {
         let idx = ensureSchedulerStateIndex(for: projectId)
         guard let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        let now = Date()
         projectSchedulers[idx].tasks[taskIndex].phase = phase
-        projectSchedulers[idx].tasks[taskIndex].updatedAt = Date()
+        projectSchedulers[idx].tasks[taskIndex].updatedAt = now
         if phase == .readyToMerge || phase == .done {
             resolveHumanActions(projectId: projectId, taskId: taskId, kind: nil)
         }
-        projectSchedulers[idx].updatedAt = Date()
+        if phase == .done {
+            if let sessionId = projectSchedulers[idx].tasks[taskIndex].sessionId {
+                archiveSession(sessionId, archivedAt: now, schedulesSave: false)
+            }
+            if let inboxIndex = projectSchedulers[idx].inbox.firstIndex(where: { $0.taskId == taskId }) {
+                projectSchedulers[idx].inbox[inboxIndex].status = .archived
+            }
+        }
+        projectSchedulers[idx].updatedAt = now
         scheduleStateSave()
         if phase == .done {
             startRunnableSchedulerTasks(projectId: projectId)

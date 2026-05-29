@@ -14,7 +14,7 @@ struct AppStateFile: Codable {
     var schedulers: [ProjectSchedulerState]
     var sshProfileAccess: [SSHProfileAccessState]
 
-    static let currentVersion = 3
+    static let currentVersion = 4
     static let empty = AppStateFile(version: currentVersion,
                                     projects: [],
                                     sessions: [],
