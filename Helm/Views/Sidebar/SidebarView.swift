@@ -443,7 +443,7 @@ private struct ProjectSection: View {
                 pendingDelete = nil
             }
         } message: {
-            Text("This removes the conversation from Helm's sidebar. Vendor history files are left untouched.")
+            Text("This removes the conversation from Helm's sidebar and any linked Project Inbox task. Vendor history files are left untouched.")
         }
         .alert("Rename session", isPresented: renameBinding) {
             TextField("Session title", text: $renameTitle)

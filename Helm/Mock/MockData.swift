@@ -136,10 +136,9 @@ final class AppStore {
             profile.sshProjectId.map { sshProjectIds.contains($0) } ?? true
         }
         self.projects = loadedProjects
-        let loadedSchedulers = stateFile.schedulers.filter { scheduler in
+        var loadedSchedulers = stateFile.schedulers.filter { scheduler in
             loadedProjects.contains { $0.id == scheduler.projectId }
         }
-        self.projectSchedulers = loadedSchedulers
         self.sshProfileAccess = stateFile.sshProfileAccess.filter { access in
             loadedProjects.contains { project in
                 project.id == access.projectId && project.location.isSSH
@@ -161,6 +160,12 @@ final class AppStore {
                 Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
                 managedWorkerSessionIds.contains($0.id)
             }
+        let removedSchedulerTaskIds = Self.removeSchedulerTasks(
+            referencingMissingSessionsFrom: &loadedSchedulers,
+            existingSessionIds: Set(cleanSessions.map(\.id)),
+            updatedAt: Date()
+        )
+        self.projectSchedulers = loadedSchedulers
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
         let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
@@ -214,7 +219,9 @@ final class AppStore {
         if cleanModels.count != profilesFile.models.count {
             scheduleProfilesSave()
         }
-        if cleanSessions.count != stateFile.sessions.count || importedTargetSessions {
+        if cleanSessions.count != stateFile.sessions.count ||
+            importedTargetSessions ||
+            !removedSchedulerTaskIds.isEmpty {
             scheduleStateSave()
         }
         for project in self.projects where project.location.isSSH {
@@ -909,6 +916,7 @@ final class AppStore {
         if let project = projects.first(where: { $0.id == projectId }) {
             removeTargetSessionIndexEntries([id], for: project)
         }
+        removeSchedulerEntries(referencingSession: id)
         let wasSelected = selectedSessionId == id
         sessions.remove(at: idx)
         removeSidebarSession(id)
@@ -1066,6 +1074,49 @@ final class AppStore {
 
     private func removeSidebarSession(_ sessionId: UUID) {
         sidebarSessions.removeAll { $0.id == sessionId }
+    }
+
+    private func removeSchedulerEntries(referencingSession sessionId: UUID) {
+        let removedTaskIds = Self.removeSchedulerTasks(
+            referencingMissingSessionsFrom: &projectSchedulers,
+            existingSessionIds: Set(sessions.map(\.id)).subtracting([sessionId]),
+            updatedAt: Date()
+        )
+        guard !removedTaskIds.isEmpty else { return }
+        pendingApprovalQueue.removeAll { entry in
+            entry.sessionId == sessionId
+        }
+    }
+
+    @discardableResult
+    private static func removeSchedulerTasks(referencingMissingSessionsFrom schedulers: inout [ProjectSchedulerState],
+                                             existingSessionIds: Set<UUID>,
+                                             updatedAt now: Date) -> Set<UUID> {
+        var removedTaskIds: Set<UUID> = []
+
+        for schedulerIndex in schedulers.indices {
+            let staleTaskIds = Set(schedulers[schedulerIndex].tasks.compactMap { task -> UUID? in
+                guard let sessionId = task.sessionId,
+                      !existingSessionIds.contains(sessionId)
+                else { return nil }
+                return task.id
+            })
+            guard !staleTaskIds.isEmpty else { continue }
+
+            schedulers[schedulerIndex].tasks.removeAll { task in
+                staleTaskIds.contains(task.id)
+            }
+            schedulers[schedulerIndex].inbox.removeAll { item in
+                item.taskId.map(staleTaskIds.contains) ?? false
+            }
+            schedulers[schedulerIndex].humanActions.removeAll { action in
+                action.taskId.map(staleTaskIds.contains) ?? false
+            }
+            schedulers[schedulerIndex].updatedAt = now
+            removedTaskIds.formUnion(staleTaskIds)
+        }
+
+        return removedTaskIds
     }
 
     // MARK: - Project scheduler
