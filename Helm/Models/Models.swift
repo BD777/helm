@@ -168,6 +168,10 @@ struct Profile: Identifiable, Hashable, Codable {
     var subagentModelId: UUID?
     /// Sent as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. nil = leave to vendor.
     var autoCompactWindow: Int?
+    /// Claude's `--permission-mode`. nil = use Helm default (.defaultMode).
+    var claudePermissionMode: ClaudePermissionMode? = nil
+    /// Claude's `--effort`. nil = use Helm default (.medium).
+    var claudeEffort: ClaudeEffort? = nil
 
     // Codex-only — knobs the resolver turns into `-c key=value`.
     var reasoningEffort: ReasoningEffort?
@@ -563,8 +567,10 @@ struct SessionRunConfiguration: Hashable {
 
     static func defaults(for profile: Profile) -> SessionRunConfiguration {
         SessionRunConfiguration(
+            claudePermissionMode: profile.claudePermissionMode ?? .defaultMode,
             codexSandboxMode: profile.sandboxMode ?? .workspace,
             codexApprovalMode: profile.approvalMode ?? .onRequest,
+            claudeEffort: profile.claudeEffort ?? .medium,
             codexEffort: profile.reasoningEffort ?? .medium
         )
     }
