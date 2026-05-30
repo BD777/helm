@@ -767,11 +767,15 @@ enum SessionEvent: Identifiable, Hashable, Codable {
     /// Helm sent a composer turn through the Goal action. This is a
     /// deterministic UI acknowledgement, not a model-generated message.
     case goalApplied(id: UUID, goal: String, vendor: Vendor, appliedAt: Date)
+    /// User appended input to a running turn. The vendor adapter has
+    /// accepted the input; this event confirms receipt to the user.
+    case promptAppended(id: UUID, appendedAt: Date)
 
     var id: UUID {
         switch self {
         case .compactSummary(let id, _): return id
         case .goalApplied(let id, _, _, _): return id
+        case .promptAppended(let id, _): return id
         }
     }
 }

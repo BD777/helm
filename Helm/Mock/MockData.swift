@@ -75,6 +75,7 @@ final class AppStore {
     /// was previously parked. Distinct from the geometry-based stick-to-
     /// bottom: pressing Send is an explicit "show me what just landed" intent.
     var sendTick: Int = 0
+    var appendTick: Int = 0
 
     private var currentPendingApprovalEntry: PendingApprovalEntry? {
         if let selectedSessionId,
@@ -2347,14 +2348,16 @@ else:
         let insertionIndex = sessions[sIdx].transcript.firstIndex {
             $0.message?.id == run.assistantId
         } ?? sessions[sIdx].transcript.count
-        let insertedItems = preUserEvents.map(TranscriptItem.event) + [.message(userMsg)]
+        let insertedItems = preUserEvents.map(TranscriptItem.event)
+            + [.event(.promptAppended(id: UUID(), appendedAt: Date()))]
+            + [.message(userMsg)]
         sessions[sIdx].transcript.insert(contentsOf: insertedItems, at: insertionIndex)
         sessions[sIdx].lastUpdate = "now"
         upsertSidebarSession(for: sessions[sIdx])
         appendImageManifestEntries(sessionIndex: sIdx,
                                    userMessageId: userMsg.id,
                                    attachments: attachments)
-        sendTick &+= 1
+        appendTick &+= 1
         persistTranscriptSnapshot(for: sessionId)
         return true
     }
