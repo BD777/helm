@@ -14,7 +14,7 @@ struct MessageListView: View {
         ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    displayRow(item, isLatest: index == items.count - 1)
+                    displayRow(item)
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 24)
@@ -76,6 +76,9 @@ struct MessageListView: View {
         .onChange(of: store.sendTick) { _, _ in
             autoScroll.forceScrollToBottom(animated: true)
         }
+        .onChange(of: store.appendTick) { _, _ in
+            autoScroll.forceScrollToBottom(animated: false)
+        }
         .onChange(of: store.selectedSessionId) { _, _ in
             autoScroll.prepareForSessionChange()
             autoScroll.forceScrollToBottom(animated: true)
@@ -115,7 +118,7 @@ struct MessageListView: View {
     }
 
     @ViewBuilder
-    private func displayRow(_ item: DisplayItem, isLatest: Bool) -> some View {
+    private func displayRow(_ item: DisplayItem) -> some View {
         switch item {
         case .userMessage(let msg):
             MessageView(message: msg)
@@ -127,7 +130,6 @@ struct MessageListView: View {
                     ThinkingBlock(
                         messages: thinking,
                         isRunning: answer == nil
-                            && isLatest
                             && store.selectedSessionIsStreaming
                     )
                 }

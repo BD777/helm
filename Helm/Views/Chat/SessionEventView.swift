@@ -21,6 +21,9 @@ struct SessionEventView: View {
             divider(label: "Goal enabled for \(vendor.displayName) turn",
                     icon: "target",
                     detail: Self.goalDetail(goal: goal, vendor: vendor, appliedAt: appliedAt))
+        case .promptAppended(_, let appendedAt):
+            simpleDivider(label: "已追加输入，正在处理…",
+                         icon: "arrow.right.circle")
         }
     }
 
@@ -66,6 +69,22 @@ struct SessionEventView: View {
             .fill(Color.helmBorderStrong.opacity(0.35))
             .frame(height: 0.5)
             .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func simpleDivider(label: String, icon: String) -> some View {
+        HStack(spacing: 10) {
+            rule
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text(label)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+            rule
+        }
     }
 
     private static func format(_ date: Date) -> String {
