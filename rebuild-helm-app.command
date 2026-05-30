@@ -11,6 +11,7 @@ INSTALL_DIR="${HELM_INSTALL_DIR:-/Applications}"
 
 SCRIPT_PATH="${0:A}"
 REPO_DIR="${SCRIPT_PATH:h}"
+WORKTREE_SEARCH_ROOT="${HELM_WORKTREE_SEARCH_ROOT:-${REPO_DIR:h}/helm-worktrees}"
 BUILD_ROOT="$REPO_DIR/build"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 RUN_WORK_DIR="${TMPDIR:-/tmp}/helm-rebuild-$RUN_ID"
@@ -37,6 +38,8 @@ die() {
 
 cleanup() {
   local exit_code=$?
+
+  unregister_temporary_apps
 
   if [[ -n "${BUILD_WORKTREE:-}" && -e "$BUILD_WORKTREE" ]]; then
     log "Removing temporary worktree: $BUILD_WORKTREE"
@@ -209,6 +212,7 @@ $HOME/Applications	5
 $HOME/Desktop	5
 $HOME/Downloads	8
 $HOME/Library/Developer/Xcode/DerivedData	8
+$WORKTREE_SEARCH_ROOT	8
 $REPO_DIR/build	8
 EOF
 }
@@ -221,6 +225,16 @@ unregister_app() {
   if [[ -x "$lsregister" ]]; then
     "$lsregister" -u "$app_path" >/dev/null 2>&1 || true
   fi
+}
+
+unregister_temporary_apps() {
+  local app_path
+
+  for app_path in \
+    "$PACKAGED_APP" \
+    "$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/$APP_NAME.app"; do
+    [[ -d "$app_path" ]] && unregister_app "$app_path"
+  done
 }
 
 register_installed_app() {
