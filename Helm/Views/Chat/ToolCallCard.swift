@@ -107,6 +107,9 @@ struct ToolCallCard: View {
 /// view once the user expands the group.
 struct ToolCallGroupCard: View {
     let calls: [ToolCall]
+    var turnStartedAt: Date? = nil
+    var isTurnRunning: Bool = false
+    var turnTokenUsage: Int? = nil
     @State private var collapsed: Bool = true
 
     var body: some View {
@@ -119,11 +122,13 @@ struct ToolCallGroupCard: View {
                         collapsed.toggle()
                     }
                 } label: {
-                    headerContent
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(summary)
-                        .accessibilityValue(collapsed ? "collapsed" : "expanded")
-                        .accessibilityHint(collapsed ? "Show tool calls" : "Hide tool calls")
+                    TimelineView(.periodic(from: Date(), by: 1)) { context in
+                        headerContent(for: context.date)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(summary(for: context.date))
+                            .accessibilityValue(collapsed ? "collapsed" : "expanded")
+                            .accessibilityHint(collapsed ? "Show tool calls" : "Hide tool calls")
+                    }
                 }
                 .buttonStyle(.plain)
 
@@ -141,11 +146,11 @@ struct ToolCallGroupCard: View {
         }
     }
 
-    private var headerContent: some View {
+    private func headerContent(for date: Date) -> some View {
         HStack(spacing: 8) {
             leadingIcon
                 .frame(width: 14, alignment: .center)
-            Text(summary)
+            Text(summary(for: date))
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -190,8 +195,38 @@ struct ToolCallGroupCard: View {
         }
     }
 
-    private var summary: String {
-        ([statusLabel, toolSummary] + outcomeSummary).joined(separator: " · ")
+    private func summary(for date: Date) -> String {
+        ([statusLabel, toolSummary] + outcomeSummary + timeAndTokenSegments(for: date))
+            .joined(separator: " · ")
+    }
+
+    private func timeAndTokenSegments(for date: Date) -> [String] {
+        var segments: [String] = []
+        if let start = turnStartedAt {
+            let elapsed: TimeInterval
+            if isTurnRunning {
+                elapsed = date.timeIntervalSince(start)
+            } else if calls.first(where: { $0.body != nil }) != nil {
+                // If we have any completed tool results, show at least a
+                // minimum elapsed to indicate work happened.
+                elapsed = max(3, Date().timeIntervalSince(start))
+            } else {
+                return segments
+            }
+            if elapsed >= 3 {
+                segments.append(formatElapsed(elapsed))
+            }
+        }
+        let tokens: Int
+        if let explicit = turnTokenUsage, explicit > 0 {
+            tokens = explicit
+        } else {
+            tokens = estimateTokens(in: calls.map { Part.toolCall($0) })
+        }
+        if tokens >= 100 {
+            segments.append("↓ " + formatTokens(tokens))
+        }
+        return segments
     }
 
     private var statusLabel: String {

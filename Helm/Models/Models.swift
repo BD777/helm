@@ -730,6 +730,107 @@ struct Message: Identifiable, Hashable, Codable {
     var who: String
     var meta: String?
     var parts: [Part]
+    /// When this message's turn started. Set on the "thinking…" placeholder
+    /// message so the UI can show elapsed time while the agent is working.
+    var startedAt: Date?
+    /// When this message's turn ended. Set when the agent reports a final
+    /// result so the UI can show the actual duration after the turn finishes.
+    var endedAt: Date?
+    /// Total tokens consumed by this turn (input + output). nil until we
+    /// either receive a usage report from the vendor or compute an estimate.
+    var tokenUsage: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, who, meta, parts, startedAt, endedAt, tokenUsage
+    }
+
+    init(id: UUID,
+         role: Role,
+         who: String,
+         meta: String?,
+         parts: [Part],
+         startedAt: Date? = nil,
+         endedAt: Date? = nil,
+         tokenUsage: Int? = nil) {
+        self.id = id
+        self.role = role
+        self.who = who
+        self.meta = meta
+        self.parts = parts
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.tokenUsage = tokenUsage
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        role = try c.decode(Role.self, forKey: .role)
+        who = try c.decode(String.self, forKey: .who)
+        meta = try c.decodeIfPresent(String.self, forKey: .meta)
+        parts = try c.decode([Part].self, forKey: .parts)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        tokenUsage = try c.decodeIfPresent(Int.self, forKey: .tokenUsage)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(role, forKey: .role)
+        try c.encode(who, forKey: .who)
+        try c.encodeIfPresent(meta, forKey: .meta)
+        try c.encode(parts, forKey: .parts)
+        try c.encodeIfPresent(startedAt, forKey: .startedAt)
+        try c.encodeIfPresent(endedAt, forKey: .endedAt)
+        try c.encodeIfPresent(tokenUsage, forKey: .tokenUsage)
+    }
+}
+
+// MARK: - Turn metadata helpers
+
+/// Formats a time interval as `1m 23s` or `3s` for short durations.
+func formatElapsed(_ interval: TimeInterval) -> String {
+    let totalSeconds = Int(interval)
+    let minutes = totalSeconds / 60
+    let seconds = totalSeconds % 60
+    if minutes > 0 {
+        return "\(minutes)m \(seconds)s"
+    }
+    return "\(seconds)s"
+}
+
+/// Formats an integer token count as `4.5k` for thousands or `12k` for round values.
+func formatTokens(_ count: Int) -> String {
+    if count >= 1000 {
+        let thousands = Double(count) / 1000.0
+        if count % 1000 == 0 {
+            return "\(count / 1000)k"
+        }
+        return String(format: "%.1fk", thousands)
+    }
+    return "\(count)"
+}
+
+/// Rough token estimate from message parts: ~1 token per 4 characters,
+/// matching the heuristic Claude Code itself uses.
+func estimateTokens(in parts: [Part]) -> Int {
+    var chars = 0
+    for part in parts {
+        switch part {
+        case .text(let text):
+            chars += text.count
+        case .skillText(let segments):
+            for seg in segments {
+                chars += (seg.text?.count ?? 0) + (seg.skillName?.count ?? 0)
+            }
+        case .toolCall(let call):
+            chars += call.arg.count + (call.body?.count ?? 0)
+        case .image:
+            chars += 6000 // rough image token cost
+        }
+    }
+    return max(0, chars / 4)
 }
 
 /// One item in a session's ordered transcript. Either a real dialog turn

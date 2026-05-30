@@ -2295,12 +2295,14 @@ else:
             id: UUID(), role: .user, who: "you", meta: nil,
             parts: userParts
         )
+        let startedAt = Date()
         let assistantMsg = Message(
             id: UUID(),
             role: .assistant(meta: "thinking…"),
             who: runConfig.headlineModel,
             meta: "thinking…",
-            parts: []
+            parts: [],
+            startedAt: startedAt
         )
         for event in preUserEvents {
             sessions[sIdx].transcript.append(.event(event))
@@ -2323,7 +2325,6 @@ else:
         case .claude: adapter = ClaudeLocalAdapter()
         case .codex: adapter = codexAdapter(project: project, runConfig: runConfig)
         }
-        let startedAt = Date()
         activeRuns[sessionId] = ActiveRun(
             runId: runId,
             assistantId: assistantId,
@@ -2698,9 +2699,16 @@ else:
         case .finalResult(let text, let isError):
             var followupAnswer: Message?
             let runToClose = activeRuns[sessionId]
+            let endedAt = Date()
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.role = .assistant(meta: isError ? "error" : "done")
                 msg.meta = isError ? "error" : nil
+                if msg.endedAt == nil {
+                    msg.endedAt = endedAt
+                }
+                if msg.tokenUsage == nil {
+                    msg.tokenUsage = estimateTokens(in: msg.parts)
+                }
                 if !text.isEmpty {
                     let hasToolCall = msg.parts.contains { part in
                         if case .toolCall = part { return true }
@@ -2736,6 +2744,12 @@ else:
         case .error(let detail):
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 msg.meta = "error"
+                if msg.endedAt == nil {
+                    msg.endedAt = Date()
+                }
+                if msg.tokenUsage == nil {
+                    msg.tokenUsage = estimateTokens(in: msg.parts)
+                }
                 msg.parts.append(.text("⚠️ " + detail))
             }
         }
@@ -2847,6 +2861,12 @@ else:
 
         msg.role = .assistant(meta: "stopped")
         msg.meta = "stopped"
+        if msg.endedAt == nil {
+            msg.endedAt = Date()
+        }
+        if msg.tokenUsage == nil {
+            msg.tokenUsage = estimateTokens(in: msg.parts)
+        }
         let hasToolCall = msg.parts.contains { part in
             if case .toolCall = part { return true }
             return false

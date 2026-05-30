@@ -637,6 +637,9 @@ private enum MessagePartDisplayItem: Identifiable {
 private struct MessagePartListView: View {
     let parts: [Part]
     let spacing: CGFloat
+    var turnStartedAt: Date? = nil
+    var isTurnRunning: Bool = false
+    var turnTokenUsage: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: spacing) {
@@ -656,8 +659,13 @@ private struct MessagePartListView: View {
         case .single(_, let part):
             partView(part)
         case .toolGroup(_, let calls):
-            ToolCallGroupCard(calls: calls)
-                .padding(.vertical, 4)
+            ToolCallGroupCard(
+                calls: calls,
+                turnStartedAt: turnStartedAt,
+                isTurnRunning: isTurnRunning,
+                turnTokenUsage: turnTokenUsage
+            )
+            .padding(.vertical, 4)
         }
     }
 
@@ -730,7 +738,13 @@ private struct ThinkingBlock: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             if !collapsed {
-                MessagePartListView(parts: flattenedParts, spacing: 10)
+                MessagePartListView(
+                    parts: flattenedParts,
+                    spacing: 10,
+                    turnStartedAt: turnStartedAt,
+                    isTurnRunning: isRunning,
+                    turnTokenUsage: turnTokenUsage
+                )
             }
         }
     }
@@ -747,15 +761,56 @@ private struct ThinkingBlock: View {
         }
     }
 
-    private var label: String {
-        if isRunning { return "处理中…" }
-        if isStopped {
-            return stepCount > 0 ? "已停止 · \(stepCount) 步" : "已停止"
+    private var turnStartedAt: Date? {
+        messages.lazy.compactMap(\.startedAt).first
+    }
+
+    private var turnEndedAt: Date? {
+        messages.lazy.compactMap(\.endedAt).first
+    }
+
+    private var turnTokenUsage: Int {
+        if let explicit = messages.lazy.compactMap(\.tokenUsage).first, explicit > 0 {
+            return explicit
         }
-        if hasTurnError {
-            return stepCount > 0 ? "出错 · \(stepCount) 步" : "出错"
+        return estimateTokens(in: flattenedParts)
+    }
+
+    private func label(for date: Date) -> String {
+        let base: String
+        if isRunning {
+            base = stepCount > 0 ? "处理中 · \(stepCount) 步" : "处理中"
+        } else if isStopped {
+            base = stepCount > 0 ? "已停止 · \(stepCount) 步" : "已停止"
+        } else if hasTurnError {
+            base = stepCount > 0 ? "出错 · \(stepCount) 步" : "出错"
+        } else {
+            base = stepCount > 0 ? "已处理 · \(stepCount) 步" : "已处理"
         }
-        return stepCount > 0 ? "已处理 · \(stepCount) 步" : "已处理"
+
+        var segments: [String] = [base]
+
+        if let elapsed = turnElapsed(for: date), elapsed >= 3 {
+            segments.append(formatElapsed(elapsed))
+        }
+
+        let tokens = turnTokenUsage
+        if tokens >= 100 {
+            segments.append("↓ " + formatTokens(tokens))
+        }
+
+        return segments.joined(separator: " · ")
+    }
+
+    private func turnElapsed(for date: Date) -> TimeInterval? {
+        guard let start = turnStartedAt else { return nil }
+        if isRunning {
+            return date.timeIntervalSince(start)
+        }
+        if let end = turnEndedAt {
+            return end.timeIntervalSince(start)
+        }
+        return nil
     }
 
     private var hasDetails: Bool {
@@ -799,7 +854,7 @@ private struct ThinkingBlock: View {
                 headerContent(showChevron: true)
                     .contentShape(Rectangle())
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(label)
+                    .accessibilityLabel(currentAccessibilityLabel)
                     .accessibilityValue(collapsed ? "collapsed" : "expanded")
                     .accessibilityHint(collapsed ? "Show steps" : "Hide steps")
             }
@@ -807,26 +862,32 @@ private struct ThinkingBlock: View {
         } else {
             headerContent(showChevron: false)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(label)
+                .accessibilityLabel(currentAccessibilityLabel)
         }
     }
 
+    private var currentAccessibilityLabel: String {
+        label(for: Date())
+    }
+
     private func headerContent(showChevron: Bool) -> some View {
-        HStack(spacing: 6) {
-            if isRunning {
-                ProgressView()
-                    .controlSize(.mini)
-                    .scaleEffect(0.72)
-            }
-            Text(label)
-                .font(.system(size: 12.5))
-                .foregroundStyle(.tertiary)
-            if showChevron {
-                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+        TimelineView(.periodic(from: Date(), by: 1)) { context in
+            HStack(spacing: 6) {
+                if isRunning {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.72)
+                }
+                Text(label(for: context.date))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.tertiary)
+                if showChevron {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
     }
 }
