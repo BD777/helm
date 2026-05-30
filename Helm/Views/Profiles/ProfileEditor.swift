@@ -125,6 +125,32 @@ struct ProfileEditor: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 200)
             }
+            field("Permission mode") {
+                Picker("", selection: Binding<ClaudePermissionMode?>(
+                    get: { profile.claudePermissionMode },
+                    set: { profile.claudePermissionMode = $0 }
+                )) {
+                    Text("(default)").tag(ClaudePermissionMode?.none)
+                    ForEach(ClaudePermissionMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(ClaudePermissionMode?.some(mode))
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            field("Effort") {
+                Picker("", selection: Binding<ClaudeEffort?>(
+                    get: { profile.claudeEffort },
+                    set: { profile.claudeEffort = $0 }
+                )) {
+                    Text("(default)").tag(ClaudeEffort?.none)
+                    ForEach(ClaudeEffort.allCases, id: \.self) { e in
+                        Text(e.displayName).tag(ClaudeEffort?.some(e))
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
         }
     }
 

@@ -438,6 +438,8 @@ final class AppStore {
             opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
             subagentModelId: nil,
             autoCompactWindow: nil,
+            claudePermissionMode: nil,
+            claudeEffort: nil,
             reasoningEffort: candidate.reasoningEffort,
             serviceTier: candidate.serviceTier,
             sandboxMode: candidate.sandboxMode,
@@ -518,6 +520,8 @@ final class AppStore {
             opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
             subagentModelId: nil,
             autoCompactWindow: nil,
+            claudePermissionMode: nil,
+            claudeEffort: nil,
             reasoningEffort: nil,
             serviceTier: nil,
             sandboxMode: nil,
@@ -2034,6 +2038,10 @@ else:
             sessions[idx].codexSandboxMode = profile.sandboxMode ?? .workspace
             sessions[idx].codexApprovalMode = profile.approvalMode ?? .onRequest
             sessions[idx].codexEffort = profile.reasoningEffort ?? .medium
+        }
+        if profile.vendor == .claude {
+            sessions[idx].claudePermissionMode = profile.claudePermissionMode ?? .defaultMode
+            sessions[idx].claudeEffort = profile.claudeEffort ?? .medium
         }
         upsertSidebarSession(for: sessions[idx])
         scheduleStateSave()

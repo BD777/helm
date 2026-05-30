@@ -1469,6 +1469,8 @@ struct ProfilesSheet: View {
             opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
             subagentModelId: nil,
             autoCompactWindow: nil,
+            claudePermissionMode: nil,
+            claudeEffort: nil,
             reasoningEffort: nil, serviceTier: nil, sandboxMode: nil,
             approvalMode: nil,
             delegateVendorProfile: nil
