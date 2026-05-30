@@ -13,14 +13,15 @@ struct MessageListView: View {
 
         ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    displayRow(item, isLatest: index == items.count - 1)
+                ForEach(items) { item in
+                    displayRow(item, isLatest: item.id == items.last?.id)
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 24)
                         .padding(.bottom, 18)
                 }
             }
+            .animation(nil)
             .padding(.vertical, 24)
             .background(
                 ScrollViewResolver { scrollView in
@@ -74,7 +75,7 @@ struct MessageListView: View {
             autoScroll.followIfNeeded()
         }
         .onChange(of: store.sendTick) { _, _ in
-            autoScroll.forceScrollToBottom(animated: true)
+            autoScroll.forceScrollToBottom(animated: false)
         }
         .onChange(of: store.selectedSessionId) { _, _ in
             autoScroll.prepareForSessionChange()
