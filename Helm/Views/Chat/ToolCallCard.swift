@@ -171,11 +171,15 @@ struct ToolCallGroupCard: View {
             ProgressView()
                 .controlSize(.mini)
                 .scaleEffect(0.72)
-        } else if hasErrorCall {
+        } else if allErrorCalls {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.red.opacity(0.75))
-        } else if hasStoppedCall {
+        } else if hasErrorCall {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.orange.opacity(0.82))
+        } else if allStoppedCalls {
             Image(systemName: "stop.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
@@ -187,14 +191,25 @@ struct ToolCallGroupCard: View {
     }
 
     private var summary: String {
-        "\(statusLabel) · \(toolSummary)"
+        ([statusLabel, toolSummary] + outcomeSummary).joined(separator: " · ")
     }
 
     private var statusLabel: String {
         if hasRunningCall { return "处理中" }
-        if hasErrorCall { return "出错" }
-        if hasStoppedCall { return "已停止" }
+        if allErrorCalls { return "出错" }
+        if allStoppedCalls { return "已停止" }
         return allShellCalls ? "已运行" : "已处理"
+    }
+
+    private var outcomeSummary: [String] {
+        var summary: [String] = []
+        if hasErrorCall, !allErrorCalls {
+            summary.append("\(errorCallCount) 个出错")
+        }
+        if hasStoppedCall, !allStoppedCalls {
+            summary.append("\(stoppedCallCount) 个已停止")
+        }
+        return summary
     }
 
     private var toolSummary: String {
@@ -234,17 +249,33 @@ struct ToolCallGroupCard: View {
     }
 
     private var hasErrorCall: Bool {
-        calls.contains { call in
-            if case .error = call.status { return true }
-            return false
-        }
+        errorCallCount > 0
     }
 
     private var hasStoppedCall: Bool {
-        calls.contains { call in
+        stoppedCallCount > 0
+    }
+
+    private var allErrorCalls: Bool {
+        !calls.isEmpty && errorCallCount == calls.count
+    }
+
+    private var allStoppedCalls: Bool {
+        !calls.isEmpty && stoppedCallCount == calls.count
+    }
+
+    private var errorCallCount: Int {
+        calls.filter { call in
+            if case .error = call.status { return true }
+            return false
+        }.count
+    }
+
+    private var stoppedCallCount: Int {
+        calls.filter { call in
             if case .stopped = call.status { return true }
             return false
-        }
+        }.count
     }
 
     private enum ToolBucket {
