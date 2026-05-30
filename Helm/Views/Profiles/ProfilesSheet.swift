@@ -55,19 +55,19 @@ struct ProfilesSheet: View {
                 case .provider(let id):
                     if let binding = providerBinding(id) {
                         ProviderEditor(provider: binding,
-                                       onDelete: { store.deleteProvider(id); selection = nil })
+                                       onDelete: { selection = nil; store.deleteProvider(id) })
                             .id(id)
                     } else { placeholder }
                 case .model(let id):
                     if let binding = modelBinding(id) {
                         ModelEditor(model: binding,
-                                    onDelete: { store.deleteModel(id); selection = nil })
+                                    onDelete: { selection = nil; store.deleteModel(id) })
                             .id(id)
                     } else { placeholder }
                 case .profile(let id):
                     if let binding = profileBinding(id) {
                         ProfileEditor(profile: binding,
-                                      onDelete: { store.deleteProfile(id); selection = nil })
+                                      onDelete: { selection = nil; store.deleteProfile(id) })
                             .id(id)
                     } else { placeholder }
                 case .none:
@@ -1405,7 +1405,20 @@ struct ProfilesSheet: View {
     private func providerBinding(_ id: UUID) -> Binding<Provider>? {
         guard store.globalProviders.contains(where: { $0.id == id }) else { return nil }
         return Binding(
-            get: { store.providers.first { $0.id == id }! },
+            get: {
+                store.providers.first { $0.id == id }
+                    ?? Provider(
+                        id: id,
+                        name: "",
+                        vendor: .claude,
+                        baseURL: "",
+                        authToken: "",
+                        wireAPI: .responses,
+                        httpHeaders: [:],
+                        requiresOpenAIAuth: false,
+                        extraEnv: [:]
+                    )
+            },
             set: { store.upsertProvider($0) }
         )
     }
@@ -1413,7 +1426,10 @@ struct ProfilesSheet: View {
     private func modelBinding(_ id: UUID) -> Binding<Model>? {
         guard store.models.contains(where: { $0.id == id }) else { return nil }
         return Binding(
-            get: { store.models.first { $0.id == id }! },
+            get: {
+                store.models.first { $0.id == id }
+                    ?? Model(id: id, providerId: UUID(), providerModelId: "", alias: "")
+            },
             set: { store.upsertModel($0) }
         )
     }
@@ -1421,7 +1437,26 @@ struct ProfilesSheet: View {
     private func profileBinding(_ id: UUID) -> Binding<Profile>? {
         guard store.globalProfiles.contains(where: { $0.id == id }) else { return nil }
         return Binding(
-            get: { store.profiles.first { $0.id == id }! },
+            get: {
+                store.profiles.first { $0.id == id }
+                    ?? Profile(
+                        id: id,
+                        name: "",
+                        vendor: .claude,
+                        providerId: UUID(),
+                        primaryModelId: UUID(),
+                        commandPath: "",
+                        configRoot: nil,
+                        opusModelId: nil, sonnetModelId: nil, haikuModelId: nil,
+                        subagentModelId: nil,
+                        autoCompactWindow: nil,
+                        claudePermissionMode: nil,
+                        claudeEffort: nil,
+                        reasoningEffort: nil, serviceTier: nil, sandboxMode: nil,
+                        approvalMode: nil,
+                        delegateVendorProfile: nil
+                    )
+            },
             set: { store.upsertProfile($0) }
         )
     }

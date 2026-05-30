@@ -320,6 +320,16 @@ final class AppStore {
         // Cascade: drop models on this provider, profiles pointing at them.
         let dropped = models.filter { $0.providerId == id }.map(\.id)
         models.removeAll { $0.providerId == id }
+        // Collect profile IDs that will be deleted so we can clean up references.
+        let deletedProfileIds = Set(profiles
+            .filter { p in
+                p.providerId == id ||
+                dropped.contains(p.primaryModelId) ||
+                (p.opusModelId.map { dropped.contains($0) } ?? false) ||
+                (p.sonnetModelId.map { dropped.contains($0) } ?? false) ||
+                (p.haikuModelId.map { dropped.contains($0) } ?? false)
+            }
+            .map(\.id))
         profiles.removeAll { p in
             p.providerId == id ||
             dropped.contains(p.primaryModelId) ||
@@ -327,6 +337,8 @@ final class AppStore {
             (p.sonnetModelId.map { dropped.contains($0) } ?? false) ||
             (p.haikuModelId.map { dropped.contains($0) } ?? false)
         }
+        cleanupReferences(toDeletedProfiles: deletedProfileIds)
+        scheduleStateSave()
         scheduleProfilesSave()
     }
 
@@ -337,6 +349,15 @@ final class AppStore {
     }
 
     func deleteModel(_ id: UUID) {
+        // Collect profile IDs that will be deleted so we can clean up references.
+        let deletedProfileIds = Set(profiles
+            .filter { p in
+                p.primaryModelId == id ||
+                p.opusModelId == id ||
+                p.sonnetModelId == id ||
+                p.haikuModelId == id
+            }
+            .map(\.id))
         models.removeAll { $0.id == id }
         // Profiles pointing at it become invalid; drop them rather than
         // leave dangling pointers.
@@ -346,6 +367,8 @@ final class AppStore {
             p.sonnetModelId == id ||
             p.haikuModelId == id
         }
+        cleanupReferences(toDeletedProfiles: deletedProfileIds)
+        scheduleStateSave()
         scheduleProfilesSave()
     }
 
@@ -355,12 +378,34 @@ final class AppStore {
         scheduleProfilesSave()
     }
 
+    /// Cleans up scheduler default-worker references and archives orphaned
+    /// sessions after a profile (or cascade of profiles) has been deleted.
+    private func cleanupReferences(toDeletedProfiles deletedProfileIds: Set<UUID>) {
+        guard !deletedProfileIds.isEmpty else { return }
+        for idx in sshProfileAccess.indices {
+            sshProfileAccess[idx].allowedGlobalProfileIds.removeAll { deletedProfileIds.contains($0) }
+        }
+        for idx in projectSchedulers.indices {
+            if let wid = projectSchedulers[idx].defaultWorkerProfileId,
+               deletedProfileIds.contains(wid) {
+                projectSchedulers[idx].defaultWorkerProfileId = nil
+            }
+        }
+        let orphanSessionIds = sessions
+            .filter { deletedProfileIds.contains($0.profileId) && !$0.isArchived }
+            .map(\.id)
+        for sessionId in orphanSessionIds {
+            if !isSessionStreaming(sessionId) {
+                archiveSession(sessionId, archivedAt: Date(), schedulesSave: false)
+            }
+        }
+    }
+
     func deleteProfile(_ id: UUID) {
         let removedProfile = profiles.first { $0.id == id }
         profiles.removeAll { $0.id == id }
-        for idx in sshProfileAccess.indices {
-            sshProfileAccess[idx].allowedGlobalProfileIds.removeAll { $0 == id }
-        }
+        cleanupReferences(toDeletedProfiles: [id])
+        // If the deleted profile is a remote one, clean up its provider if now unused.
         if let removedProfile, removedProfile.sshProjectId != nil {
             deleteRemoteProviderIfUnused(removedProfile.providerId)
         }
