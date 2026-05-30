@@ -168,7 +168,7 @@ enum TranscriptSnapshotStore {
         do {
             let data = try Data(contentsOf: url)
             let file = try JSONDecoder().decode(TranscriptSnapshotFile.self, from: data)
-            return file.items
+            return SeedTextToolCallParser.sanitizeTranscriptItems(file.items)
         } catch {
             NSLog("[helm.transcript] load failed for %@: %@",
                   sessionId.uuidString, error.localizedDescription)
@@ -177,7 +177,8 @@ enum TranscriptSnapshotStore {
     }
 
     static func save(sessionId: UUID, items: [TranscriptItem]) {
-        guard !items.isEmpty else {
+        let sanitizedItems = SeedTextToolCallParser.sanitizeTranscriptItems(items)
+        guard !sanitizedItems.isEmpty else {
             delete(sessionId: sessionId)
             return
         }
@@ -186,7 +187,7 @@ enum TranscriptSnapshotStore {
             let file = TranscriptSnapshotFile(version: TranscriptSnapshotFile.currentVersion,
                                               sessionId: sessionId,
                                               updatedAt: Date(),
-                                              items: items)
+                                              items: sanitizedItems)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(file)

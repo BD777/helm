@@ -703,6 +703,10 @@ final class ClaudeStreamParser {
     /// Most recent in-flight tool_use id, so `input_json_delta` events can
     /// be attached to the right call.
     private var activeToolId: String?
+    /// Seed-backed Claude profiles can occasionally emit their tool protocol
+    /// as text. Buffer text deltas long enough to keep partial tags from
+    /// flashing into the transcript.
+    private var textToolBuffer: String = ""
 
     func feed(_ data: Data) -> [AgentEvent] {
         guard let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty else {
@@ -726,8 +730,12 @@ final class ClaudeStreamParser {
     func flush() -> [AgentEvent] {
         let trimmed = pending.trimmingCharacters(in: .whitespaces)
         pending = ""
-        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return [] }
-        return parseLine(data)
+        var events: [AgentEvent] = []
+        if !trimmed.isEmpty, let data = trimmed.data(using: .utf8) {
+            events.append(contentsOf: parseLine(data))
+        }
+        events.append(contentsOf: flushTextToolBuffer())
+        return events
     }
 
     private func parseLine(_ data: Data) -> [AgentEvent] {
@@ -769,10 +777,12 @@ final class ClaudeStreamParser {
             let isError = obj["is_error"] as? Bool ?? false
             let errors = obj["errors"] as? [String] ?? []
             let resultText = obj["result"] as? String ?? ""
-            let text = resultText.isEmpty && isError
+            let filteredResultText = SeedTextToolCallParser.textByRemovingToolCalls(from: resultText)
+            let text = filteredResultText.isEmpty && isError
                 ? errors.joined(separator: "\n")
-                : resultText
+                : filteredResultText
             var out: [AgentEvent] = []
+            out.append(contentsOf: flushTextToolBuffer())
             if let sid = obj["session_id"] as? String { out.append(.sessionId(sid)) }
             out.append(.finalResult(text: text, isError: isError))
             return out
@@ -808,7 +818,7 @@ final class ClaudeStreamParser {
             switch delta["type"] as? String {
             case "text_delta":
                 if let t = delta["text"] as? String, !t.isEmpty {
-                    return [.assistantTextDelta(t)]
+                    return consumeTextDelta(t)
                 }
             case "input_json_delta":
                 if let frag = delta["partial_json"] as? String,
@@ -821,10 +831,12 @@ final class ClaudeStreamParser {
 
         case "content_block_stop":
             activeToolId = nil
-            return []
+            return flushTextToolBuffer()
 
         case "message_stop":
-            return [.messageStop]
+            var out = flushTextToolBuffer()
+            out.append(.messageStop)
+            return out
 
         default:
             return []
@@ -841,5 +853,307 @@ final class ClaudeStreamParser {
             return out.isEmpty ? nil : out
         }
         return nil
+    }
+
+    private func consumeTextDelta(_ text: String) -> [AgentEvent] {
+        textToolBuffer += text
+        let consumed = SeedTextToolCallParser.consumeCompleteSegments(from: textToolBuffer)
+        textToolBuffer = consumed.remainder
+        return SeedTextToolCallParser.events(from: consumed.segments)
+    }
+
+    private func flushTextToolBuffer() -> [AgentEvent] {
+        guard !textToolBuffer.isEmpty else { return [] }
+        let buffered = textToolBuffer
+        textToolBuffer = ""
+        return SeedTextToolCallParser.events(from: SeedTextToolCallParser.drainSegments(from: buffered))
+    }
+}
+
+struct SeedTextToolCall {
+    let vendorId: String
+    let rawName: String
+    let inputJSON: String
+}
+
+enum SeedTextToolCallSegment {
+    case text(String)
+    case toolCall(SeedTextToolCall)
+}
+
+enum SeedTextToolCallParser {
+    static let blockedToolOutput =
+        "Helm did not execute this tool call because Claude emitted it as plain text instead of a tool_use event."
+
+    private static let startMarkers = ["<seed:tooltool", "<seed:tool_call"]
+    private static let endMarkers = ["</seed:tool_call>", "</seed:tooltool>"]
+
+    private static let functionRegex = try! NSRegularExpression(
+        pattern: #"<function\s+name="([^"]+)"[^>]*>(.*?)</function>"#,
+        options: [.dotMatchesLineSeparators]
+    )
+    private static let parameterRegex = try! NSRegularExpression(
+        pattern: #"<parameter\s+name="([^"]+)"[^>]*>(.*?)</parameter>"#,
+        options: [.dotMatchesLineSeparators]
+    )
+
+    static func consumeCompleteSegments(from text: String) -> (segments: [SeedTextToolCallSegment], remainder: String) {
+        var segments: [SeedTextToolCallSegment] = []
+        var cursor = text.startIndex
+
+        while let start = nextStart(in: text, range: cursor..<text.endIndex) {
+            if cursor < start.lowerBound {
+                let prefix = String(text[cursor..<start.lowerBound])
+                guard prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    appendText(String(text[cursor..<start.upperBound]), to: &segments)
+                    cursor = start.upperBound
+                    continue
+                }
+                appendText(prefix, to: &segments)
+            }
+
+            guard let end = nextEnd(in: text, range: start.lowerBound..<text.endIndex) else {
+                return (segments, String(text[start.lowerBound...]))
+            }
+
+            let block = String(text[start.lowerBound..<end.upperBound])
+            if let call = parseToolCall(from: block) {
+                segments.append(.toolCall(call))
+            } else {
+                appendText(block, to: &segments)
+            }
+            cursor = end.upperBound
+        }
+
+        let tail = String(text[cursor...])
+        if let remainder = partialStartRemainder(in: tail) {
+            let emitCount = tail.count - remainder.count
+            if emitCount > 0 {
+                let emitEnd = tail.index(tail.startIndex, offsetBy: emitCount)
+                appendText(String(tail[..<emitEnd]), to: &segments)
+            }
+            return (segments, remainder)
+        }
+
+        appendText(tail, to: &segments)
+        return (segments, "")
+    }
+
+    static func drainSegments(from text: String) -> [SeedTextToolCallSegment] {
+        let consumed = consumeCompleteSegments(from: text)
+        var segments = consumed.segments
+        appendText(consumed.remainder, to: &segments)
+        return segments
+    }
+
+    static func textByRemovingToolCalls(from text: String) -> String {
+        drainSegments(from: text).compactMap { segment in
+            if case .text(let value) = segment {
+                return value
+            }
+            return nil
+        }.joined()
+    }
+
+    static func events(from segments: [SeedTextToolCallSegment]) -> [AgentEvent] {
+        var events: [AgentEvent] = []
+        for segment in segments {
+            switch segment {
+            case .text(let text):
+                if !text.isEmpty {
+                    events.append(.assistantTextDelta(text))
+                }
+            case .toolCall(let call):
+                events.append(.toolCallStart(
+                    id: call.vendorId,
+                    name: displayName(for: call),
+                    input: displayInput(for: call)
+                ))
+                events.append(.toolResult(
+                    id: call.vendorId,
+                    output: blockedToolOutput,
+                    isError: true
+                ))
+            }
+        }
+        return events
+    }
+
+    static func parts(from text: String) -> [Part] {
+        parts(from: drainSegments(from: text))
+    }
+
+    static func sanitizeTranscriptItems(_ items: [TranscriptItem]) -> [TranscriptItem] {
+        items.map { item in
+            guard case .message(let message) = item else { return item }
+            let sanitized = sanitizeMessage(message)
+            return sanitized == message ? item : .message(sanitized)
+        }
+    }
+
+    private static func parts(from segments: [SeedTextToolCallSegment]) -> [Part] {
+        var parts: [Part] = []
+        for segment in segments {
+            switch segment {
+            case .text(let text):
+                if !text.isEmpty {
+                    appendPart(.text(text), to: &parts)
+                }
+            case .toolCall(let call):
+                appendPart(.toolCall(ToolCall(
+                    id: UUID(),
+                    name: displayName(for: call),
+                    arg: displayInput(for: call),
+                    status: .error(exit: 1),
+                    meta: "plain-text-tool-call",
+                    body: blockedToolOutput
+                )), to: &parts)
+            }
+        }
+        return parts
+    }
+
+    private static func sanitizeMessage(_ message: Message) -> Message {
+        guard case .assistant = message.role else { return message }
+
+        var sanitizedParts: [Part] = []
+        var didChange = false
+        for part in message.parts {
+            guard case .text(let text) = part else {
+                appendPart(part, to: &sanitizedParts)
+                continue
+            }
+
+            let replacement = parts(from: text)
+            if replacement.count != 1 || replacement.first != part {
+                didChange = true
+            }
+            for replacementPart in replacement {
+                appendPart(replacementPart, to: &sanitizedParts)
+            }
+        }
+
+        guard didChange else { return message }
+        var copy = message
+        copy.parts = sanitizedParts
+        return copy
+    }
+
+    private static func displayName(for call: SeedTextToolCall) -> String {
+        CodexToolPresentation.name(rawName: call.rawName, namespace: nil)
+    }
+
+    private static func displayInput(for call: SeedTextToolCall) -> String {
+        CodexToolPresentation.argument(rawName: call.rawName,
+                                       namespace: nil,
+                                       arguments: call.inputJSON)
+    }
+
+    private static func parseToolCall(from block: String) -> SeedTextToolCall? {
+        let fullRange = NSRange(block.startIndex..<block.endIndex, in: block)
+        guard let match = functionRegex.firstMatch(in: block, range: fullRange),
+              let name = substring(block, match.range(at: 1)),
+              let body = substring(block, match.range(at: 2)) else {
+            return nil
+        }
+
+        let input = parametersJSON(from: body)
+        return SeedTextToolCall(vendorId: "seed-text-tool-\(UUID().uuidString)",
+                                rawName: decodeEntities(name),
+                                inputJSON: input)
+    }
+
+    private static func parametersJSON(from body: String) -> String {
+        let fullRange = NSRange(body.startIndex..<body.endIndex, in: body)
+        let matches = parameterRegex.matches(in: body, range: fullRange)
+        var parameters: [String: String] = [:]
+        for match in matches {
+            guard let name = substring(body, match.range(at: 1)),
+                  let value = substring(body, match.range(at: 2)) else {
+                continue
+            }
+            parameters[decodeEntities(name)] = decodeEntities(value)
+        }
+
+        guard !parameters.isEmpty,
+              JSONSerialization.isValidJSONObject(parameters),
+              let data = try? JSONSerialization.data(withJSONObject: parameters,
+                                                      options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    private static func nextStart(in text: String, range: Range<String.Index>) -> Range<String.Index>? {
+        earliestRange(in: text, markers: startMarkers, range: range)
+    }
+
+    private static func nextEnd(in text: String, range: Range<String.Index>) -> Range<String.Index>? {
+        earliestRange(in: text, markers: endMarkers, range: range)
+    }
+
+    private static func earliestRange(in text: String,
+                                      markers: [String],
+                                      range: Range<String.Index>) -> Range<String.Index>? {
+        var best: Range<String.Index>?
+        for marker in markers {
+            guard let found = text.range(of: marker, range: range) else { continue }
+            if best == nil || found.lowerBound < best!.lowerBound {
+                best = found
+            }
+        }
+        return best
+    }
+
+    private static func partialStartRemainder(in text: String) -> String? {
+        guard !text.isEmpty else { return nil }
+
+        var bestLength = 0
+        for marker in startMarkers {
+            let maxLength = min(text.count, marker.count - 1)
+            guard maxLength >= 2 else { continue }
+            for length in 2...maxLength {
+                let prefix = String(marker.prefix(length))
+                if text.hasSuffix(prefix) {
+                    bestLength = max(bestLength, length)
+                }
+            }
+        }
+
+        return bestLength > 0 ? String(text.suffix(bestLength)) : nil
+    }
+
+    private static func appendText(_ text: String,
+                                   to segments: inout [SeedTextToolCallSegment]) {
+        guard !text.isEmpty else { return }
+        if case .text(let existing) = segments.last {
+            segments[segments.count - 1] = .text(existing + text)
+        } else {
+            segments.append(.text(text))
+        }
+    }
+
+    private static func appendPart(_ part: Part, to parts: inout [Part]) {
+        if case .text(let incoming) = part,
+           case .text(let existing) = parts.last {
+            parts[parts.count - 1] = .text(existing + incoming)
+        } else {
+            parts.append(part)
+        }
+    }
+
+    private static func substring(_ text: String, _ range: NSRange) -> String? {
+        guard let swiftRange = Range(range, in: text) else { return nil }
+        return String(text[swiftRange])
+    }
+
+    private static func decodeEntities(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 }

@@ -322,7 +322,7 @@ struct ClaudeSessionLogParser {
                     switch btype {
                     case "text":
                         if let t = block["text"] as? String, !t.isEmpty {
-                            parts.append(.text(t))
+                            parts.append(contentsOf: SeedTextToolCallParser.parts(from: t))
                         }
                     case "tool_use":
                         let useId = block["id"] as? String ?? ""
@@ -332,7 +332,12 @@ struct ClaudeSessionLogParser {
                             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                         let callId = UUID()
                         parts.append(.toolCall(ToolCall(
-                            id: callId, name: name, arg: input,
+                            id: callId,
+                            name: CodexToolPresentation.name(rawName: name,
+                                                             namespace: nil),
+                            arg: CodexToolPresentation.argument(rawName: name,
+                                                                namespace: nil,
+                                                                arguments: input),
                             status: .running, meta: nil, body: nil)))
                         pendingToolMappings.append((useId, callId))
                     default: break
