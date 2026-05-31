@@ -197,6 +197,11 @@ enum AgentEvent: Sendable {
     /// A previously-surfaced approval request has been resolved elsewhere.
     case approvalResolved(id: String)
 
+    /// Provider-native child agent or workflow activity surfaced by a vendor
+    /// runtime. Helm treats this as session-local metadata; it must never
+    /// create a separate sidebar session by itself.
+    case childRunStatus(AgentChildRunStatus)
+
     /// One assistant message completes.
     case messageStop
 
@@ -225,6 +230,23 @@ struct AgentApprovalRequest: Identifiable, Equatable, Sendable {
     let allowsSessionApproval: Bool
 }
 
+struct AgentChildRunStatus: Identifiable, Equatable, Sendable {
+    enum State: String, Sendable {
+        case started
+        case running
+        case waiting
+        case completed
+        case failed
+        case cancelled
+    }
+
+    let id: String
+    let parentId: String?
+    let title: String
+    let state: State
+    let detail: String?
+}
+
 enum AgentApprovalDecision: Sendable {
     case accept
     case acceptForSession
@@ -237,6 +259,11 @@ protocol AgentAdapter: AnyObject {
     /// them. `AppStore` uses this to lazily load history when a session is
     /// opened, instead of persisting messages itself.
     var sessionStore: AgentSessionStore { get }
+
+    /// Static feature metadata for orchestration. `promptGuided` means Helm can
+    /// ask the provider to use its native child-agent runtime, but cannot yet
+    /// rely on structured child-run events.
+    var capabilities: AgentAdapterCapabilities { get }
 
     /// Spawn the agent and stream events back. The returned stream finishes
     /// when the agent exits; throwing tears the conversation down.
@@ -265,12 +292,34 @@ protocol AgentAdapter: AnyObject {
 }
 
 extension AgentAdapter {
+    var capabilities: AgentAdapterCapabilities { .none }
+
     var supportsPromptAppend: Bool { false }
     func append(prompt: String, attachments: [ImageAttachment]) throws {
         throw AdapterError.promptAppendUnsupported
     }
 
     func respondToApproval(id: String, decision: AgentApprovalDecision) {}
+}
+
+struct AgentAdapterCapabilities: Equatable, Sendable {
+    enum Support: String, Sendable {
+        case unsupported
+        case promptGuided
+        case eventStream
+    }
+
+    var nativeChildAgents: Support
+    var providerWorkflowRuntime: Support
+    var childRunEvents: Support
+
+    static let none = AgentAdapterCapabilities(nativeChildAgents: .unsupported,
+                                               providerWorkflowRuntime: .unsupported,
+                                               childRunEvents: .unsupported)
+
+    static let promptGuidedChildAgents = AgentAdapterCapabilities(nativeChildAgents: .promptGuided,
+                                                                  providerWorkflowRuntime: .promptGuided,
+                                                                  childRunEvents: .unsupported)
 }
 
 enum ProcessTreeTerminator {

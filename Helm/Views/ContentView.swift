@@ -371,6 +371,9 @@ private struct ProjectSchedulerView: View {
                         ProjectSchedulerPhaseColumn(
                             phase: phase,
                             tasks: activeTasks.filter { effectivePhase($0) == phase },
+                            workflow: { task in
+                                store.workflowRun(forTask: task.id, projectId: project.id)
+                            },
                             canStart: { task in
                                 canStartTasks && store.canStartSchedulerTask(task.id, projectId: project.id)
                             },
@@ -582,6 +585,7 @@ private struct ProjectSchedulerView: View {
 private struct ProjectSchedulerPhaseColumn: View {
     let phase: ProjectSchedulerTaskPhase
     let tasks: [ProjectSchedulerTask]
+    var workflow: (ProjectSchedulerTask) -> ProjectWorkflowRun?
     var canStart: (ProjectSchedulerTask) -> Bool
     var onStart: (ProjectSchedulerTask) -> Void
     var onOpen: (ProjectSchedulerTask) -> Void
@@ -619,6 +623,7 @@ private struct ProjectSchedulerPhaseColumn: View {
                         ProjectSchedulerTaskCard(
                             task: task,
                             displayPhase: phase,
+                            workflow: workflow(task),
                             canStart: canStart(task),
                             onStart: { onStart(task) },
                             onOpen: { onOpen(task) },
@@ -644,6 +649,7 @@ private struct ProjectSchedulerPhaseColumn: View {
 private struct ProjectSchedulerTaskCard: View {
     let task: ProjectSchedulerTask
     let displayPhase: ProjectSchedulerTaskPhase
+    let workflow: ProjectWorkflowRun?
     let canStart: Bool
     var onStart: () -> Void
     var onOpen: () -> Void
@@ -659,6 +665,9 @@ private struct ProjectSchedulerTaskCard: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+            if let workflow {
+                ProjectWorkflowStatusStrip(workflow: workflow)
+            }
             if let worktreeHint = task.worktreeHint {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.triangle.branch")
@@ -734,6 +743,90 @@ private struct ProjectSchedulerTaskCard: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.green)
                 .frame(width: 22, height: 22)
+        }
+    }
+}
+
+private struct ProjectWorkflowStatusStrip: View {
+    let workflow: ProjectWorkflowRun
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(statusColor)
+                    .frame(width: 12)
+                Text(workflow.status.displayName)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("\(completedCount)/\(workflow.nodes.count)")
+                    .font(DS.monoFontSmall)
+                    .foregroundStyle(.tertiary)
+            }
+            .help(workflow.templateName)
+
+            HStack(spacing: 4) {
+                ForEach(workflow.nodes.prefix(5)) { node in
+                    ProjectWorkflowNodePill(node: node)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var completedCount: Int {
+        workflow.nodes.filter { $0.status == .passed || $0.status == .skipped }.count
+    }
+
+    private var statusIcon: String {
+        switch workflow.status {
+        case .planned: return "circle"
+        case .running: return "play.circle"
+        case .waiting: return "hourglass"
+        case .passed: return "checkmark.circle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .cancelled: return "stop.circle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch workflow.status {
+        case .planned: return .secondary
+        case .running: return .accentColor
+        case .waiting: return .orange
+        case .passed: return .green
+        case .failed: return .red
+        case .cancelled: return .secondary
+        }
+    }
+}
+
+private struct ProjectWorkflowNodePill: View {
+    let node: ProjectWorkflowNodeRun
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: node.kind.symbolName)
+                .font(.system(size: 8, weight: .medium))
+            Circle()
+                .fill(statusColor)
+                .frame(width: 5, height: 5)
+        }
+        .foregroundStyle(.secondary)
+        .frame(width: 22, height: 18)
+        .background(Color.helmHover.opacity(0.75), in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+        .help("\(node.title) - \(node.status.displayName)\n\(node.prompt)")
+    }
+
+    private var statusColor: Color {
+        switch node.status {
+        case .planned: return .secondary.opacity(0.45)
+        case .running: return .accentColor
+        case .waiting: return .orange
+        case .passed: return .green
+        case .failed: return .red
+        case .skipped: return .secondary
         }
     }
 }

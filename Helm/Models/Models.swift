@@ -698,28 +698,252 @@ struct ProjectSchedulerHumanAction: Identifiable, Hashable, Codable {
     var isResolved: Bool { resolvedAt != nil }
 }
 
+enum ProjectWorkflowRunStatus: String, Hashable, Codable {
+    case planned
+    case running
+    case waiting
+    case passed
+    case failed
+    case cancelled
+
+    var displayName: String {
+        switch self {
+        case .planned: return "Planned"
+        case .running: return "Running"
+        case .waiting: return "Waiting"
+        case .passed: return "Passed"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+}
+
+enum ProjectWorkflowNodeKind: String, Hashable, Codable, CaseIterable, Identifiable {
+    case preProcess
+    case process
+    case postProcess
+    case cleanup
+    case gate
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .preProcess: return "Pre"
+        case .process: return "Process"
+        case .postProcess: return "Post"
+        case .cleanup: return "Cleanup"
+        case .gate: return "Gate"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .preProcess: return "arrow.triangle.branch"
+        case .process: return "hammer"
+        case .postProcess: return "checklist"
+        case .cleanup: return "trash"
+        case .gate: return "hand.raised"
+        }
+    }
+}
+
+enum ProjectWorkflowNodeExecutor: String, Hashable, Codable {
+    case mainAgent
+    case nativeSubagent
+    case providerWorkflow
+
+    var displayName: String {
+        switch self {
+        case .mainAgent: return "Main"
+        case .nativeSubagent: return "Subagent"
+        case .providerWorkflow: return "Workflow"
+        }
+    }
+}
+
+enum ProjectWorkflowNodeStatus: String, Hashable, Codable {
+    case planned
+    case running
+    case waiting
+    case passed
+    case failed
+    case skipped
+
+    var displayName: String {
+        switch self {
+        case .planned: return "Planned"
+        case .running: return "Running"
+        case .waiting: return "Waiting"
+        case .passed: return "Passed"
+        case .failed: return "Failed"
+        case .skipped: return "Skipped"
+        }
+    }
+}
+
+enum ProjectWorkflowArtifactKind: String, Hashable, Codable {
+    case worktree
+    case process
+    case package
+    case transcript
+    case screenshot
+    case git
+    case note
+    case cleanup
+}
+
+struct ProjectWorkflowArtifact: Identifiable, Hashable, Codable {
+    let id: UUID
+    var kind: ProjectWorkflowArtifactKind
+    var label: String
+    var value: String
+    var createdAt: Date
+
+    init(id: UUID = UUID(),
+         kind: ProjectWorkflowArtifactKind,
+         label: String,
+         value: String,
+         createdAt: Date = Date()) {
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.value = value
+        self.createdAt = createdAt
+    }
+}
+
+struct ProjectWorkflowNodeRun: Identifiable, Hashable, Codable {
+    let id: UUID
+    var key: String
+    var title: String
+    var kind: ProjectWorkflowNodeKind
+    var executor: ProjectWorkflowNodeExecutor
+    var status: ProjectWorkflowNodeStatus
+    var prompt: String
+    var dependencies: [UUID]
+    var providerChildRunId: String?
+    var artifacts: [ProjectWorkflowArtifact]
+    var createdAt: Date
+    var startedAt: Date?
+    var endedAt: Date?
+
+    init(id: UUID = UUID(),
+         key: String,
+         title: String,
+         kind: ProjectWorkflowNodeKind,
+         executor: ProjectWorkflowNodeExecutor,
+         status: ProjectWorkflowNodeStatus = .planned,
+         prompt: String,
+         dependencies: [UUID] = [],
+         providerChildRunId: String? = nil,
+         artifacts: [ProjectWorkflowArtifact] = [],
+         createdAt: Date = Date(),
+         startedAt: Date? = nil,
+         endedAt: Date? = nil) {
+        self.id = id
+        self.key = key
+        self.title = title
+        self.kind = kind
+        self.executor = executor
+        self.status = status
+        self.prompt = prompt
+        self.dependencies = dependencies
+        self.providerChildRunId = providerChildRunId
+        self.artifacts = artifacts
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+}
+
+struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
+    let id: UUID
+    var taskId: UUID
+    var sessionId: UUID
+    var title: String
+    var templateName: String
+    var status: ProjectWorkflowRunStatus
+    var nodes: [ProjectWorkflowNodeRun]
+    var artifacts: [ProjectWorkflowArtifact]
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(id: UUID = UUID(),
+         taskId: UUID,
+         sessionId: UUID,
+         title: String,
+         templateName: String,
+         status: ProjectWorkflowRunStatus = .planned,
+         nodes: [ProjectWorkflowNodeRun],
+         artifacts: [ProjectWorkflowArtifact] = [],
+         createdAt: Date = Date(),
+         updatedAt: Date = Date()) {
+        self.id = id
+        self.taskId = taskId
+        self.sessionId = sessionId
+        self.title = title
+        self.templateName = templateName
+        self.status = status
+        self.nodes = nodes
+        self.artifacts = artifacts
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var projectId: UUID
     var defaultWorkerProfileId: UUID?
     var inbox: [ProjectSchedulerInboxItem]
     var tasks: [ProjectSchedulerTask]
     var humanActions: [ProjectSchedulerHumanAction]
+    var workflowRuns: [ProjectWorkflowRun]
     var updatedAt: Date
 
     var id: UUID { projectId }
+
+    private enum CodingKeys: String, CodingKey {
+        case projectId, defaultWorkerProfileId, inbox, tasks,
+             humanActions, workflowRuns, updatedAt
+    }
 
     init(projectId: UUID,
          defaultWorkerProfileId: UUID? = nil,
          inbox: [ProjectSchedulerInboxItem] = [],
          tasks: [ProjectSchedulerTask] = [],
          humanActions: [ProjectSchedulerHumanAction] = [],
+         workflowRuns: [ProjectWorkflowRun] = [],
          updatedAt: Date = Date()) {
         self.projectId = projectId
         self.defaultWorkerProfileId = defaultWorkerProfileId
         self.inbox = inbox
         self.tasks = tasks
         self.humanActions = humanActions
+        self.workflowRuns = workflowRuns
         self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.projectId = try c.decode(UUID.self, forKey: .projectId)
+        self.defaultWorkerProfileId = try c.decodeIfPresent(UUID.self, forKey: .defaultWorkerProfileId)
+        self.inbox = try c.decodeIfPresent([ProjectSchedulerInboxItem].self, forKey: .inbox) ?? []
+        self.tasks = try c.decodeIfPresent([ProjectSchedulerTask].self, forKey: .tasks) ?? []
+        self.humanActions = try c.decodeIfPresent([ProjectSchedulerHumanAction].self, forKey: .humanActions) ?? []
+        self.workflowRuns = try c.decodeIfPresent([ProjectWorkflowRun].self, forKey: .workflowRuns) ?? []
+        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(projectId, forKey: .projectId)
+        try c.encodeIfPresent(defaultWorkerProfileId, forKey: .defaultWorkerProfileId)
+        try c.encode(inbox, forKey: .inbox)
+        try c.encode(tasks, forKey: .tasks)
+        try c.encode(humanActions, forKey: .humanActions)
+        try c.encode(workflowRuns, forKey: .workflowRuns)
+        try c.encode(updatedAt, forKey: .updatedAt)
     }
 }
 
@@ -871,12 +1095,17 @@ enum SessionEvent: Identifiable, Hashable, Codable {
     /// User appended input to a running turn. The vendor adapter has
     /// accepted the input; this event confirms receipt to the user.
     case promptAppended(id: UUID, appendedAt: Date)
+    /// Helm started a Project Inbox workflow inside the current parent
+    /// session. Provider-native subagents stay scoped to this session instead
+    /// of becoming extra Helm sidebar sessions.
+    case projectWorkflowStarted(id: UUID, workflowId: UUID, title: String, nodeCount: Int, startedAt: Date)
 
     var id: UUID {
         switch self {
         case .compactSummary(let id, _): return id
         case .goalApplied(let id, _, _, _): return id
         case .promptAppended(let id, _): return id
+        case .projectWorkflowStarted(let id, _, _, _, _): return id
         }
     }
 }

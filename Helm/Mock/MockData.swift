@@ -69,6 +69,7 @@ final class AppStore {
     var composerFocusTick: Int = 0
 
     private var schedulerWorkspaceLayouts: [UUID: ProjectSchedulerWorkspaceLayout] = [:]
+    private var workflowResourceLocks: [String: UUID] = [:]
 
     /// Bumped each time the user sends a message. The chat list watches this
     /// to force a scroll-to-bottom after Send, regardless of where the user
@@ -1162,6 +1163,9 @@ final class AppStore {
             schedulers[schedulerIndex].humanActions.removeAll { action in
                 action.taskId.map(staleTaskIds.contains) ?? false
             }
+            schedulers[schedulerIndex].workflowRuns.removeAll { run in
+                staleTaskIds.contains(run.taskId)
+            }
             schedulers[schedulerIndex].updatedAt = now
             removedTaskIds.formUnion(staleTaskIds)
         }
@@ -1201,6 +1205,62 @@ final class AppStore {
             .lazy
             .flatMap(\.tasks)
             .first { $0.sessionId == sessionId }
+    }
+
+    func workflowRun(forTask taskId: UUID, projectId: UUID) -> ProjectWorkflowRun? {
+        schedulerState(for: projectId).workflowRuns.first { $0.taskId == taskId }
+    }
+
+    @discardableResult
+    func recordWorkflowArtifact(taskId: UUID,
+                                projectId: UUID,
+                                kind: ProjectWorkflowArtifactKind,
+                                label: String,
+                                value: String) -> Bool {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        guard let runIndex = projectSchedulers[idx].workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
+            return false
+        }
+        projectSchedulers[idx].workflowRuns[runIndex].artifacts.append(
+            ProjectWorkflowArtifact(kind: kind,
+                                    label: label,
+                                    value: value)
+        )
+        projectSchedulers[idx].workflowRuns[runIndex].updatedAt = Date()
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+        return true
+    }
+
+    @discardableResult
+    func acquireWorkflowResourceLock(taskId: UUID,
+                                     projectId: UUID,
+                                     resource: String) -> Bool {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        guard let workflowId = projectSchedulers[idx].workflowRuns.first(where: { $0.taskId == taskId })?.id else {
+            return false
+        }
+        let key = resource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return false }
+        if let owner = workflowResourceLocks[key],
+           owner != workflowId {
+            return false
+        }
+        workflowResourceLocks[key] = workflowId
+        return recordWorkflowArtifact(taskId: taskId,
+                                      projectId: projectId,
+                                      kind: .note,
+                                      label: "Resource lock",
+                                      value: key)
+    }
+
+    func releaseWorkflowResourceLocks(taskId: UUID,
+                                      projectId: UUID) {
+        let state = schedulerState(for: projectId)
+        guard let workflowId = state.workflowRuns.first(where: { $0.taskId == taskId })?.id else {
+            return
+        }
+        workflowResourceLocks = Dictionary(uniqueKeysWithValues: workflowResourceLocks.filter { $0.value != workflowId })
     }
 
     func schedulerTaskCount(in projectId: UUID,
@@ -1317,9 +1377,13 @@ final class AppStore {
             createdAt: now,
             updatedAt: now
         )
+        let workflowRun = Self.workflowRun(for: task,
+                                           sessionId: sessionId,
+                                           createdAt: now)
         let idx = ensureSchedulerStateIndex(for: projectId)
         projectSchedulers[idx].inbox.insert(inboxItem, at: 0)
         projectSchedulers[idx].tasks.insert(task, at: 0)
+        projectSchedulers[idx].workflowRuns.insert(workflowRun, at: 0)
         projectSchedulers[idx].defaultWorkerProfileId = workerProfile.id
         projectSchedulers[idx].updatedAt = now
         selectedProjectId = projectId
@@ -1385,13 +1449,31 @@ final class AppStore {
         guard !isSessionStreaming(sessionId) else { return true }
 
         let task = projectSchedulers[idx].tasks[taskIndex]
+        var workflow = ensureWorkflowRun(forTaskAt: taskIndex,
+                                         schedulerIndex: idx,
+                                         sessionId: sessionId)
+        markWorkflowRunStarted(workflow.id, schedulerIndex: idx)
+        workflow = projectSchedulers[idx].workflowRuns.first { $0.id == workflow.id } ?? workflow
         let prompt = task.idea
         let displayParts = task.displayParts ?? (prompt.isEmpty ? [] : [.text(prompt)])
-        send(prompt,
-             displayParts: displayParts,
-             attachments: task.attachments ?? [],
-             agentPrompt: Self.workerPrompt(for: task),
-             sessionId: sessionId)
+        let didSend = send(prompt,
+                           displayParts: displayParts,
+                           attachments: task.attachments ?? [],
+                           agentPrompt: Self.workerPrompt(for: task, workflow: workflow),
+                           preUserEvents: [
+                            .projectWorkflowStarted(id: UUID(),
+                                                    workflowId: workflow.id,
+                                                    title: workflow.title,
+                                                    nodeCount: workflow.nodes.count,
+                                                    startedAt: Date())
+                           ],
+                           sessionId: sessionId)
+        if !didSend {
+            markWorkflowRunWaiting(taskId: task.id,
+                                   schedulerIndex: idx,
+                                   updatedAt: Date())
+            return false
+        }
         return isSessionStreaming(sessionId)
     }
 
@@ -1416,6 +1498,8 @@ final class AppStore {
             resolveHumanActions(projectId: projectId, taskId: taskId, kind: nil)
         }
         if phase == .done {
+            markWorkflowRunPassed(taskId: taskId, schedulerIndex: idx)
+            releaseWorkflowResourceLocks(taskId: taskId, projectId: projectId)
             if let sessionId = projectSchedulers[idx].tasks[taskIndex].sessionId {
                 archiveSession(sessionId, archivedAt: now, schedulesSave: false)
             }
@@ -1594,6 +1678,9 @@ final class AppStore {
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .waiting
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Waiting for review: worker session stopped."
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].updatedAt = now
+        markWorkflowRunWaiting(taskId: task.id,
+                               schedulerIndex: location.schedulerIndex,
+                               updatedAt: now)
         projectSchedulers[location.schedulerIndex].updatedAt = now
         scheduleStateSave()
         startRunnableSchedulerTasks(projectId: projectSchedulers[location.schedulerIndex].projectId)
@@ -1606,6 +1693,84 @@ final class AppStore {
             }
         }
         return nil
+    }
+
+    private func ensureWorkflowRun(forTaskAt taskIndex: Int,
+                                   schedulerIndex: Int,
+                                   sessionId: UUID) -> ProjectWorkflowRun {
+        let task = projectSchedulers[schedulerIndex].tasks[taskIndex]
+        if let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.taskId == task.id }) {
+            if projectSchedulers[schedulerIndex].workflowRuns[runIndex].sessionId != sessionId {
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].sessionId = sessionId
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].updatedAt = Date()
+            }
+            return projectSchedulers[schedulerIndex].workflowRuns[runIndex]
+        }
+
+        let run = Self.workflowRun(for: task,
+                                   sessionId: sessionId,
+                                   createdAt: Date())
+        projectSchedulers[schedulerIndex].workflowRuns.insert(run, at: 0)
+        projectSchedulers[schedulerIndex].updatedAt = Date()
+        return run
+    }
+
+    private func markWorkflowRunStarted(_ workflowId: UUID,
+                                        schedulerIndex: Int) {
+        guard let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.id == workflowId }) else {
+            return
+        }
+        let now = Date()
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].status = .running
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].updatedAt = now
+        if let firstPlannedIndex = projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes.firstIndex(where: {
+            $0.status == .planned
+        }) {
+            projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[firstPlannedIndex].status = .running
+            projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[firstPlannedIndex].startedAt = now
+        }
+    }
+
+    private func markWorkflowRunWaiting(taskId: UUID,
+                                        schedulerIndex: Int,
+                                        updatedAt now: Date) {
+        guard let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
+            return
+        }
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].status = .waiting
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].updatedAt = now
+        for nodeIndex in projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes.indices {
+            switch projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status {
+            case .running:
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status = .waiting
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].endedAt = now
+            case .planned:
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status = .waiting
+            case .waiting, .passed, .failed, .skipped:
+                break
+            }
+        }
+    }
+
+    private func markWorkflowRunPassed(taskId: UUID,
+                                       schedulerIndex: Int) {
+        guard let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
+            return
+        }
+        let now = Date()
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].status = .passed
+        projectSchedulers[schedulerIndex].workflowRuns[runIndex].updatedAt = now
+        for nodeIndex in projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes.indices {
+            switch projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status {
+            case .failed, .skipped:
+                break
+            case .planned, .running, .waiting, .passed:
+                projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status = .passed
+                if projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].endedAt == nil {
+                    projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].endedAt = now
+                }
+            }
+        }
     }
 
     private func resolveHumanActions(projectId: UUID,
@@ -1893,20 +2058,105 @@ else:
         return "\(parent)/\(projectName)-worktrees/\(compactSlug)"
     }
 
-    private static func workerPrompt(for task: ProjectSchedulerTask) -> String {
+    private static func workflowRun(for task: ProjectSchedulerTask,
+                                    sessionId: UUID,
+                                    createdAt now: Date) -> ProjectWorkflowRun {
+        ProjectWorkflowRun(
+            taskId: task.id,
+            sessionId: sessionId,
+            title: "\(task.title) workflow",
+            templateName: "Project Inbox native-subagent workflow",
+            nodes: workflowNodes(for: task, createdAt: now),
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private static func workflowNodes(for task: ProjectSchedulerTask,
+                                      createdAt now: Date) -> [ProjectWorkflowNodeRun] {
+        let prePrompt = task.worktreeHint.map {
+            "Fetch origin/main and create or reuse a task-scoped worktree at \($0). Work only inside that worktree unless you explain why that is impossible."
+        } ?? "Prepare an isolated workspace for this task. If this is a Git repository with origin/main, create a task-scoped worktree from origin/main; otherwise document the safest available workspace."
+        let processPrompt = task.idea.isEmpty
+            ? "Implement the submitted Project Inbox task using the prepared workspace."
+            : task.idea
+        let validatePrompt = "Run project-appropriate build and validation. If this is the Helm macOS app, build a Debug app, launch only that app, record its PID and app/package path, and use Computer Use to validate the changed behavior."
+        let cleanupPrompt = "Clean up only artifacts this workflow created: terminate recorded PIDs after verifying their command path, and remove only recorded debug packages or temporary bundles."
+        let mergePrompt = "If validation passed and project policy allows direct merge, merge the task branch or worktree result back to origin/main, resolve conflicts, rerun required validation, commit, and push. If policy is unclear or conflicts cannot be resolved safely, stop and report the gate."
+
+        let pre = ProjectWorkflowNodeRun(
+            key: "pre_process.workspace",
+            title: "Prepare workspace",
+            kind: .preProcess,
+            executor: .mainAgent,
+            prompt: prePrompt,
+            createdAt: now
+        )
+        let process = ProjectWorkflowNodeRun(
+            key: "process.implementation",
+            title: "Implement task",
+            kind: .process,
+            executor: .nativeSubagent,
+            prompt: processPrompt,
+            dependencies: [pre.id],
+            createdAt: now
+        )
+        let validate = ProjectWorkflowNodeRun(
+            key: "post_process.validate",
+            title: "Build and verify",
+            kind: .postProcess,
+            executor: .nativeSubagent,
+            prompt: validatePrompt,
+            dependencies: [process.id],
+            createdAt: now
+        )
+        let cleanup = ProjectWorkflowNodeRun(
+            key: "post_process.cleanup",
+            title: "Cleanup artifacts",
+            kind: .cleanup,
+            executor: .mainAgent,
+            prompt: cleanupPrompt,
+            dependencies: [validate.id],
+            createdAt: now
+        )
+        let merge = ProjectWorkflowNodeRun(
+            key: "post_process.merge",
+            title: "Merge and push",
+            kind: .gate,
+            executor: .nativeSubagent,
+            prompt: mergePrompt,
+            dependencies: [cleanup.id],
+            createdAt: now
+        )
+        return [pre, process, validate, cleanup, merge]
+    }
+
+    private static func workerPrompt(for task: ProjectSchedulerTask,
+                                     workflow: ProjectWorkflowRun?) -> String {
         var prompt = task.idea
         var coordination: [String] = []
+        coordination.append("Run this as a single Project Inbox parent session. Do not ask Helm to create extra sidebar sessions or external threads for the workflow.")
+        coordination.append("Use the provider's native subagent or workflow capability for independent nodes when it is available. Keep those child runs scoped inside this session and summarize their results back here. If native child agents are unavailable, run the workflow sequentially in the main agent and say so.")
         coordination.append("Other Project Inbox workers may be running in this project. Inspect the current workspace state before editing, preserve unrelated changes, and stop to report any conflict instead of overwriting another worker's work.")
         coordination.append(contentsOf: task.resourceNotes)
         if let worktreeHint = task.worktreeHint {
             coordination.append("For edits in this Git repository, create or reuse a task-scoped worktree such as \(worktreeHint); do not make broad edits directly in the shared project checkout.")
         }
-        coordination.append("End with a brief recap of what changed, what remains blocked or conflicted, and whether anything needs review or merge.")
+        coordination.append("Track workflow artifacts explicitly in your final response: worktree path, debug app/package path, PIDs you started, validation evidence, cleanup actions, git base/head, commit hash, and push result when available.")
+        coordination.append("End with a concise workflow recap: node outcomes, what changed, validation evidence, cleanup status, and whether anything remains blocked or conflicted.")
+        if let workflow {
+            coordination.append("Workflow id: \(workflow.id.uuidString.lowercased()). Template: \(workflow.templateName).")
+            coordination.append("Workflow nodes:\n\(workflow.nodes.map(Self.workflowNodeLine).joined(separator: "\n"))")
+        }
         if !coordination.isEmpty {
             prompt += "\n\nProject Inbox coordination:\n"
             prompt += coordination.map { "- \($0)" }.joined(separator: "\n")
         }
         return prompt
+    }
+
+    private static func workflowNodeLine(_ node: ProjectWorkflowNodeRun) -> String {
+        "  - \(node.key) [\(node.kind.displayName), preferred executor: \(node.executor.displayName)]: \(node.prompt)"
     }
 
     // MARK: - Project / Session creation
@@ -2689,6 +2939,9 @@ else:
                 $0.sessionId == sessionId && $0.request.id == id
             }
 
+        case .childRunStatus(let status):
+            recordWorkflowChildRunStatus(status, sessionId: sessionId)
+
         case .messageStop:
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 if msg.meta == "streaming…" || msg.meta == "thinking…" {
@@ -2753,6 +3006,29 @@ else:
                 msg.parts.append(.text("⚠️ " + detail))
             }
         }
+    }
+
+    private func recordWorkflowChildRunStatus(_ status: AgentChildRunStatus,
+                                              sessionId: UUID) {
+        guard let location = managedTaskLocation(for: sessionId) else { return }
+        let task = projectSchedulers[location.schedulerIndex].tasks[location.taskIndex]
+        guard let runIndex = projectSchedulers[location.schedulerIndex].workflowRuns.firstIndex(where: {
+            $0.taskId == task.id
+        }) else { return }
+        let detail = [
+            status.title,
+            "id=\(status.id)",
+            status.parentId.map { "parent=\($0)" },
+            status.detail
+        ].compactMap { $0 }.joined(separator: "\n")
+        projectSchedulers[location.schedulerIndex].workflowRuns[runIndex].artifacts.append(
+            ProjectWorkflowArtifact(kind: .note,
+                                    label: "Child run \(status.state.rawValue)",
+                                    value: detail)
+        )
+        projectSchedulers[location.schedulerIndex].workflowRuns[runIndex].updatedAt = Date()
+        projectSchedulers[location.schedulerIndex].updatedAt = Date()
+        scheduleStateSave()
     }
 
     private func enqueueAssistantTextDelta(_ chunk: String,

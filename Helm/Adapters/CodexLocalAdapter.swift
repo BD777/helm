@@ -4,6 +4,7 @@ import Foundation
 /// into Helm's vendor-neutral `AgentEvent`s.
 final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = CodexSessionStore()
+    let capabilities: AgentAdapterCapabilities = .promptGuidedChildAgents
     private var process: Process?
     private var descendantTracker: ProcessDescendantTracker?
     private let lock = NSLock()
@@ -198,6 +199,7 @@ final class CodexLocalAdapter: AgentAdapter, @unchecked Sendable {
 /// be answered by Helm's UI and then forwarded as JSON-RPC responses.
 final class CodexAppServerAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = CodexSessionStore()
+    let capabilities: AgentAdapterCapabilities = .promptGuidedChildAgents
 
     private let lock = NSLock()
     private var process: Process?

@@ -5,6 +5,7 @@ import Foundation
 /// translates its JSONL output into `AgentEvent`s.
 final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = ClaudeSessionStore()
+    let capabilities: AgentAdapterCapabilities = .promptGuidedChildAgents
     private var process: Process?
     private var descendantTracker: ProcessDescendantTracker?
     private var permissionBridge: ClaudePermissionBridge?

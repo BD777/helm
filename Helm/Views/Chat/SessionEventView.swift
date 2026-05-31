@@ -21,9 +21,16 @@ struct SessionEventView: View {
             divider(label: "Goal enabled for \(vendor.displayName) turn",
                     icon: "target",
                     detail: Self.goalDetail(goal: goal, vendor: vendor, appliedAt: appliedAt))
-        case .promptAppended(_, let appendedAt):
+        case .promptAppended:
             simpleDivider(label: "已追加输入，正在处理…",
                          icon: "arrow.right.circle")
+        case .projectWorkflowStarted(_, let workflowId, let title, let nodeCount, let startedAt):
+            divider(label: "Project workflow started",
+                    icon: "point.3.connected.trianglepath.dotted",
+                    detail: Self.workflowDetail(workflowId: workflowId,
+                                                title: title,
+                                                nodeCount: nodeCount,
+                                                startedAt: startedAt))
         }
     }
 
@@ -98,5 +105,20 @@ struct SessionEventView: View {
         let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         let suffix = trimmed.isEmpty ? "" : ":\n\n\(trimmed)"
         return "Helm sent this turn to \(vendor.displayName) with /goal at \(Self.format(appliedAt))\(suffix)"
+    }
+
+    private static func workflowDetail(workflowId: UUID,
+                                       title: String,
+                                       nodeCount: Int,
+                                       startedAt: Date) -> String {
+        """
+        \(title)
+
+        Workflow: \(workflowId.uuidString.lowercased())
+        Nodes: \(nodeCount)
+        Started: \(Self.format(startedAt))
+
+        Helm keeps this workflow scoped to the parent session. Any provider-native subagents or workflow children should report back here instead of creating separate Helm sidebar sessions.
+        """
     }
 }
