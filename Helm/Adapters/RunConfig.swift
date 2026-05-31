@@ -289,6 +289,238 @@ enum RunConfigResolver {
     }
 }
 
+struct ClaudeCodeVersion: Equatable, Comparable, Sendable {
+    var major: Int
+    var minor: Int
+    var patch: Int
+
+    var displayName: String {
+        "\(major).\(minor).\(patch)"
+    }
+
+    static func < (lhs: ClaudeCodeVersion, rhs: ClaudeCodeVersion) -> Bool {
+        if lhs.major != rhs.major { return lhs.major < rhs.major }
+        if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
+        return lhs.patch < rhs.patch
+    }
+
+    static func parse(_ raw: String) -> ClaudeCodeVersion? {
+        let pattern = #"(\d+)\.(\d+)\.(\d+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+              match.numberOfRanges == 4
+        else { return nil }
+
+        func component(_ index: Int) -> Int? {
+            guard let range = Range(match.range(at: index), in: raw) else { return nil }
+            return Int(raw[range])
+        }
+
+        guard let major = component(1),
+              let minor = component(2),
+              let patch = component(3)
+        else { return nil }
+
+        return ClaudeCodeVersion(major: major, minor: minor, patch: patch)
+    }
+}
+
+struct ClaudeWorkflowRuntimeDiagnostic: Equatable, Sendable {
+    enum State: Equatable, Sendable {
+        case missing
+        case needsUpgrade
+        case ready
+        case unknownVersion
+        case checking
+        case upgrading
+        case failed
+    }
+
+    var state: State
+    var title: String
+    var detail: String
+    var command: String?
+    var installedVersion: String?
+    var requiredVersion: String
+    var upgradeCommand: String?
+
+    var isReady: Bool {
+        state == .ready
+    }
+
+    var canUpgrade: Bool {
+        switch state {
+        case .missing, .checking, .upgrading:
+            return false
+        case .needsUpgrade, .ready, .unknownVersion, .failed:
+            return upgradeCommand != nil
+        }
+    }
+}
+
+enum ClaudeWorkflowRuntime {
+    static let minimumDynamicWorkflowVersion = ClaudeCodeVersion(major: 2, minor: 1, patch: 154)
+
+    static func diagnose(command: String = "claude") -> ClaudeWorkflowRuntimeDiagnostic {
+        guard let executable = resolveCommand(command) else {
+            return ClaudeWorkflowRuntimeDiagnostic(
+                state: .missing,
+                title: "Claude Code not found",
+                detail: "Install Claude Code or set the Claude profile command path before using native Dynamic Workflows.",
+                command: nil,
+                installedVersion: nil,
+                requiredVersion: minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: nil
+            )
+        }
+
+        let result = runProcess(executable: executable, arguments: ["--version"])
+        let versionText = firstNonEmptyLine(result.stdout) ?? firstNonEmptyLine(result.stderr)
+        guard result.status == 0 else {
+            return ClaudeWorkflowRuntimeDiagnostic(
+                state: .failed,
+                title: "Cannot run Claude Code",
+                detail: lastNonEmptyLine(result.stderr) ?? "claude --version exited \(result.status).",
+                command: executable,
+                installedVersion: versionText,
+                requiredVersion: minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: "\(executable) update"
+            )
+        }
+
+        guard let versionText,
+              let version = ClaudeCodeVersion.parse(versionText)
+        else {
+            return ClaudeWorkflowRuntimeDiagnostic(
+                state: .unknownVersion,
+                title: "Version unknown",
+                detail: "Helm found Claude Code but could not parse its version. Native workflow support requires \(minimumDynamicWorkflowVersion.displayName) or newer.",
+                command: executable,
+                installedVersion: versionText,
+                requiredVersion: minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: "\(executable) update"
+            )
+        }
+
+        if version >= minimumDynamicWorkflowVersion {
+            return ClaudeWorkflowRuntimeDiagnostic(
+                state: .ready,
+                title: "Ready for Dynamic Workflows",
+                detail: "Claude Code \(version.displayName) meets Helm's minimum native workflow requirement.",
+                command: executable,
+                installedVersion: version.displayName,
+                requiredVersion: minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: "\(executable) update"
+            )
+        }
+
+        return ClaudeWorkflowRuntimeDiagnostic(
+            state: .needsUpgrade,
+            title: "Upgrade required",
+            detail: "Claude Code \(version.displayName) is below Helm's minimum native workflow requirement. Helm can still fall back to prompt-guided workflow orchestration.",
+            command: executable,
+            installedVersion: version.displayName,
+            requiredVersion: minimumDynamicWorkflowVersion.displayName,
+            upgradeCommand: "\(executable) update"
+        )
+    }
+
+    static func upgrade(command: String = "claude") -> ClaudeWorkflowRuntimeDiagnostic {
+        guard let executable = resolveCommand(command) else {
+            return diagnose(command: command)
+        }
+
+        let result = runProcess(executable: executable, arguments: ["update"])
+        if result.status != 0 {
+            return ClaudeWorkflowRuntimeDiagnostic(
+                state: .failed,
+                title: "Upgrade failed",
+                detail: lastNonEmptyLine(result.stderr) ?? lastNonEmptyLine(result.stdout) ?? "claude update exited \(result.status).",
+                command: executable,
+                installedVersion: nil,
+                requiredVersion: minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: "\(executable) update"
+            )
+        }
+
+        return diagnose(command: executable)
+    }
+
+    private static func resolveCommand(_ command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = trimmed.isEmpty ? "claude" : trimmed
+        if candidate.contains("/") {
+            let path = (candidate as NSString).expandingTildeInPath
+            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        }
+
+        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let search = [
+            "\(NSHomeDirectory())/.local/bin",
+            "\(NSHomeDirectory())/.npm-global/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ] + envPath.split(separator: ":").map(String.init)
+
+        for dir in search {
+            let full = URL(fileURLWithPath: dir)
+                .appendingPathComponent(candidate)
+                .path
+            if FileManager.default.isExecutableFile(atPath: full) {
+                return full
+            }
+        }
+        return nil
+    }
+
+    private static func runProcess(executable: String,
+                                   arguments: [String]) -> (status: Int32, stdout: String, stderr: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: executable)
+        proc.arguments = arguments
+        var env = ProcessInfo.processInfo.environment
+        let extras = ["\(NSHomeDirectory())/.local/bin",
+                      "\(NSHomeDirectory())/.npm-global/bin",
+                      "/opt/homebrew/bin",
+                      "/usr/local/bin"]
+        let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = (extras + [existing]).joined(separator: ":")
+        proc.environment = env
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+
+        do {
+            try proc.run()
+        } catch {
+            return (127, "", error.localizedDescription)
+        }
+
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return (
+            proc.terminationStatus,
+            String(data: outData, encoding: .utf8) ?? "",
+            String(data: errData, encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func firstNonEmptyLine(_ raw: String) -> String? {
+        raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    private static func lastNonEmptyLine(_ raw: String) -> String? {
+        raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { !$0.isEmpty }
+    }
+}
+
 struct CodexComputerUseDiagnostic: Equatable {
     enum State: Equatable {
         case disabled

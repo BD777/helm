@@ -1180,6 +1180,22 @@ final class AppStore {
             ?? ProjectSchedulerState(projectId: projectId)
     }
 
+    func workflowTemplate(for projectId: UUID) -> ProjectWorkflowTemplate {
+        schedulerState(for: projectId).workflowTemplate
+    }
+
+    func updateWorkflowTemplate(_ template: ProjectWorkflowTemplate,
+                                projectId: UUID) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        projectSchedulers[idx].workflowTemplate = template
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    func resetWorkflowTemplate(projectId: UUID) {
+        updateWorkflowTemplate(.default, projectId: projectId)
+    }
+
     func schedulerTasks(in projectId: UUID) -> [ProjectSchedulerTask] {
         schedulerState(for: projectId).tasks.sorted { lhs, rhs in
             if lhs.phase == rhs.phase { return lhs.updatedAt > rhs.updatedAt }
@@ -1377,10 +1393,11 @@ final class AppStore {
             createdAt: now,
             updatedAt: now
         )
+        let idx = ensureSchedulerStateIndex(for: projectId)
         let workflowRun = Self.workflowRun(for: task,
                                            sessionId: sessionId,
+                                           template: projectSchedulers[idx].workflowTemplate,
                                            createdAt: now)
-        let idx = ensureSchedulerStateIndex(for: projectId)
         projectSchedulers[idx].inbox.insert(inboxItem, at: 0)
         projectSchedulers[idx].tasks.insert(task, at: 0)
         projectSchedulers[idx].workflowRuns.insert(workflowRun, at: 0)
@@ -1454,12 +1471,21 @@ final class AppStore {
                                          sessionId: sessionId)
         markWorkflowRunStarted(workflow.id, schedulerIndex: idx)
         workflow = projectSchedulers[idx].workflowRuns.first { $0.id == workflow.id } ?? workflow
+        guard let session = sessions.first(where: { $0.id == sessionId }),
+              let workerProfile = profile(session.profileId)
+        else { return false }
+        let skillInstall = installProjectWorkflowSkill(project: project,
+                                                       vendor: workerProfile.vendor,
+                                                       taskId: task.id)
         let prompt = task.idea
         let displayParts = task.displayParts ?? (prompt.isEmpty ? [] : [.text(prompt)])
         let didSend = send(prompt,
                            displayParts: displayParts,
                            attachments: task.attachments ?? [],
-                           agentPrompt: Self.workerPrompt(for: task, workflow: workflow),
+                           agentPrompt: Self.workerPrompt(for: task,
+                                                          workflow: workflow,
+                                                          vendor: workerProfile.vendor,
+                                                          skillInstall: skillInstall),
                            preUserEvents: [
                             .projectWorkflowStarted(id: UUID(),
                                                     workflowId: workflow.id,
@@ -1475,6 +1501,34 @@ final class AppStore {
             return false
         }
         return isSessionStreaming(sessionId)
+    }
+
+    private func installProjectWorkflowSkill(project: Project,
+                                             vendor: Vendor,
+                                             taskId: UUID) -> ProjectWorkflowSkillInstallResult {
+        do {
+            let result = try ProjectWorkflowSkillInstaller.install(project: project,
+                                                                   vendor: vendor)
+            recordWorkflowArtifact(taskId: taskId,
+                                   projectId: project.id,
+                                   kind: .skill,
+                                   label: "Workflow skill",
+                                   value: result.pathDescription)
+            return result
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            recordWorkflowArtifact(taskId: taskId,
+                                   projectId: project.id,
+                                   kind: .skill,
+                                   label: "Workflow skill fallback",
+                                   value: message)
+            return ProjectWorkflowSkillInstallResult(
+                name: ProjectWorkflowSkillInstaller.skillName,
+                invocation: ProjectWorkflowSkillInstaller.invocationCommand(for: vendor),
+                pathDescription: "Skill install failed: \(message)",
+                mode: .fallback(reason: message)
+            )
+        }
     }
 
     func openSchedulerTaskSession(_ taskId: UUID, projectId: UUID) {
@@ -1709,6 +1763,7 @@ final class AppStore {
 
         let run = Self.workflowRun(for: task,
                                    sessionId: sessionId,
+                                   template: projectSchedulers[schedulerIndex].workflowTemplate,
                                    createdAt: Date())
         projectSchedulers[schedulerIndex].workflowRuns.insert(run, at: 0)
         projectSchedulers[schedulerIndex].updatedAt = Date()
@@ -2060,82 +2115,87 @@ else:
 
     private static func workflowRun(for task: ProjectSchedulerTask,
                                     sessionId: UUID,
+                                    template: ProjectWorkflowTemplate,
                                     createdAt now: Date) -> ProjectWorkflowRun {
         ProjectWorkflowRun(
             taskId: task.id,
             sessionId: sessionId,
             title: "\(task.title) workflow",
-            templateName: "Project Inbox native-subagent workflow",
-            nodes: workflowNodes(for: task, createdAt: now),
+            templateName: template.name,
+            nodes: workflowNodes(for: task,
+                                 template: template,
+                                 createdAt: now),
             createdAt: now,
             updatedAt: now
         )
     }
 
     private static func workflowNodes(for task: ProjectSchedulerTask,
+                                      template: ProjectWorkflowTemplate,
                                       createdAt now: Date) -> [ProjectWorkflowNodeRun] {
-        let prePrompt = task.worktreeHint.map {
-            "Fetch origin/main and create or reuse a task-scoped worktree at \($0). Work only inside that worktree unless you explain why that is impossible."
-        } ?? "Prepare an isolated workspace for this task. If this is a Git repository with origin/main, create a task-scoped worktree from origin/main; otherwise document the safest available workspace."
+        let prePrompt = template.preProcessPrompt(worktreeHint: task.worktreeHint)
         let processPrompt = task.idea.isEmpty
             ? "Implement the submitted Project Inbox task using the prepared workspace."
             : task.idea
-        let validatePrompt = "Run project-appropriate build and validation. If this is the Helm macOS app, build a Debug app, launch only that app, record its PID and app/package path, and use Computer Use to validate the changed behavior."
-        let cleanupPrompt = "Clean up only artifacts this workflow created: terminate recorded PIDs after verifying their command path, and remove only recorded debug packages or temporary bundles."
-        let mergePrompt = "If validation passed and project policy allows direct merge, merge the task branch or worktree result back to origin/main, resolve conflicts, rerun required validation, commit, and push. If policy is unclear or conflicts cannot be resolved safely, stop and report the gate."
 
-        let pre = ProjectWorkflowNodeRun(
-            key: "pre_process.workspace",
-            title: "Prepare workspace",
-            kind: .preProcess,
-            executor: .mainAgent,
-            prompt: prePrompt,
-            createdAt: now
-        )
+        var nodes: [ProjectWorkflowNodeRun] = []
+        if !prePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            nodes.append(
+                ProjectWorkflowNodeRun(
+                    key: "pre_process",
+                    title: "Pre-process",
+                    kind: .preProcess,
+                    executor: .mainAgent,
+                    prompt: prePrompt,
+                    createdAt: now
+                )
+            )
+        }
+
         let process = ProjectWorkflowNodeRun(
             key: "process.implementation",
             title: "Implement task",
             kind: .process,
             executor: .nativeSubagent,
             prompt: processPrompt,
-            dependencies: [pre.id],
+            dependencies: nodes.last.map { [$0.id] } ?? [],
             createdAt: now
         )
-        let validate = ProjectWorkflowNodeRun(
-            key: "post_process.validate",
-            title: "Build and verify",
-            kind: .postProcess,
-            executor: .nativeSubagent,
-            prompt: validatePrompt,
-            dependencies: [process.id],
-            createdAt: now
-        )
-        let cleanup = ProjectWorkflowNodeRun(
-            key: "post_process.cleanup",
-            title: "Cleanup artifacts",
-            kind: .cleanup,
-            executor: .mainAgent,
-            prompt: cleanupPrompt,
-            dependencies: [validate.id],
-            createdAt: now
-        )
-        let merge = ProjectWorkflowNodeRun(
-            key: "post_process.merge",
-            title: "Merge and push",
-            kind: .gate,
-            executor: .nativeSubagent,
-            prompt: mergePrompt,
-            dependencies: [cleanup.id],
-            createdAt: now
-        )
-        return [pre, process, validate, cleanup, merge]
+        nodes.append(process)
+
+        if let postPrompt = template.resolvedPostProcessPrompt {
+            nodes.append(
+                ProjectWorkflowNodeRun(
+                    key: "post_process",
+                    title: "Post-process",
+                    kind: .postProcess,
+                    executor: .nativeSubagent,
+                    prompt: postPrompt,
+                    dependencies: [process.id],
+                    createdAt: now
+                )
+            )
+        }
+        return nodes
     }
 
     private static func workerPrompt(for task: ProjectSchedulerTask,
-                                     workflow: ProjectWorkflowRun?) -> String {
-        var prompt = task.idea
+                                     workflow: ProjectWorkflowRun?,
+                                     vendor: Vendor,
+                                     skillInstall: ProjectWorkflowSkillInstallResult) -> String {
+        var prompt = ""
+        if skillInstall.isInstalled {
+            prompt += "\(skillInstall.invocation)\n\n"
+        } else {
+            prompt += task.idea
+        }
         var coordination: [String] = []
-        coordination.append("Run this as a single Project Inbox parent session. Do not ask Helm to create extra sidebar sessions or external threads for the workflow.")
+        if skillInstall.isInstalled {
+            coordination.append("Helm installed the provider-local workflow skill \(skillInstall.name) at \(skillInstall.pathDescription). Treat the skill as the stable workflow contract and this message as the per-run workflow instance.")
+        } else {
+            coordination.append("Helm could not install the provider-local workflow skill. Fallback reason: \(skillInstall.pathDescription). Follow the inline workflow contract in this message.")
+        }
+        coordination.append("Runtime vendor: \(vendor.displayName). Run this as a single Project Inbox parent session. Do not ask Helm to create extra sidebar sessions or external threads for the workflow.")
         coordination.append("Use the provider's native subagent or workflow capability for independent nodes when it is available. Keep those child runs scoped inside this session and summarize their results back here. If native child agents are unavailable, run the workflow sequentially in the main agent and say so.")
         coordination.append("Other Project Inbox workers may be running in this project. Inspect the current workspace state before editing, preserve unrelated changes, and stop to report any conflict instead of overwriting another worker's work.")
         coordination.append(contentsOf: task.resourceNotes)
@@ -2149,7 +2209,16 @@ else:
             coordination.append("Workflow nodes:\n\(workflow.nodes.map(Self.workflowNodeLine).joined(separator: "\n"))")
         }
         if !coordination.isEmpty {
-            prompt += "\n\nProject Inbox coordination:\n"
+            if !prompt.isEmpty {
+                prompt += "\n\n"
+            }
+            prompt += "Project Inbox workflow instance:\n"
+            prompt += "- Task title: \(task.title)\n"
+            prompt += "- User prompt:\n\(task.idea.isEmpty ? "(No text prompt; use the attached inputs and workflow context.)" : task.idea)\n"
+            if task.attachments?.isEmpty == false {
+                prompt += "- Attachments: included with this Helm message; inspect them if relevant.\n"
+            }
+            prompt += "\nProject Inbox coordination:\n"
             prompt += coordination.map { "- \($0)" }.joined(separator: "\n")
         }
         return prompt
@@ -3217,6 +3286,235 @@ else:
         return String(base.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
+}
+
+struct ProjectWorkflowSkillInstallResult: Equatable, Sendable {
+    enum Mode: Equatable, Sendable {
+        case installed
+        case fallback(reason: String)
+    }
+
+    var name: String
+    var invocation: String
+    var pathDescription: String
+    var mode: Mode
+
+    var isInstalled: Bool {
+        if case .installed = mode { return true }
+        return false
+    }
+}
+
+enum ProjectWorkflowSkillInstaller {
+    static let skillName = "helm-project-workflow"
+
+    static func invocationCommand(for vendor: Vendor) -> String {
+        switch vendor {
+        case .claude: return "/\(skillName)"
+        case .codex: return "$\(skillName)"
+        }
+    }
+
+    static func install(project: Project,
+                        vendor: Vendor,
+                        fileManager: FileManager = .default) throws -> ProjectWorkflowSkillInstallResult {
+        let content = skillBody(for: vendor)
+        switch project.location {
+        case .local(let path):
+            let skillFile = try installLocal(projectPath: path,
+                                             vendor: vendor,
+                                             content: content,
+                                             fileManager: fileManager)
+            return ProjectWorkflowSkillInstallResult(
+                name: skillName,
+                invocation: invocationCommand(for: vendor),
+                pathDescription: skillFile.path,
+                mode: .installed
+            )
+        case .ssh(let host, let path, _):
+            let remotePath = try installRemote(host: host,
+                                               projectPath: path,
+                                               vendor: vendor,
+                                               content: content)
+            return ProjectWorkflowSkillInstallResult(
+                name: skillName,
+                invocation: invocationCommand(for: vendor),
+                pathDescription: "\(host):\(remotePath)",
+                mode: .installed
+            )
+        }
+    }
+
+    private static func installLocal(projectPath: String,
+                                     vendor: Vendor,
+                                     content: String,
+                                     fileManager: FileManager) throws -> URL {
+        let root = URL(fileURLWithPath: (projectPath as NSString).expandingTildeInPath,
+                       isDirectory: true)
+        let dir = root.appendingPathComponent(localSkillComponent(for: vendor),
+                                              isDirectory: true)
+            .appendingPathComponent(skillName, isDirectory: true)
+        try fileManager.createDirectory(at: dir,
+                                        withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("SKILL.md")
+        if let existing = try? String(contentsOf: file, encoding: .utf8),
+           existing == content {
+            return file
+        }
+        try content.write(to: file, atomically: true, encoding: .utf8)
+        return file
+    }
+
+    private static func installRemote(host: String,
+                                      projectPath: String,
+                                      vendor: Vendor,
+                                      content: String) throws -> String {
+        let dir = remoteSkillDirectory(projectPath: projectPath, vendor: vendor)
+        let encoded = Data(content.utf8).base64EncodedString()
+        let script = """
+        import base64
+        import os
+
+        skill_dir = os.path.expanduser(os.environ["HELM_WORKFLOW_SKILL_DIR"])
+        content = base64.b64decode(os.environ["HELM_WORKFLOW_SKILL_B64"]).decode("utf-8")
+        os.makedirs(skill_dir, exist_ok=True)
+        skill_file = os.path.join(skill_dir, "SKILL.md")
+        existing = None
+        try:
+            with open(skill_file, "r", encoding="utf-8") as fh:
+                existing = fh.read()
+        except Exception:
+            pass
+        if existing != content:
+            with open(skill_file, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        print(skill_file)
+        """
+        let command = """
+        HELM_WORKFLOW_SKILL_DIR=\(SSHRemote.shellQuote(dir)); export HELM_WORKFLOW_SKILL_DIR
+        HELM_WORKFLOW_SKILL_B64=\(SSHRemote.shellQuote(encoded)); export HELM_WORKFLOW_SKILL_B64
+        if command -v python3 >/dev/null 2>&1; then
+          python3 - <<'PY'
+        \(script)
+        PY
+        elif command -v python >/dev/null 2>&1; then
+          python - <<'PY'
+        \(script)
+        PY
+        else
+          mkdir -p -- "$HELM_WORKFLOW_SKILL_DIR" && \
+          printf '%s' "$HELM_WORKFLOW_SKILL_B64" | base64 -d > "$HELM_WORKFLOW_SKILL_DIR/SKILL.md" && \
+          printf '%s\\n' "$HELM_WORKFLOW_SKILL_DIR/SKILL.md"
+        fi
+        """
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+        proc.arguments = SSHRemote.arguments(host: host,
+                                             remoteCommand: command,
+                                             batchMode: true,
+                                             connectTimeout: 8)
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+
+        do {
+            try proc.run()
+        } catch {
+            throw InstallError.failed(error.localizedDescription)
+        }
+        proc.waitUntilExit()
+
+        let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8) ?? ""
+        let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8) ?? ""
+        guard proc.terminationStatus == 0 else {
+            throw InstallError.failed(lastNonEmptyLine(stderrText)
+                                      ?? lastNonEmptyLine(stdoutText)
+                                      ?? "ssh exited \(proc.terminationStatus)")
+        }
+        return lastNonEmptyLine(stdoutText) ?? dir + "/SKILL.md"
+    }
+
+    private static func localSkillComponent(for vendor: Vendor) -> String {
+        switch vendor {
+        case .claude: return ".claude/skills"
+        case .codex: return ".agents/skills"
+        }
+    }
+
+    private static func remoteSkillDirectory(projectPath: String,
+                                             vendor: Vendor) -> String {
+        let trimmed = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+        switch vendor {
+        case .claude: return "\(base)/.claude/skills/\(skillName)"
+        case .codex: return "\(base)/.agents/skills/\(skillName)"
+        }
+    }
+
+    private static func skillBody(for vendor: Vendor) -> String {
+        """
+        ---
+        name: \(skillName)
+        description: Run Helm Project Inbox workflows inside one parent session using provider-native subagents or workflow orchestration when available.
+        ---
+
+        # Helm Project Workflow
+
+        Use this skill only when Helm invokes it from Project Inbox. The user message following the invocation is the workflow instance: it contains the task prompt, node list, dependencies, workspace notes, and artifact requirements.
+
+        ## Contract
+
+        - Keep the workflow inside the current Helm session. Do not ask Helm to create extra sidebar sessions, external threads, or unrelated conversations.
+        - Use provider-native child agents or workflow orchestration for nodes marked as subagent/workflow when the runtime supports them. Child work must remain scoped to this parent session and report results back here.
+        - If native child agents or workflow orchestration are unavailable, run the nodes sequentially in the parent agent and state that fallback clearly.
+        - Preserve unrelated user or agent changes. Inspect the workspace before editing and avoid overwriting concurrent Project Inbox work.
+        - Track artifacts explicitly when the workflow creates them: worktree paths, debug app or package paths, process IDs, screenshots or transcripts, cleanup actions, git base/head, commits, and push results.
+
+        ## Node Semantics
+
+        - pre_process is a policy prompt that runs before the user task. It may prepare a worktree, inspect dependencies, load context, or do nothing if the workflow instance leaves it empty.
+        - process is always the user's Project Inbox task. Implement it in the prepared workspace or current project context.
+        - post_process is a policy prompt that runs after the user task. It may validate, clean up, merge, push, ask for review, or do nothing if the workflow instance leaves it empty.
+        - Do not treat Helm's visible nodes as a user-authored DAG. They are policy envelopes; decide the actual internal subagent/workflow orchestration yourself based on the task and runtime.
+
+        ## Provider Guidance
+
+        \(providerGuidance(for: vendor))
+
+        ## Final Response
+
+        End with a concise workflow recap covering node outcomes, files changed, validation evidence, cleanup status, git result, and any remaining blocker.
+        """
+    }
+
+    private static func providerGuidance(for vendor: Vendor) -> String {
+        switch vendor {
+        case .claude:
+            return "- In Claude Code, prefer Dynamic Workflows when available for DAG-style node orchestration and parallel subagents. Otherwise use Claude Code's native subagent/task capability, then summarize child results in the parent session."
+        case .codex:
+            return "- In Codex, prefer the native subagent/custom-agent capability when available. Keep spawned agents inside the parent turn and use the parent agent to integrate, verify, and report results."
+        }
+    }
+
+    private static func lastNonEmptyLine(_ raw: String) -> String? {
+        raw.split(separator: "\n", omittingEmptySubsequences: true)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    enum InstallError: LocalizedError {
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .failed(let message): return message
+            }
+        }
+    }
 }
 
 enum SSHProbe {

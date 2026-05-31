@@ -48,6 +48,7 @@ struct RemoteClaudeProviderCandidate: Identifiable, Hashable, Sendable {
 
     var commandPath: String
     var hasSubscriptionAuth: Bool
+    var versionText: String?
 
     var id: String { commandPath }
 
@@ -57,6 +58,15 @@ struct RemoteClaudeProviderCandidate: Identifiable, Hashable, Sendable {
 
     var authDescription: String {
         hasSubscriptionAuth ? "Subscription OAuth" : "Remote Claude Code default auth"
+    }
+
+    var installedVersion: ClaudeCodeVersion? {
+        versionText.flatMap(ClaudeCodeVersion.parse)
+    }
+
+    var supportsDynamicWorkflows: Bool {
+        guard let installedVersion else { return false }
+        return installedVersion >= ClaudeWorkflowRuntime.minimumDynamicWorkflowVersion
     }
 }
 
@@ -128,6 +138,7 @@ enum RemoteCodexProviderDiscovery {
             claude_path="$(command -v claude 2>/dev/null || true)"
             if [ -z "$claude_path" ]; then exit 0; fi
             printf '__HELM_CLAUDE_PATH__%s\\n' "$claude_path"
+            "$claude_path" --version 2>/dev/null | sed -n '1s/^/__HELM_CLAUDE_VERSION__/p'
             if [ -r "$HOME/.claude/.credentials.json" ] && grep -q '"claudeAiOauth"' "$HOME/.claude/.credentials.json"; then
               printf '__HELM_CLAUDE_AUTH__subscription\\n'
             else
@@ -166,9 +177,12 @@ enum RemoteCodexProviderDiscovery {
 
             var commandPath = ""
             var hasSubscriptionAuth = false
+            var versionText: String?
             for line in stdoutText.split(separator: "\n").map(String.init) {
                 if line.hasPrefix("__HELM_CLAUDE_PATH__") {
                     commandPath = String(line.dropFirst("__HELM_CLAUDE_PATH__".count))
+                } else if line.hasPrefix("__HELM_CLAUDE_VERSION__") {
+                    versionText = String(line.dropFirst("__HELM_CLAUDE_VERSION__".count))
                 } else if line == "__HELM_CLAUDE_AUTH__subscription" {
                     hasSubscriptionAuth = true
                 }
@@ -176,8 +190,49 @@ enum RemoteCodexProviderDiscovery {
             guard !commandPath.isEmpty else { return nil }
             return RemoteClaudeProviderCandidate(
                 commandPath: commandPath,
-                hasSubscriptionAuth: hasSubscriptionAuth
+                hasSubscriptionAuth: hasSubscriptionAuth,
+                versionText: versionText
             )
+        }.value
+    }
+
+    static func upgradeRemoteClaude(host: String,
+                                    commandPath: String) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            let command = """
+            export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+            \(SSHRemote.shellQuote(commandPath)) update
+            """
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: SSHRemote.executable)
+            proc.arguments = SSHRemote.arguments(
+                host: host,
+                remoteCommand: command,
+                batchMode: true,
+                connectTimeout: 8
+            )
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+
+            do {
+                try proc.run()
+            } catch {
+                throw SSHRemoteError(message: error.localizedDescription)
+            }
+            proc.waitUntilExit()
+
+            let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                                    encoding: .utf8) ?? ""
+            guard proc.terminationStatus == 0 else {
+                let reason = lastNonEmptyLine(stderrText) ?? lastNonEmptyLine(stdoutText)
+                throw SSHRemoteError(message: reason?.isEmpty == false ? reason! : "ssh exited \(proc.terminationStatus)")
+            }
+            return stdoutText.isEmpty ? stderrText : stdoutText
         }.value
     }
 

@@ -698,6 +698,96 @@ struct ProjectSchedulerHumanAction: Identifiable, Hashable, Codable {
     var isResolved: Bool { resolvedAt != nil }
 }
 
+struct ProjectWorkflowTemplate: Hashable, Codable {
+    var name: String
+    var preProcessPrompt: String
+    var postProcessPrompt: String
+
+    static let `default` = ProjectWorkflowTemplate(
+        name: "Helm app workflow",
+        preProcessPrompt: "Fetch origin/main and create or reuse a task-scoped worktree at {{worktree_hint}}. Work only inside that worktree unless you explain why that is impossible.",
+        postProcessPrompt: """
+        Run project-appropriate build and validation. If this is the Helm macOS app, build a Debug app, launch only that app, record its PID and app/package path, and use Computer Use to validate the changed behavior.
+
+        Clean up only artifacts this workflow created: terminate recorded PIDs after verifying their command path, and remove only recorded debug packages or temporary bundles.
+
+        If validation passed and project policy allows direct merge, merge the task branch or worktree result back to origin/main, resolve conflicts, rerun required validation, commit, and push. If policy is unclear or conflicts cannot be resolved safely, stop and report the gate.
+        """
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case name, preProcessPrompt, postProcessPrompt,
+             validatePrompt, cleanupPrompt, mergePrompt, mergeEnabled
+    }
+
+    init(name: String,
+         preProcessPrompt: String,
+         postProcessPrompt: String) {
+        self.name = name
+        self.preProcessPrompt = preProcessPrompt
+        self.postProcessPrompt = postProcessPrompt
+    }
+
+    init(from decoder: Decoder) throws {
+        let defaults = Self.default
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? defaults.name
+        self.preProcessPrompt = try c.decodeIfPresent(String.self, forKey: .preProcessPrompt) ?? defaults.preProcessPrompt
+        if let postProcessPrompt = try c.decodeIfPresent(String.self, forKey: .postProcessPrompt) {
+            self.postProcessPrompt = postProcessPrompt
+        } else {
+            let validate = try c.decodeIfPresent(String.self, forKey: .validatePrompt)
+            let cleanup = try c.decodeIfPresent(String.self, forKey: .cleanupPrompt)
+            let mergeEnabled = try c.decodeIfPresent(Bool.self, forKey: .mergeEnabled) ?? true
+            let merge = mergeEnabled ? try c.decodeIfPresent(String.self, forKey: .mergePrompt) : nil
+            let migrated = [validate, cleanup, merge]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            self.postProcessPrompt = migrated.isEmpty ? defaults.postProcessPrompt : migrated
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(preProcessPrompt, forKey: .preProcessPrompt)
+        try c.encode(postProcessPrompt, forKey: .postProcessPrompt)
+    }
+
+    func preProcessPrompt(worktreeHint: String?) -> String {
+        var prompt = preProcessPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return "" }
+        if let worktreeHint, !worktreeHint.isEmpty {
+            if prompt.contains("{{worktree_hint}}") {
+                prompt = prompt.replacingOccurrences(of: "{{worktree_hint}}", with: worktreeHint)
+            } else {
+                prompt += "\nSuggested worktree: \(worktreeHint)."
+            }
+        } else {
+            prompt = prompt.replacingOccurrences(
+                of: " at {{worktree_hint}}",
+                with: ""
+            )
+            prompt = prompt.replacingOccurrences(
+                of: "{{worktree_hint}}",
+                with: "a task-scoped worktree"
+            )
+        }
+        return prompt
+    }
+
+    var resolvedPostProcessPrompt: String? {
+        let trimmed = postProcessPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalized(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+}
+
 enum ProjectWorkflowRunStatus: String, Hashable, Codable {
     case planned
     case running
@@ -789,6 +879,7 @@ enum ProjectWorkflowArtifactKind: String, Hashable, Codable {
     case transcript
     case screenshot
     case git
+    case skill
     case note
     case cleanup
 }
@@ -895,6 +986,7 @@ struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
 struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var projectId: UUID
     var defaultWorkerProfileId: UUID?
+    var workflowTemplate: ProjectWorkflowTemplate
     var inbox: [ProjectSchedulerInboxItem]
     var tasks: [ProjectSchedulerTask]
     var humanActions: [ProjectSchedulerHumanAction]
@@ -904,12 +996,13 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var id: UUID { projectId }
 
     private enum CodingKeys: String, CodingKey {
-        case projectId, defaultWorkerProfileId, inbox, tasks,
+        case projectId, defaultWorkerProfileId, workflowTemplate, inbox, tasks,
              humanActions, workflowRuns, updatedAt
     }
 
     init(projectId: UUID,
          defaultWorkerProfileId: UUID? = nil,
+         workflowTemplate: ProjectWorkflowTemplate = .default,
          inbox: [ProjectSchedulerInboxItem] = [],
          tasks: [ProjectSchedulerTask] = [],
          humanActions: [ProjectSchedulerHumanAction] = [],
@@ -917,6 +1010,7 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
          updatedAt: Date = Date()) {
         self.projectId = projectId
         self.defaultWorkerProfileId = defaultWorkerProfileId
+        self.workflowTemplate = workflowTemplate
         self.inbox = inbox
         self.tasks = tasks
         self.humanActions = humanActions
@@ -928,6 +1022,7 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.projectId = try c.decode(UUID.self, forKey: .projectId)
         self.defaultWorkerProfileId = try c.decodeIfPresent(UUID.self, forKey: .defaultWorkerProfileId)
+        self.workflowTemplate = try c.decodeIfPresent(ProjectWorkflowTemplate.self, forKey: .workflowTemplate) ?? .default
         self.inbox = try c.decodeIfPresent([ProjectSchedulerInboxItem].self, forKey: .inbox) ?? []
         self.tasks = try c.decodeIfPresent([ProjectSchedulerTask].self, forKey: .tasks) ?? []
         self.humanActions = try c.decodeIfPresent([ProjectSchedulerHumanAction].self, forKey: .humanActions) ?? []
@@ -939,6 +1034,7 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(projectId, forKey: .projectId)
         try c.encodeIfPresent(defaultWorkerProfileId, forKey: .defaultWorkerProfileId)
+        try c.encode(workflowTemplate, forKey: .workflowTemplate)
         try c.encode(inbox, forKey: .inbox)
         try c.encode(tasks, forKey: .tasks)
         try c.encode(humanActions, forKey: .humanActions)

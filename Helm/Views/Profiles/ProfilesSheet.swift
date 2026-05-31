@@ -22,6 +22,7 @@ struct ProfilesSheet: View {
         case appearance
         case keyboardShortcuts
         case computerUse
+        case workflows
         case archivedConversations
         case sshProject(UUID)
         case provider(UUID)
@@ -45,6 +46,8 @@ struct ProfilesSheet: View {
                     )
                 case .computerUse:
                     ComputerUseSettingsView(modeRawValue: $computerUseModeRawValue)
+                case .workflows:
+                    WorkflowRuntimeSettingsView()
                 case .archivedConversations:
                     ArchivedConversationsSettingsView()
                 case .sshProject(let id):
@@ -118,6 +121,12 @@ struct ProfilesSheet: View {
                         symbolName: "cursorarrow.motionlines",
                         title: "Computer Use",
                         subtitle: (CodexComputerUseMode(rawValue: computerUseModeRawValue) ?? .automatic).displayName
+                    )
+                    settingsRow(
+                        selection: .workflows,
+                        symbolName: "point.3.connected.trianglepath.dotted",
+                        title: "Workflows",
+                        subtitle: "Claude Code runtime"
                     )
                     settingsRow(
                         selection: .archivedConversations,
@@ -850,6 +859,198 @@ struct ProfilesSheet: View {
         }
     }
 
+    private struct WorkflowRuntimeSettingsView: View {
+        @State private var diagnostic = ClaudeWorkflowRuntimeDiagnostic(
+            state: .checking,
+            title: "Checking",
+            detail: "Checking the local Claude Code runtime.",
+            command: nil,
+            installedVersion: nil,
+            requiredVersion: ClaudeWorkflowRuntime.minimumDynamicWorkflowVersion.displayName,
+            upgradeCommand: nil
+        )
+        @State private var isChecking = false
+        @State private var isUpgrading = false
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                section("Claude Code") {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: statusIcon)
+                            .foregroundStyle(statusColor)
+                            .frame(width: 14)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(diagnostic.title)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(diagnostic.detail)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if let command = diagnostic.command {
+                        infoRow("Command", command)
+                    }
+                    if let installedVersion = diagnostic.installedVersion {
+                        infoRow("Installed", installedVersion)
+                    }
+                    infoRow("Required", diagnostic.requiredVersion)
+                    if let upgradeCommand = diagnostic.upgradeCommand {
+                        infoRow("Upgrade", upgradeCommand)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button {
+                            refresh()
+                        } label: {
+                            if isChecking {
+                                Label("Checking", systemImage: "arrow.clockwise")
+                            } else {
+                                Label("Check", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(isChecking || isUpgrading)
+
+                        Button {
+                            upgrade()
+                        } label: {
+                            if isUpgrading {
+                                Label("Upgrading", systemImage: "arrow.down.circle")
+                            } else {
+                                Label(upgradeTitle, systemImage: "arrow.down.circle")
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(!diagnostic.canUpgrade || isChecking || isUpgrading)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color.helmChatBg)
+            .onAppear { refresh() }
+        }
+
+        private var header: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Workflows")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Provider-native orchestration")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+
+        private var upgradeTitle: String {
+            diagnostic.state == .ready ? "Update" : "Upgrade"
+        }
+
+        private var statusIcon: String {
+            switch diagnostic.state {
+            case .ready: return "checkmark.circle.fill"
+            case .checking: return "arrow.clockwise.circle"
+            case .upgrading: return "arrow.down.circle"
+            case .needsUpgrade, .unknownVersion, .failed, .missing: return "exclamationmark.triangle.fill"
+            }
+        }
+
+        private var statusColor: Color {
+            switch diagnostic.state {
+            case .ready: return .green
+            case .checking, .upgrading: return .blue
+            case .needsUpgrade, .unknownVersion, .failed, .missing: return .orange
+            }
+        }
+
+        private func refresh() {
+            isChecking = true
+            diagnostic = ClaudeWorkflowRuntimeDiagnostic(
+                state: .checking,
+                title: "Checking",
+                detail: "Checking the local Claude Code runtime.",
+                command: diagnostic.command,
+                installedVersion: diagnostic.installedVersion,
+                requiredVersion: ClaudeWorkflowRuntime.minimumDynamicWorkflowVersion.displayName,
+                upgradeCommand: diagnostic.upgradeCommand
+            )
+            Task {
+                let result = await Task.detached(priority: .userInitiated) {
+                    ClaudeWorkflowRuntime.diagnose()
+                }.value
+                guard !Task.isCancelled else { return }
+                diagnostic = result
+                isChecking = false
+            }
+        }
+
+        private func upgrade() {
+            isUpgrading = true
+            diagnostic = ClaudeWorkflowRuntimeDiagnostic(
+                state: .upgrading,
+                title: "Upgrading",
+                detail: "Running claude update on this Mac.",
+                command: diagnostic.command,
+                installedVersion: diagnostic.installedVersion,
+                requiredVersion: diagnostic.requiredVersion,
+                upgradeCommand: diagnostic.upgradeCommand
+            )
+            Task {
+                let result = await Task.detached(priority: .userInitiated) {
+                    ClaudeWorkflowRuntime.upgrade()
+                }.value
+                guard !Task.isCancelled else { return }
+                diagnostic = result
+                isUpgrading = false
+            }
+        }
+
+        private func infoRow(_ label: String, _ value: String) -> some View {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Text(value)
+                    .font(DS.monoFontSmall)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+
+        private func section<Content: View>(_ title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                content()
+            }
+            .padding(14)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                    .fill(Color.helmCard)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadius, style: .continuous)
+                            .stroke(Color.helmBorder, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
     private struct ArchivedConversationsSettingsView: View {
         @Environment(AppStore.self) private var store
 
@@ -1010,6 +1211,8 @@ struct ProfilesSheet: View {
         @State private var scan: RemoteCodexProviderScan?
         @State private var scanError: String?
         @State private var isScanning = false
+        @State private var isUpgradingRemoteClaude = false
+        @State private var remoteClaudeUpgradeError: String?
 
         private var host: String {
             if case .ssh(let host, _, _) = project.location { return host }
@@ -1213,6 +1416,15 @@ struct ProfilesSheet: View {
                         Spacer()
                     }
                     infoRow("Command", candidate.commandPath)
+                    if let versionText = candidate.versionText {
+                        infoRow("Version", versionText)
+                    }
+                    remoteClaudeWorkflowStatus(candidate)
+                    if let remoteClaudeUpgradeError {
+                        Label(remoteClaudeUpgradeError, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -1236,8 +1448,66 @@ struct ProfilesSheet: View {
                     .controlSize(.small)
                     .disabled(exists)
                 }
+
+                if !candidate.supportsDynamicWorkflows {
+                    Button {
+                        upgradeRemoteClaude(candidate)
+                    } label: {
+                        if isUpgradingRemoteClaude {
+                            Label("Upgrading Claude Code", systemImage: "arrow.down.circle")
+                        } else {
+                            Label("Upgrade Claude Code", systemImage: "arrow.down.circle")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(isUpgradingRemoteClaude || host.isEmpty)
+                }
             }
             .padding(.vertical, 2)
+        }
+
+        private func remoteClaudeWorkflowStatus(_ candidate: RemoteClaudeProviderCandidate) -> some View {
+            let status = remoteClaudeWorkflowStatusText(candidate)
+            return HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: status.icon)
+                    .foregroundStyle(status.color)
+                    .frame(width: 14)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.title)
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Text(status.detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+
+        private func remoteClaudeWorkflowStatusText(_ candidate: RemoteClaudeProviderCandidate)
+        -> (icon: String, color: Color, title: String, detail: String) {
+            let required = ClaudeWorkflowRuntime.minimumDynamicWorkflowVersion.displayName
+            if candidate.supportsDynamicWorkflows {
+                return (
+                    "checkmark.circle.fill",
+                    .green,
+                    "Ready for Dynamic Workflows",
+                    "This host meets Helm's minimum Claude Code requirement."
+                )
+            }
+            guard let version = candidate.installedVersion else {
+                return (
+                    "exclamationmark.triangle.fill",
+                    .orange,
+                    "Version unknown",
+                    "Native workflows require Claude Code \(required) or newer."
+                )
+            }
+            return (
+                "exclamationmark.triangle.fill",
+                .orange,
+                "Upgrade required",
+                "This host has Claude Code \(version.displayName); native workflows require \(required) or newer."
+            )
         }
 
         private func remoteProviderBlock(_ provider: RemoteCodexProviderCandidate) -> some View {
@@ -1364,6 +1634,7 @@ struct ProfilesSheet: View {
             guard !host.isEmpty else { return }
             isScanning = true
             scanError = nil
+            remoteClaudeUpgradeError = nil
             Task {
                 do {
                     let result = try await RemoteCodexProviderDiscovery.scan(host: host)
@@ -1375,6 +1646,27 @@ struct ProfilesSheet: View {
                     scanError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 }
                 isScanning = false
+            }
+        }
+
+        private func upgradeRemoteClaude(_ candidate: RemoteClaudeProviderCandidate) {
+            guard !host.isEmpty else { return }
+            isUpgradingRemoteClaude = true
+            remoteClaudeUpgradeError = nil
+            Task {
+                do {
+                    _ = try await RemoteCodexProviderDiscovery.upgradeRemoteClaude(
+                        host: host,
+                        commandPath: candidate.commandPath
+                    )
+                    guard !Task.isCancelled else { return }
+                    isUpgradingRemoteClaude = false
+                    refresh(force: true)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    remoteClaudeUpgradeError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    isUpgradingRemoteClaude = false
+                }
             }
         }
 

@@ -248,6 +248,7 @@ private struct ProjectSchedulerView: View {
     @State private var composerFocusRequest = 0
     @State private var looseSessionsExpanded = false
     @State private var completedExpanded = false
+    @State private var showWorkflowSettings = false
 
     private let phaseColumns: [ProjectSchedulerTaskPhase] = [.running, .waiting]
 
@@ -280,6 +281,9 @@ private struct ProjectSchedulerView: View {
         .onChange(of: project.id) { _, _ in
             ideaText = ""
             composerFocusRequest &+= 1
+        }
+        .sheet(isPresented: $showWorkflowSettings) {
+            ProjectWorkflowSettingsSheet(project: project)
         }
     }
 
@@ -329,6 +333,14 @@ private struct ProjectSchedulerView: View {
             }
 
             Spacer(minLength: 0)
+
+            Button {
+                showWorkflowSettings = true
+            } label: {
+                Label("Workflow", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+            .controlSize(.small)
+            .help("Configure Project Inbox workflow")
 
             metric("\(tasks.filter { effectivePhase($0) == .running }.count)", "Running")
             metric("\(activeTasks.filter { effectivePhase($0) == .waiting }.count)", "Waiting")
@@ -579,6 +591,108 @@ private struct ProjectSchedulerView: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+private struct ProjectWorkflowSettingsSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    let project: Project
+
+    @State private var template = ProjectWorkflowTemplate.default
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    field("Template", text: $template.name)
+                    promptEditor("Pre-process", text: $template.preProcessPrompt, height: 150)
+                    promptEditor("Post-process", text: $template.postProcessPrompt, height: 230)
+                }
+                .padding(18)
+            }
+            Divider()
+            HStack(spacing: 8) {
+                Button("Reset") {
+                    template = .default
+                }
+                .help("Reset to Helm app workflow preset")
+                .controlSize(.small)
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .controlSize(.small)
+                Button("Save") {
+                    store.updateWorkflowTemplate(template, projectId: project.id)
+                    dismiss()
+                }
+                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(14)
+        }
+        .frame(width: 680, height: 640)
+        .background(Color.helmChatBg)
+        .onAppear {
+            template = store.workflowTemplate(for: project.id)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Workflow")
+                    .font(.system(size: 16, weight: .semibold))
+                Text(project.name)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(16)
+    }
+
+    private func field(_ label: String,
+                       text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label.uppercased())
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+        }
+    }
+
+    private func promptEditor(_ label: String,
+                              text: Binding<String>,
+                              height: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label.uppercased())
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+            TextEditor(text: text)
+                .font(DS.monoFontSmall)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: height)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                        .fill(Color.helmCard)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
+                                .stroke(Color.helmBorder, lineWidth: 1)
+                        )
+                )
+        }
     }
 }
 
