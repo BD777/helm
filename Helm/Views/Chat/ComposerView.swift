@@ -17,7 +17,6 @@ struct ComposerView: View {
     @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
-    @State private var footerWidth: CGFloat = 0
     @State private var composerInteractionResetRequest = 0
     @State private var activeBuiltinAction: BuiltinAction.Kind?
     @State private var goalActionActive = false
@@ -28,7 +27,6 @@ struct ComposerView: View {
                 inner
             }
             .frame(maxWidth: DS.messageMaxWidth)
-            .background(ComposerWidthReader(width: $footerWidth))
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -86,7 +84,7 @@ struct ComposerView: View {
             resetRequest: composerInteractionResetRequest,
             sendShortcut: messageSendShortcut,
             lineBreakShortcut: messageLineBreakShortcut,
-            menuWidthSource: footerWidth,
+            menuWidthSource: DS.messageMaxWidth,
             textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,
             skillProject: selectedProject,
@@ -255,8 +253,7 @@ struct ComposerView: View {
     // MARK: - Built-in actions
 
     private var builtinActionPanelWidth: CGFloat {
-        guard footerWidth > 0 else { return 620 }
-        return min(680, max(320, footerWidth))
+        620
     }
 
     private func builtinActionPanelHeight(for kind: BuiltinAction.Kind) -> CGFloat {
@@ -382,18 +379,15 @@ struct ComposerView: View {
         let modelLabel = model?.label ?? "no model"
         let configLocked = session.map { store.isSessionStreaming($0.id) } ?? false
 
-        return Group {
-            if footerWidth >= 600 {
-                wideFooter(session: session,
-                           profile: profile,
-                           modelLabel: modelLabel,
-                           configLocked: configLocked)
-            } else {
-                compactFooter(session: session,
-                              profile: profile,
-                              modelLabel: modelLabel,
-                              configLocked: configLocked)
-            }
+        return ViewThatFits(in: .horizontal) {
+            wideFooter(session: session,
+                       profile: profile,
+                       modelLabel: modelLabel,
+                       configLocked: configLocked)
+            compactFooter(session: session,
+                          profile: profile,
+                          modelLabel: modelLabel,
+                          configLocked: configLocked)
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
@@ -855,6 +849,7 @@ private struct ComposerAttachmentChip: View {
             }
         }
         .frame(width: 56, height: 56)
+        .background(Color.helmChatBg)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
@@ -2788,31 +2783,4 @@ private struct ComposerDraft {
     var attachments: [ImageAttachment]
     var selectedSkills: [ComposerSkill]
     var goalActionActive: Bool
-}
-
-private struct ComposerWidthReader: View {
-    @Binding var width: CGFloat
-
-    var body: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .preference(key: ComposerWidthPreferenceKey.self,
-                            value: proxy.size.width)
-        }
-        .onPreferenceChange(ComposerWidthPreferenceKey.self) { newWidth in
-            DispatchQueue.main.async {
-                let roundedWidth = newWidth.rounded()
-                guard abs(width - roundedWidth) > 0.5 else { return }
-                width = roundedWidth
-            }
-        }
-    }
-}
-
-private struct ComposerWidthPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
 }

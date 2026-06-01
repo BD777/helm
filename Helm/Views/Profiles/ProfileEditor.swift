@@ -315,10 +315,8 @@ struct PasteShellSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            TextEditor(text: $text)
-                .font(DS.monoFontSmall)
+            HelmPlainTextEditor(text: $text)
                 .frame(minHeight: 220)
-                .padding(6)
                 .background(
                     RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
                         .fill(Color.helmCard)

@@ -677,6 +677,7 @@ struct ProjectSchedulerTask: Identifiable, Hashable, Codable {
     var displayParts: [Part]? = nil
     var attachments: [ImageAttachment]? = nil
     var sessionId: UUID?
+    var workflowTemplateId: UUID? = nil
     var phase: ProjectSchedulerTaskPhase
     var summary: String
     var dependencies: [UUID]
@@ -698,31 +699,38 @@ struct ProjectSchedulerHumanAction: Identifiable, Hashable, Codable {
     var isResolved: Bool { resolvedAt != nil }
 }
 
-struct ProjectWorkflowTemplate: Hashable, Codable {
+struct ProjectWorkflowTemplate: Identifiable, Hashable, Codable {
+    var id: UUID
     var name: String
     var preProcessPrompt: String
     var postProcessPrompt: String
 
+    static let defaultID = UUID(uuidString: "8F4CF9E6-237B-4B6E-9D6C-E7EC2BB39C36")!
+
     static let `default` = ProjectWorkflowTemplate(
-        name: "Helm app workflow",
-        preProcessPrompt: "Fetch origin/main and create or reuse a task-scoped worktree at {{worktree_hint}}. Work only inside that worktree unless you explain why that is impossible.",
+        id: defaultID,
+        name: "Sample workflow",
+        preProcessPrompt: "Example: prepare a task-scoped workspace at {{worktree_hint}}, inspect the current state, and report any conflict before editing.",
         postProcessPrompt: """
-        Run project-appropriate build and validation. If this is the Helm macOS app, build a Debug app, launch only that app, record its PID and app/package path, and use Computer Use to validate the changed behavior.
+        Example:
+        Run the checks that fit this project, validate the changed behavior, and record concrete evidence.
 
-        Clean up only artifacts this workflow created: terminate recorded PIDs after verifying their command path, and remove only recorded debug packages or temporary bundles.
+        Clean up only artifacts created by this workflow.
 
-        If validation passed and project policy allows direct merge, merge the task branch or worktree result back to origin/main, resolve conflicts, rerun required validation, commit, and push. If policy is unclear or conflicts cannot be resolved safely, stop and report the gate.
+        If the project policy allows merging, merge the task branch or worktree result after validation. If the policy is unclear or conflicts cannot be resolved safely, stop and report the gate.
         """
     )
 
     private enum CodingKeys: String, CodingKey {
-        case name, preProcessPrompt, postProcessPrompt,
+        case id, name, preProcessPrompt, postProcessPrompt,
              validatePrompt, cleanupPrompt, mergePrompt, mergeEnabled
     }
 
-    init(name: String,
+    init(id: UUID = UUID(),
+         name: String,
          preProcessPrompt: String,
          postProcessPrompt: String) {
+        self.id = id
         self.name = name
         self.preProcessPrompt = preProcessPrompt
         self.postProcessPrompt = postProcessPrompt
@@ -731,6 +739,7 @@ struct ProjectWorkflowTemplate: Hashable, Codable {
     init(from decoder: Decoder) throws {
         let defaults = Self.default
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? defaults.name
         self.preProcessPrompt = try c.decodeIfPresent(String.self, forKey: .preProcessPrompt) ?? defaults.preProcessPrompt
         if let postProcessPrompt = try c.decodeIfPresent(String.self, forKey: .postProcessPrompt) {
@@ -746,10 +755,14 @@ struct ProjectWorkflowTemplate: Hashable, Codable {
                 .joined(separator: "\n\n")
             self.postProcessPrompt = migrated.isEmpty ? defaults.postProcessPrompt : migrated
         }
+        if isLegacyHelmDefault {
+            self = Self.default
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(preProcessPrompt, forKey: .preProcessPrompt)
         try c.encode(postProcessPrompt, forKey: .postProcessPrompt)
@@ -786,6 +799,22 @@ struct ProjectWorkflowTemplate: Hashable, Codable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? fallback : trimmed
     }
+
+    private var isLegacyHelmDefault: Bool {
+        name == "Helm app workflow" &&
+        preProcessPrompt == Self.legacyHelmPreProcessPrompt &&
+        postProcessPrompt == Self.legacyHelmPostProcessPrompt
+    }
+
+    private static let legacyHelmPreProcessPrompt = "Fetch origin/main and create or reuse a task-scoped worktree at {{worktree_hint}}. Work only inside that worktree unless you explain why that is impossible."
+
+    private static let legacyHelmPostProcessPrompt = """
+        Run project-appropriate build and validation. If this is the Helm macOS app, build a Debug app, launch only that app, record its PID and app/package path, and use Computer Use to validate the changed behavior.
+
+        Clean up only artifacts this workflow created: terminate recorded PIDs after verifying their command path, and remove only recorded debug packages or temporary bundles.
+
+        If validation passed and project policy allows direct merge, merge the task branch or worktree result back to origin/main, resolve conflicts, rerun required validation, commit, and push. If policy is unclear or conflicts cannot be resolved safely, stop and report the gate.
+        """
 }
 
 enum ProjectWorkflowRunStatus: String, Hashable, Codable {
@@ -952,6 +981,7 @@ struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
     let id: UUID
     var taskId: UUID
     var sessionId: UUID
+    var templateId: UUID?
     var title: String
     var templateName: String
     var status: ProjectWorkflowRunStatus
@@ -963,6 +993,7 @@ struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
     init(id: UUID = UUID(),
          taskId: UUID,
          sessionId: UUID,
+         templateId: UUID? = nil,
          title: String,
          templateName: String,
          status: ProjectWorkflowRunStatus = .planned,
@@ -973,6 +1004,7 @@ struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
         self.id = id
         self.taskId = taskId
         self.sessionId = sessionId
+        self.templateId = templateId
         self.title = title
         self.templateName = templateName
         self.status = status
@@ -986,7 +1018,8 @@ struct ProjectWorkflowRun: Identifiable, Hashable, Codable {
 struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var projectId: UUID
     var defaultWorkerProfileId: UUID?
-    var workflowTemplate: ProjectWorkflowTemplate
+    var workflowTemplates: [ProjectWorkflowTemplate]
+    var selectedWorkflowTemplateId: UUID?
     var inbox: [ProjectSchedulerInboxItem]
     var tasks: [ProjectSchedulerTask]
     var humanActions: [ProjectSchedulerHumanAction]
@@ -996,21 +1029,26 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     var id: UUID { projectId }
 
     private enum CodingKeys: String, CodingKey {
-        case projectId, defaultWorkerProfileId, workflowTemplate, inbox, tasks,
-             humanActions, workflowRuns, updatedAt
+        case projectId, defaultWorkerProfileId, workflowTemplates, selectedWorkflowTemplateId,
+             workflowTemplate, inbox, tasks, humanActions, workflowRuns, updatedAt
     }
 
     init(projectId: UUID,
          defaultWorkerProfileId: UUID? = nil,
-         workflowTemplate: ProjectWorkflowTemplate = .default,
+         workflowTemplates: [ProjectWorkflowTemplate] = [.default],
+         selectedWorkflowTemplateId: UUID? = ProjectWorkflowTemplate.defaultID,
          inbox: [ProjectSchedulerInboxItem] = [],
          tasks: [ProjectSchedulerTask] = [],
          humanActions: [ProjectSchedulerHumanAction] = [],
          workflowRuns: [ProjectWorkflowRun] = [],
-         updatedAt: Date = Date()) {
+        updatedAt: Date = Date()) {
         self.projectId = projectId
         self.defaultWorkerProfileId = defaultWorkerProfileId
-        self.workflowTemplate = workflowTemplate
+        self.workflowTemplates = Self.normalizedWorkflowTemplates(workflowTemplates)
+        self.selectedWorkflowTemplateId = Self.normalizedSelectedWorkflowTemplateId(
+            selectedWorkflowTemplateId,
+            templates: self.workflowTemplates
+        )
         self.inbox = inbox
         self.tasks = tasks
         self.humanActions = humanActions
@@ -1022,7 +1060,20 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.projectId = try c.decode(UUID.self, forKey: .projectId)
         self.defaultWorkerProfileId = try c.decodeIfPresent(UUID.self, forKey: .defaultWorkerProfileId)
-        self.workflowTemplate = try c.decodeIfPresent(ProjectWorkflowTemplate.self, forKey: .workflowTemplate) ?? .default
+        let decodedTemplates = try c.decodeIfPresent([ProjectWorkflowTemplate].self, forKey: .workflowTemplates)
+        let legacyTemplate = try c.decodeIfPresent(ProjectWorkflowTemplate.self, forKey: .workflowTemplate)
+        self.workflowTemplates = Self.normalizedWorkflowTemplates(decodedTemplates ?? [legacyTemplate ?? .default])
+        if c.contains(.selectedWorkflowTemplateId) {
+            self.selectedWorkflowTemplateId = Self.normalizedSelectedWorkflowTemplateId(
+                try c.decodeIfPresent(UUID.self, forKey: .selectedWorkflowTemplateId),
+                templates: self.workflowTemplates
+            )
+        } else {
+            self.selectedWorkflowTemplateId = Self.normalizedSelectedWorkflowTemplateId(
+                legacyTemplate?.id ?? self.workflowTemplates.first?.id,
+                templates: self.workflowTemplates
+            )
+        }
         self.inbox = try c.decodeIfPresent([ProjectSchedulerInboxItem].self, forKey: .inbox) ?? []
         self.tasks = try c.decodeIfPresent([ProjectSchedulerTask].self, forKey: .tasks) ?? []
         self.humanActions = try c.decodeIfPresent([ProjectSchedulerHumanAction].self, forKey: .humanActions) ?? []
@@ -1034,12 +1085,41 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(projectId, forKey: .projectId)
         try c.encodeIfPresent(defaultWorkerProfileId, forKey: .defaultWorkerProfileId)
-        try c.encode(workflowTemplate, forKey: .workflowTemplate)
+        try c.encode(workflowTemplates, forKey: .workflowTemplates)
+        if let selectedWorkflowTemplateId {
+            try c.encode(selectedWorkflowTemplateId, forKey: .selectedWorkflowTemplateId)
+        } else {
+            try c.encodeNil(forKey: .selectedWorkflowTemplateId)
+        }
         try c.encode(inbox, forKey: .inbox)
         try c.encode(tasks, forKey: .tasks)
         try c.encode(humanActions, forKey: .humanActions)
         try c.encode(workflowRuns, forKey: .workflowRuns)
         try c.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    private static func normalizedWorkflowTemplates(_ templates: [ProjectWorkflowTemplate]) -> [ProjectWorkflowTemplate] {
+        var seen: Set<UUID> = []
+        let normalized = templates.map { template in
+            var copy = template
+            if seen.contains(copy.id) {
+                copy.id = UUID()
+            }
+            seen.insert(copy.id)
+            if copy.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                copy.name = "Untitled workflow"
+            }
+            return copy
+        }
+        return normalized.isEmpty ? [.default] : normalized
+    }
+
+    private static func normalizedSelectedWorkflowTemplateId(_ id: UUID?,
+                                                             templates: [ProjectWorkflowTemplate]) -> UUID? {
+        guard let id,
+              templates.contains(where: { $0.id == id })
+        else { return nil }
+        return id
     }
 }
 

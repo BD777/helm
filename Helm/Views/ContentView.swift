@@ -334,13 +334,16 @@ private struct ProjectSchedulerView: View {
 
             Spacer(minLength: 0)
 
+            workflowSelectionMenu
+
             Button {
                 showWorkflowSettings = true
             } label: {
-                Label("Workflow", systemImage: "point.3.connected.trianglepath.dotted")
+                Image(systemName: "slider.horizontal.3")
+                    .frame(width: 22, height: 22)
             }
-            .controlSize(.small)
-            .help("Configure Project Inbox workflow")
+            .buttonStyle(.plain)
+            .help("Manage Project Inbox workflows")
 
             metric("\(tasks.filter { effectivePhase($0) == .running }.count)", "Running")
             metric("\(activeTasks.filter { effectivePhase($0) == .waiting }.count)", "Waiting")
@@ -383,9 +386,7 @@ private struct ProjectSchedulerView: View {
                         ProjectSchedulerPhaseColumn(
                             phase: phase,
                             tasks: activeTasks.filter { effectivePhase($0) == phase },
-                            workflow: { task in
-                                store.workflowRun(forTask: task.id, projectId: project.id)
-                            },
+                            workflow: workflowSnapshot,
                             canStart: { task in
                                 canStartTasks && store.canStartSchedulerTask(task.id, projectId: project.id)
                             },
@@ -566,6 +567,7 @@ private struct ProjectSchedulerView: View {
                                       attachments: attachments,
                                       projectId: project.id,
                                       workerProfileId: workerProfileId,
+                                      workflowTemplateId: store.selectedWorkflowTemplateId(for: project.id),
                                       runConfiguration: runConfiguration) != nil else {
             store.showProfilesSheet = true
             return false
@@ -587,6 +589,61 @@ private struct ProjectSchedulerView: View {
         }
     }
 
+    private var workflowSelectionMenu: some View {
+        Menu {
+            Button {
+                store.setSelectedWorkflowTemplate(nil, projectId: project.id)
+            } label: {
+                workflowSelectionLabel("No workflow",
+                                       selected: store.selectedWorkflowTemplateId(for: project.id) == nil)
+            }
+
+            let templates = store.workflowTemplates(for: project.id)
+            if !templates.isEmpty {
+                Divider()
+                ForEach(templates) { template in
+                    Button {
+                        store.setSelectedWorkflowTemplate(template.id, projectId: project.id)
+                    } label: {
+                        workflowSelectionLabel(template.name,
+                                               selected: store.selectedWorkflowTemplateId(for: project.id) == template.id)
+                    }
+                }
+            }
+
+            Divider()
+            Button {
+                showWorkflowSettings = true
+            } label: {
+                Label("Manage workflows...", systemImage: "slider.horizontal.3")
+            }
+        } label: {
+            Label(workflowSelectionTitle, systemImage: "point.3.connected.trianglepath.dotted")
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose the workflow for new Project Inbox tasks")
+    }
+
+    private var workflowSelectionTitle: String {
+        store.selectedWorkflowTemplate(for: project.id)?.name ?? "No workflow"
+    }
+
+    @ViewBuilder
+    private func workflowSelectionLabel(_ title: String, selected: Bool) -> some View {
+        if selected {
+            Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
+        }
+    }
+
+    private func workflowSnapshot(for task: ProjectSchedulerTask) -> ProjectWorkflowStatusSnapshot? {
+        guard let run = store.workflowRun(forTask: task.id, projectId: project.id) else { return nil }
+        return ProjectWorkflowStatusSnapshot(run: run)
+    }
+
     fileprivate static func relative(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
@@ -600,45 +657,28 @@ private struct ProjectWorkflowSettingsSheet: View {
 
     let project: Project
 
-    @State private var template = ProjectWorkflowTemplate.default
+    @State private var templates: [ProjectWorkflowTemplate] = [.default]
+    @State private var selectedTemplateId: UUID?
+    @State private var editingTemplateId: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    field("Template", text: $template.name)
-                    promptEditor("Pre-process", text: $template.preProcessPrompt, height: 150)
-                    promptEditor("Post-process", text: $template.postProcessPrompt, height: 230)
-                }
-                .padding(18)
+            HStack(spacing: 0) {
+                workflowList
+                Divider()
+                editorPane
             }
             Divider()
-            HStack(spacing: 8) {
-                Button("Reset") {
-                    template = .default
-                }
-                .help("Reset to Helm app workflow preset")
-                .controlSize(.small)
-                Spacer()
-                Button("Cancel") {
-                    dismiss()
-                }
-                .controlSize(.small)
-                Button("Save") {
-                    store.updateWorkflowTemplate(template, projectId: project.id)
-                    dismiss()
-                }
-                .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding(14)
+            footer
         }
-        .frame(width: 680, height: 640)
+        .frame(width: 780, height: 640)
         .background(Color.helmChatBg)
         .onAppear {
-            template = store.workflowTemplate(for: project.id)
+            templates = store.workflowTemplates(for: project.id)
+            selectedTemplateId = store.selectedWorkflowTemplateId(for: project.id)
+            editingTemplateId = selectedTemplateId
         }
     }
 
@@ -649,7 +689,7 @@ private struct ProjectWorkflowSettingsSheet: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Workflow")
+                Text("Workflows")
                     .font(.system(size: 16, weight: .semibold))
                 Text(project.name)
                     .font(.system(size: 11))
@@ -658,6 +698,156 @@ private struct ProjectWorkflowSettingsSheet: View {
             Spacer()
         }
         .padding(16)
+    }
+
+    private var workflowList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            workflowRow(title: "No workflow",
+                        subtitle: "Send the task directly",
+                        isSelected: selectedTemplateId == nil,
+                        isEditing: editingTemplateId == nil) {
+                selectedTemplateId = nil
+                editingTemplateId = nil
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            ForEach(templates) { template in
+                workflowRow(title: template.name,
+                            subtitle: "Template",
+                            isSelected: selectedTemplateId == template.id,
+                            isEditing: editingTemplateId == template.id) {
+                    selectedTemplateId = template.id
+                    editingTemplateId = template.id
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                Button {
+                    addTemplate()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .help("Add workflow")
+
+                Button {
+                    duplicateTemplate()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .disabled(editingTemplateId == nil)
+                .help("Duplicate workflow")
+
+                Button {
+                    deleteTemplate()
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .disabled(editingTemplateId == nil || templates.count <= 1)
+                .help("Delete workflow")
+            }
+        }
+        .padding(12)
+        .frame(width: 230)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.helmSidebarBg)
+    }
+
+    private func workflowRow(title: String,
+                             subtitle: String,
+                             isSelected: Bool,
+                             isEditing: Bool,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.65))
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title.isEmpty ? "Untitled workflow" : title)
+                        .font(.system(size: 12.5, weight: isEditing ? .semibold : .regular))
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(isEditing ? Color.helmSelected : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var editorPane: some View {
+        if let editingTemplateId,
+           templates.contains(where: { $0.id == editingTemplateId }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    field("Template", text: templateBinding(for: editingTemplateId).name)
+                    promptEditor("Pre-process",
+                                 text: templateBinding(for: editingTemplateId).preProcessPrompt,
+                                 height: 150)
+                    promptEditor("Post-process",
+                                 text: templateBinding(for: editingTemplateId).postProcessPrompt,
+                                 height: 230)
+                }
+                .padding(18)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("No workflow")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("New Project Inbox tasks will be sent as normal worker sessions without workflow nodes or workflow skill invocation.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button("Reset") {
+                templates = [.default]
+                selectedTemplateId = ProjectWorkflowTemplate.defaultID
+                editingTemplateId = ProjectWorkflowTemplate.defaultID
+            }
+            .help("Reset to the sample workflow")
+            .controlSize(.small)
+            Spacer()
+            Button("Cancel") {
+                dismiss()
+            }
+            .controlSize(.small)
+            Button("Save") {
+                store.updateWorkflowTemplates(templates,
+                                              selectedTemplateId: selectedTemplateId,
+                                              projectId: project.id)
+                dismiss()
+            }
+            .controlSize(.small)
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(14)
     }
 
     private func field(_ label: String,
@@ -679,11 +869,8 @@ private struct ProjectWorkflowSettingsSheet: View {
             Text(label.uppercased())
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(.tertiary)
-            TextEditor(text: text)
-                .font(DS.monoFontSmall)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .frame(minHeight: height)
+            HelmPlainTextEditor(text: text)
+                .frame(height: height)
                 .background(
                     RoundedRectangle(cornerRadius: DS.cornerRadiusSmall, style: .continuous)
                         .fill(Color.helmCard)
@@ -694,12 +881,56 @@ private struct ProjectWorkflowSettingsSheet: View {
                 )
         }
     }
+
+    private func templateBinding(for id: UUID) -> Binding<ProjectWorkflowTemplate> {
+        Binding(
+            get: {
+                templates.first { $0.id == id } ?? ProjectWorkflowTemplate.default
+            },
+            set: { updated in
+                guard let index = templates.firstIndex(where: { $0.id == id }) else { return }
+                templates[index] = updated
+            }
+        )
+    }
+
+    private func addTemplate() {
+        let template = ProjectWorkflowTemplate(
+            name: "New workflow",
+            preProcessPrompt: "",
+            postProcessPrompt: ""
+        )
+        templates.append(template)
+        selectedTemplateId = template.id
+        editingTemplateId = template.id
+    }
+
+    private func duplicateTemplate() {
+        guard let id = editingTemplateId,
+              let template = templates.first(where: { $0.id == id }) else { return }
+        var copy = template
+        copy.id = UUID()
+        copy.name = "\(template.name) Copy"
+        templates.append(copy)
+        selectedTemplateId = copy.id
+        editingTemplateId = copy.id
+    }
+
+    private func deleteTemplate() {
+        guard let id = editingTemplateId,
+              templates.count > 1 else { return }
+        templates.removeAll { $0.id == id }
+        if selectedTemplateId == id {
+            selectedTemplateId = nil
+        }
+        editingTemplateId = selectedTemplateId ?? templates.first?.id
+    }
 }
 
 private struct ProjectSchedulerPhaseColumn: View {
     let phase: ProjectSchedulerTaskPhase
     let tasks: [ProjectSchedulerTask]
-    var workflow: (ProjectSchedulerTask) -> ProjectWorkflowRun?
+    var workflow: (ProjectSchedulerTask) -> ProjectWorkflowStatusSnapshot?
     var canStart: (ProjectSchedulerTask) -> Bool
     var onStart: (ProjectSchedulerTask) -> Void
     var onOpen: (ProjectSchedulerTask) -> Void
@@ -760,10 +991,24 @@ private struct ProjectSchedulerPhaseColumn: View {
     }
 }
 
+private struct ProjectWorkflowStatusSnapshot: Identifiable, Equatable {
+    let id: UUID
+    let templateName: String
+    let status: ProjectWorkflowRunStatus
+    let nodes: [ProjectWorkflowNodeRun]
+
+    init(run: ProjectWorkflowRun) {
+        self.id = run.id
+        self.templateName = run.templateName
+        self.status = run.status
+        self.nodes = run.nodes
+    }
+}
+
 private struct ProjectSchedulerTaskCard: View {
     let task: ProjectSchedulerTask
     let displayPhase: ProjectSchedulerTaskPhase
-    let workflow: ProjectWorkflowRun?
+    let workflow: ProjectWorkflowStatusSnapshot?
     let canStart: Bool
     var onStart: () -> Void
     var onOpen: () -> Void
@@ -862,7 +1107,7 @@ private struct ProjectSchedulerTaskCard: View {
 }
 
 private struct ProjectWorkflowStatusStrip: View {
-    let workflow: ProjectWorkflowRun
+    let workflow: ProjectWorkflowStatusSnapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -930,7 +1175,7 @@ private struct ProjectWorkflowNodePill: View {
         .foregroundStyle(.secondary)
         .frame(width: 22, height: 18)
         .background(Color.helmHover.opacity(0.75), in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
-        .help("\(node.title) - \(node.status.displayName)\n\(node.prompt)")
+        .help(helpText)
     }
 
     private var statusColor: Color {
@@ -942,6 +1187,14 @@ private struct ProjectWorkflowNodePill: View {
         case .failed: return .red
         case .skipped: return .secondary
         }
+    }
+
+    private var helpText: String {
+        let maxPromptLength = 480
+        let prompt = node.prompt.count > maxPromptLength
+            ? String(node.prompt.prefix(maxPromptLength)) + "..."
+            : node.prompt
+        return "\(node.title) - \(node.status.displayName)\n\(prompt)"
     }
 }
 
@@ -961,7 +1214,6 @@ private struct ProjectSchedulerComposer: View {
     @State private var pickerOpen = false
     @State private var workerProfileId: UUID?
     @State private var runConfiguration = SessionRunConfiguration()
-    @State private var footerWidth: CGFloat = 0
     @State private var localFocusRequest = 0
     @State private var composerInteractionResetRequest = 0
     @State private var pasteMonitor: Any? = nil
@@ -1024,7 +1276,6 @@ private struct ProjectSchedulerComposer: View {
             footer
         }
         .frame(maxWidth: DS.messageMaxWidth)
-        .background(ProjectSchedulerComposerWidthReader(width: $footerWidth))
         .onAppear {
             syncSelectedProfileIfNeeded(resetConfiguration: true)
             installPasteMonitor()
@@ -1058,7 +1309,7 @@ private struct ProjectSchedulerComposer: View {
             resetRequest: composerInteractionResetRequest,
             sendShortcut: messageSendShortcut,
             lineBreakShortcut: messageLineBreakShortcut,
-            menuWidthSource: footerWidth,
+            menuWidthSource: DS.messageMaxWidth,
             textTopPadding: attachments.isEmpty ? 8 : 6,
             skillProfile: selectedProfile,
             skillProject: project,
@@ -1077,12 +1328,9 @@ private struct ProjectSchedulerComposer: View {
     }
 
     private var footer: some View {
-        Group {
-            if footerWidth >= 600 {
-                wideFooter
-            } else {
-                compactFooter
-            }
+        ViewThatFits(in: .horizontal) {
+            wideFooter
+            compactFooter
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
@@ -1754,33 +2002,6 @@ private struct ProjectSchedulerCompletedTaskRow: View {
                         .stroke(Color.helmBorder, lineWidth: 1)
                 )
         )
-    }
-}
-
-private struct ProjectSchedulerComposerWidthReader: View {
-    @Binding var width: CGFloat
-
-    var body: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .preference(key: ProjectSchedulerComposerWidthPreferenceKey.self,
-                            value: proxy.size.width)
-        }
-        .onPreferenceChange(ProjectSchedulerComposerWidthPreferenceKey.self) { newWidth in
-            DispatchQueue.main.async {
-                let roundedWidth = newWidth.rounded()
-                guard abs(width - roundedWidth) > 0.5 else { return }
-                width = roundedWidth
-            }
-        }
-    }
-}
-
-private struct ProjectSchedulerComposerWidthPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

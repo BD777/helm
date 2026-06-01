@@ -167,6 +167,10 @@ final class AppStore {
             existingSessionIds: Set(cleanSessions.map(\.id)),
             updatedAt: Date()
         )
+        let interruptedSchedulerTaskIds = Self.markInterruptedSchedulerRuns(
+            in: &loadedSchedulers,
+            updatedAt: Date()
+        )
         self.projectSchedulers = loadedSchedulers
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
@@ -223,7 +227,8 @@ final class AppStore {
         }
         if cleanSessions.count != stateFile.sessions.count ||
             importedTargetSessions ||
-            !removedSchedulerTaskIds.isEmpty {
+            !removedSchedulerTaskIds.isEmpty ||
+            !interruptedSchedulerTaskIds.isEmpty {
             scheduleStateSave()
         }
         for project in self.projects where project.location.isSSH {
@@ -1173,6 +1178,50 @@ final class AppStore {
         return removedTaskIds
     }
 
+    @discardableResult
+    private static func markInterruptedSchedulerRuns(in schedulers: inout [ProjectSchedulerState],
+                                                     updatedAt now: Date) -> Set<UUID> {
+        var interruptedTaskIds: Set<UUID> = []
+
+        for schedulerIndex in schedulers.indices {
+            for taskIndex in schedulers[schedulerIndex].tasks.indices {
+                guard schedulers[schedulerIndex].tasks[taskIndex].phase == .running else { continue }
+                let taskId = schedulers[schedulerIndex].tasks[taskIndex].id
+                schedulers[schedulerIndex].tasks[taskIndex].phase = .waiting
+                schedulers[schedulerIndex].tasks[taskIndex].summary = "Waiting for review: worker session stopped."
+                schedulers[schedulerIndex].tasks[taskIndex].updatedAt = now
+                markWorkflowRunWaiting(taskId: taskId,
+                                       scheduler: &schedulers[schedulerIndex],
+                                       updatedAt: now)
+                schedulers[schedulerIndex].updatedAt = now
+                interruptedTaskIds.insert(taskId)
+            }
+        }
+
+        return interruptedTaskIds
+    }
+
+    private static func markWorkflowRunWaiting(taskId: UUID,
+                                               scheduler: inout ProjectSchedulerState,
+                                               updatedAt now: Date) {
+        guard let runIndex = scheduler.workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
+            return
+        }
+        scheduler.workflowRuns[runIndex].status = .waiting
+        scheduler.workflowRuns[runIndex].updatedAt = now
+        for nodeIndex in scheduler.workflowRuns[runIndex].nodes.indices {
+            switch scheduler.workflowRuns[runIndex].nodes[nodeIndex].status {
+            case .running:
+                scheduler.workflowRuns[runIndex].nodes[nodeIndex].status = .waiting
+                scheduler.workflowRuns[runIndex].nodes[nodeIndex].endedAt = now
+            case .planned:
+                scheduler.workflowRuns[runIndex].nodes[nodeIndex].status = .waiting
+            case .waiting, .passed, .failed, .skipped:
+                break
+            }
+        }
+    }
+
     // MARK: - Project scheduler
 
     func schedulerState(for projectId: UUID) -> ProjectSchedulerState {
@@ -1181,19 +1230,49 @@ final class AppStore {
     }
 
     func workflowTemplate(for projectId: UUID) -> ProjectWorkflowTemplate {
-        schedulerState(for: projectId).workflowTemplate
+        selectedWorkflowTemplate(for: projectId) ?? ProjectWorkflowTemplate.default
     }
 
-    func updateWorkflowTemplate(_ template: ProjectWorkflowTemplate,
-                                projectId: UUID) {
+    func workflowTemplates(for projectId: UUID) -> [ProjectWorkflowTemplate] {
+        schedulerState(for: projectId).workflowTemplates
+    }
+
+    func selectedWorkflowTemplateId(for projectId: UUID) -> UUID? {
+        schedulerState(for: projectId).selectedWorkflowTemplateId
+    }
+
+    func selectedWorkflowTemplate(for projectId: UUID) -> ProjectWorkflowTemplate? {
+        let state = schedulerState(for: projectId)
+        guard let selectedId = state.selectedWorkflowTemplateId else { return nil }
+        return state.workflowTemplates.first { $0.id == selectedId }
+    }
+
+    func updateWorkflowTemplates(_ templates: [ProjectWorkflowTemplate],
+                                 selectedTemplateId: UUID?,
+                                 projectId: UUID) {
         let idx = ensureSchedulerStateIndex(for: projectId)
-        projectSchedulers[idx].workflowTemplate = template
+        let normalized = Self.normalizedWorkflowTemplates(templates)
+        projectSchedulers[idx].workflowTemplates = normalized
+        projectSchedulers[idx].selectedWorkflowTemplateId = normalized.contains { $0.id == selectedTemplateId }
+            ? selectedTemplateId
+            : nil
         projectSchedulers[idx].updatedAt = Date()
         scheduleStateSave()
     }
 
-    func resetWorkflowTemplate(projectId: UUID) {
-        updateWorkflowTemplate(.default, projectId: projectId)
+    func setSelectedWorkflowTemplate(_ templateId: UUID?, projectId: UUID) {
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        projectSchedulers[idx].selectedWorkflowTemplateId = projectSchedulers[idx].workflowTemplates.contains { $0.id == templateId }
+            ? templateId
+            : nil
+        projectSchedulers[idx].updatedAt = Date()
+        scheduleStateSave()
+    }
+
+    func resetWorkflowTemplates(projectId: UUID) {
+        updateWorkflowTemplates([.default],
+                                selectedTemplateId: ProjectWorkflowTemplate.defaultID,
+                                projectId: projectId)
     }
 
     func schedulerTasks(in projectId: UUID) -> [ProjectSchedulerTask] {
@@ -1335,6 +1414,7 @@ final class AppStore {
                            attachments: [ImageAttachment] = [],
                            projectId: UUID,
                            workerProfileId: UUID? = nil,
+                           workflowTemplateId: UUID?,
                            runConfiguration: SessionRunConfiguration? = nil) -> UUID? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty,
@@ -1378,6 +1458,8 @@ final class AppStore {
             status: .accepted,
             taskId: taskId
         )
+        let idx = ensureSchedulerStateIndex(for: projectId)
+        let workflowTemplate = workflowTemplate(withId: workflowTemplateId, schedulerIndex: idx)
         let task = ProjectSchedulerTask(
             id: taskId,
             title: title,
@@ -1385,6 +1467,7 @@ final class AppStore {
             displayParts: displayParts,
             attachments: sessionAttachments.isEmpty ? nil : sessionAttachments,
             sessionId: sessionId,
+            workflowTemplateId: workflowTemplate?.id,
             phase: .planned,
             summary: "Waiting to start.",
             dependencies: [],
@@ -1393,14 +1476,15 @@ final class AppStore {
             createdAt: now,
             updatedAt: now
         )
-        let idx = ensureSchedulerStateIndex(for: projectId)
-        let workflowRun = Self.workflowRun(for: task,
-                                           sessionId: sessionId,
-                                           template: projectSchedulers[idx].workflowTemplate,
-                                           createdAt: now)
         projectSchedulers[idx].inbox.insert(inboxItem, at: 0)
         projectSchedulers[idx].tasks.insert(task, at: 0)
-        projectSchedulers[idx].workflowRuns.insert(workflowRun, at: 0)
+        if let workflowTemplate {
+            let workflowRun = Self.workflowRun(for: task,
+                                               sessionId: sessionId,
+                                               template: workflowTemplate,
+                                               createdAt: now)
+            projectSchedulers[idx].workflowRuns.insert(workflowRun, at: 0)
+        }
         projectSchedulers[idx].defaultWorkerProfileId = workerProfile.id
         projectSchedulers[idx].updatedAt = now
         selectedProjectId = projectId
@@ -1469,30 +1553,44 @@ final class AppStore {
         var workflow = ensureWorkflowRun(forTaskAt: taskIndex,
                                          schedulerIndex: idx,
                                          sessionId: sessionId)
-        markWorkflowRunStarted(workflow.id, schedulerIndex: idx)
-        workflow = projectSchedulers[idx].workflowRuns.first { $0.id == workflow.id } ?? workflow
+        if let workflowId = workflow?.id {
+            markWorkflowRunStarted(workflowId, schedulerIndex: idx)
+            workflow = projectSchedulers[idx].workflowRuns.first { $0.id == workflowId } ?? workflow
+        }
         guard let session = sessions.first(where: { $0.id == sessionId }),
               let workerProfile = profile(session.profileId)
         else { return false }
-        let skillInstall = installProjectWorkflowSkill(project: project,
-                                                       vendor: workerProfile.vendor,
-                                                       taskId: task.id)
         let prompt = task.idea
         let displayParts = task.displayParts ?? (prompt.isEmpty ? [] : [.text(prompt)])
+        let skillInstall = workflow.map {
+            _ in installProjectWorkflowSkill(project: project,
+                                             vendor: workerProfile.vendor,
+                                             taskId: task.id)
+        }
+        let preUserEvents: [SessionEvent]
+        if let workflow {
+            preUserEvents = [
+                .projectWorkflowStarted(id: UUID(),
+                                        workflowId: workflow.id,
+                                        title: workflow.title,
+                                        nodeCount: workflow.nodes.count,
+                                        startedAt: Date())
+            ]
+        } else {
+            preUserEvents = []
+        }
         let didSend = send(prompt,
                            displayParts: displayParts,
                            attachments: task.attachments ?? [],
-                           agentPrompt: Self.workerPrompt(for: task,
-                                                          workflow: workflow,
-                                                          vendor: workerProfile.vendor,
-                                                          skillInstall: skillInstall),
-                           preUserEvents: [
-                            .projectWorkflowStarted(id: UUID(),
-                                                    workflowId: workflow.id,
-                                                    title: workflow.title,
-                                                    nodeCount: workflow.nodes.count,
-                                                    startedAt: Date())
-                           ],
+                           agentPrompt: workflow.flatMap { workflow in
+                               skillInstall.map {
+                                   Self.workerPrompt(for: task,
+                                                     workflow: workflow,
+                                                     vendor: workerProfile.vendor,
+                                                     skillInstall: $0)
+                               }
+                           },
+                           preUserEvents: preUserEvents,
                            sessionId: sessionId)
         if !didSend {
             markWorkflowRunWaiting(taskId: task.id,
@@ -1574,6 +1672,28 @@ final class AppStore {
         }
         projectSchedulers.append(ProjectSchedulerState(projectId: projectId))
         return projectSchedulers.count - 1
+    }
+
+    private static func normalizedWorkflowTemplates(_ templates: [ProjectWorkflowTemplate]) -> [ProjectWorkflowTemplate] {
+        var seen: Set<UUID> = []
+        let normalized = templates.map { template in
+            var copy = template
+            if seen.contains(copy.id) {
+                copy.id = UUID()
+            }
+            seen.insert(copy.id)
+            if copy.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                copy.name = "Untitled workflow"
+            }
+            return copy
+        }
+        return normalized.isEmpty ? [.default] : normalized
+    }
+
+    private func workflowTemplate(withId templateId: UUID?,
+                                  schedulerIndex: Int) -> ProjectWorkflowTemplate? {
+        guard let templateId else { return nil }
+        return projectSchedulers[schedulerIndex].workflowTemplates.first { $0.id == templateId }
     }
 
     private enum ProjectSchedulerWorkspaceLayout: Equatable {
@@ -1751,7 +1871,7 @@ final class AppStore {
 
     private func ensureWorkflowRun(forTaskAt taskIndex: Int,
                                    schedulerIndex: Int,
-                                   sessionId: UUID) -> ProjectWorkflowRun {
+                                   sessionId: UUID) -> ProjectWorkflowRun? {
         let task = projectSchedulers[schedulerIndex].tasks[taskIndex]
         if let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.taskId == task.id }) {
             if projectSchedulers[schedulerIndex].workflowRuns[runIndex].sessionId != sessionId {
@@ -1761,9 +1881,13 @@ final class AppStore {
             return projectSchedulers[schedulerIndex].workflowRuns[runIndex]
         }
 
+        guard let template = workflowTemplate(withId: task.workflowTemplateId,
+                                              schedulerIndex: schedulerIndex) else {
+            return nil
+        }
         let run = Self.workflowRun(for: task,
                                    sessionId: sessionId,
-                                   template: projectSchedulers[schedulerIndex].workflowTemplate,
+                                   template: template,
                                    createdAt: Date())
         projectSchedulers[schedulerIndex].workflowRuns.insert(run, at: 0)
         projectSchedulers[schedulerIndex].updatedAt = Date()
@@ -2120,6 +2244,7 @@ else:
         ProjectWorkflowRun(
             taskId: task.id,
             sessionId: sessionId,
+            templateId: template.id,
             title: "\(task.title) workflow",
             templateName: template.name,
             nodes: workflowNodes(for: task,
@@ -2191,23 +2316,22 @@ else:
         }
         var coordination: [String] = []
         if skillInstall.isInstalled {
-            coordination.append("Helm installed the provider-local workflow skill \(skillInstall.name) at \(skillInstall.pathDescription). Treat the skill as the stable workflow contract and this message as the per-run workflow instance.")
+            coordination.append("Skill: \(skillInstall.name) at \(skillInstall.pathDescription). Use that skill as the workflow contract; the bullets below are only this run's inputs.")
         } else {
             coordination.append("Helm could not install the provider-local workflow skill. Fallback reason: \(skillInstall.pathDescription). Follow the inline workflow contract in this message.")
+            coordination.append("Run this as a single Project Inbox parent session. Use provider-native subagents/workflows for independent nodes when available, and summarize child results back here.")
+            coordination.append("Preserve unrelated changes and stop to report conflicts instead of overwriting another worker's work.")
         }
-        coordination.append("Runtime vendor: \(vendor.displayName). Run this as a single Project Inbox parent session. Do not ask Helm to create extra sidebar sessions or external threads for the workflow.")
-        coordination.append("Use the provider's native subagent or workflow capability for independent nodes when it is available. Keep those child runs scoped inside this session and summarize their results back here. If native child agents are unavailable, run the workflow sequentially in the main agent and say so.")
-        coordination.append("Other Project Inbox workers may be running in this project. Inspect the current workspace state before editing, preserve unrelated changes, and stop to report any conflict instead of overwriting another worker's work.")
+        coordination.append("Runtime vendor: \(vendor.displayName).")
         coordination.append(contentsOf: task.resourceNotes)
         if let worktreeHint = task.worktreeHint {
-            coordination.append("For edits in this Git repository, create or reuse a task-scoped worktree such as \(worktreeHint); do not make broad edits directly in the shared project checkout.")
+            coordination.append("Suggested worktree: \(worktreeHint).")
         }
-        coordination.append("Track workflow artifacts explicitly in your final response: worktree path, debug app/package path, PIDs you started, validation evidence, cleanup actions, git base/head, commit hash, and push result when available.")
-        coordination.append("End with a concise workflow recap: node outcomes, what changed, validation evidence, cleanup status, and whether anything remains blocked or conflicted.")
         if let workflow {
             coordination.append("Workflow id: \(workflow.id.uuidString.lowercased()). Template: \(workflow.templateName).")
             coordination.append("Workflow nodes:\n\(workflow.nodes.map(Self.workflowNodeLine).joined(separator: "\n"))")
         }
+        coordination.append("Recap briefly: node outcomes, changed files, validation evidence, cleanup status, git result, and blockers.")
         if !coordination.isEmpty {
             if !prompt.isEmpty {
                 prompt += "\n\n"

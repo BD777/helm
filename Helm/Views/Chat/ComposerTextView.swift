@@ -37,7 +37,7 @@ struct ComposerTextView: NSViewRepresentable {
         tv.delegate = context.coordinator
         tv.font = Self.font
         tv.isRichText = true
-        tv.allowsUndo = true
+        tv.allowsUndo = false
         tv.drawsBackground = false
         tv.textContainerInset = Self.inset
         tv.typingAttributes = Self.plainTextAttributes
@@ -120,6 +120,16 @@ struct ComposerTextView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        guard let tv = scroll.documentView as? PlaceholderTextView else { return }
+        tv.delegate = nil
+        tv.onKeyDown = { _ in false }
+        tv.onTextCommand = { _ in false }
+        tv.onSlashContextChange = { _ in }
+        tv.onSendShortcut = {}
+        tv.clearUndoRegistrations()
+    }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
@@ -282,6 +292,85 @@ enum ComposerTextCommand {
     case cancel
 }
 
+struct HelmPlainTextEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let tv = UndoIsolatedTextView()
+        tv.delegate = context.coordinator
+        tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.textColor = .labelColor
+        tv.isRichText = false
+        tv.allowsUndo = false
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 8, height: 8)
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        tv.string = text
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        scroll.documentView = tv
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let tv = scroll.documentView as? UndoIsolatedTextView else { return }
+        context.coordinator.parent = self
+        if tv.string != text {
+            tv.clearUndoRegistrations()
+            tv.string = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        guard let tv = scroll.documentView as? UndoIsolatedTextView else { return }
+        tv.delegate = nil
+        tv.clearUndoRegistrations()
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: HelmPlainTextEditor
+
+        init(_ parent: HelmPlainTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            parent.text = tv.string
+        }
+    }
+}
+
+private final class UndoIsolatedTextView: NSTextView {
+    deinit {
+        clearUndoRegistrations()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            clearUndoRegistrations()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    func clearUndoRegistrations() {
+        undoManager?.removeAllActions(withTarget: self)
+        breakUndoCoalescing()
+    }
+}
+
 /// NSTextView with a placeholder string and configurable send forwarding.
 final class PlaceholderTextView: NSTextView {
     var placeholder: String = "" {
@@ -299,6 +388,7 @@ final class PlaceholderTextView: NSTextView {
     var onSlashContextChange: (ComposerSlashContext?) -> Void = { _ in }
 
     func setComposerText(_ text: String, skillChips: [ComposerSkill]) {
+        clearUndoRegistrations()
         let selectedRange = selectedRange()
         let attributed = NSMutableAttributedString()
         var chipIndex = 0
@@ -316,6 +406,22 @@ final class PlaceholderTextView: NSTextView {
         typingAttributes = ComposerTextView.plainTextAttributes
         self.selectedRange = NSRange(location: min(selectedRange.location, attributed.length), length: 0)
         needsDisplay = true
+    }
+
+    deinit {
+        clearUndoRegistrations()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            clearUndoRegistrations()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    func clearUndoRegistrations() {
+        undoManager?.removeAllActions(withTarget: self)
+        breakUndoCoalescing()
     }
 
     func insertSkillChip(_ skill: ComposerSkill) {

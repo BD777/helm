@@ -909,6 +909,7 @@ private struct ImagePartView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(width: size.width, height: size.height)
+                        .background(Color.helmChatBg)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
@@ -1203,6 +1204,7 @@ private struct HelmMarkdownImageView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: size.width, height: size.height)
+                    .background(Color.helmChatBg)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
