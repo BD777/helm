@@ -268,7 +268,7 @@ private final class ChatAutoScrollController: ObservableObject {
 
     private func visibleBoundsDidChange() {
         guard !isProgrammaticScroll, let scrollView else { return }
-        if isLiveUserScroll || currentEventLooksLikeUserScroll {
+        if isLiveUserScroll || currentEventLooksLikeUserScroll(in: scrollView) {
             userDidScroll()
         } else if distanceFromBottom(in: scrollView) <= followResumeTolerance {
             followsBottom = true
@@ -454,11 +454,39 @@ private final class ChatAutoScrollController: ObservableObject {
         }
     }
 
-    private var currentEventLooksLikeUserScroll: Bool {
+    private func currentEventLooksLikeUserScroll(in scrollView: NSScrollView) -> Bool {
         guard let event = NSApp.currentEvent else { return false }
+        guard event.window === scrollView.window else { return false }
+
         switch event.type {
         case .scrollWheel, .leftMouseDragged, .rightMouseDragged,
-             .otherMouseDragged, .leftMouseDown, .keyDown:
+             .otherMouseDragged, .leftMouseDown:
+            return eventLocationIsInside(scrollView, event)
+        case .keyDown:
+            return isScrollNavigationKey(event)
+                && firstResponderIsInside(scrollView)
+        default:
+            return false
+        }
+    }
+
+    private func firstResponderIsInside(_ scrollView: NSScrollView) -> Bool {
+        guard let responder = scrollView.window?.firstResponder else { return false }
+        if responder === scrollView || responder === scrollView.contentView {
+            return true
+        }
+        guard let view = responder as? NSView else { return false }
+        return view === scrollView || view.isDescendant(of: scrollView)
+    }
+
+    private func eventLocationIsInside(_ scrollView: NSScrollView, _ event: NSEvent) -> Bool {
+        let point = scrollView.convert(event.locationInWindow, from: nil)
+        return scrollView.bounds.contains(point)
+    }
+
+    private func isScrollNavigationKey(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case 49, 115, 116, 119, 121, 123, 124, 125, 126:
             return true
         default:
             return false
