@@ -13,12 +13,20 @@ struct MessageListView: View {
 
         ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(items) { item in
-                    displayRow(item)
+                if showStreamingPlaceholder {
+                    streamingPlaceholder
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 24)
                         .padding(.bottom, 18)
+                } else {
+                    ForEach(items) { item in
+                        displayRow(item)
+                            .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 18)
+                    }
                 }
             }
             .animation(nil)
@@ -97,6 +105,27 @@ struct MessageListView: View {
 
     private var showHistoryLoading: Bool {
         store.selectedSessionIsLoadingHistory && displayItems.isEmpty
+    }
+
+    private var showStreamingPlaceholder: Bool {
+        itemsAreEmpty && store.selectedSessionIsStreaming && !showHistoryLoading
+    }
+
+    private var itemsAreEmpty: Bool {
+        displayItems.isEmpty
+    }
+
+    private var streamingPlaceholder: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Starting response...")
+                .font(.system(size: 12.5))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Starting response")
     }
 
     private var historyLoadingView: some View {
@@ -195,7 +224,7 @@ private final class ChatAutoScrollController: ObservableObject {
     private let jumpButtonTolerance: CGFloat = 96
     private let followResumeTolerance: CGFloat = 18
     private let animatedDuration: TimeInterval = 0.18
-    private let maxScrollPasses = 6
+    private let maxScrollPasses = 8
 
     deinit {
         let center = NotificationCenter.default
@@ -282,6 +311,10 @@ private final class ChatAutoScrollController: ObservableObject {
 
     private func visibleBoundsDidChange() {
         guard !isProgrammaticScroll, let scrollView else { return }
+        if clampVisibleBoundsIfNeeded(in: scrollView) {
+            updateFollowPreference(resumeTolerance: followResumeTolerance)
+            return
+        }
         if isLiveUserScroll || currentEventLooksLikeUserScroll(in: scrollView) {
             userDidScroll()
         } else if distanceFromBottom(in: scrollView) <= followResumeTolerance {
@@ -291,6 +324,10 @@ private final class ChatAutoScrollController: ObservableObject {
     }
 
     private func documentFrameDidChange() {
+        guard let scrollView else { return }
+        if clampVisibleBoundsIfNeeded(in: scrollView) {
+            followsBottom = distanceFromBottom(in: scrollView) <= jumpButtonTolerance
+        }
         refreshJumpButton()
         guard followsBottom, !isLiveUserScroll else { return }
         scheduleScrollToBottom(animated: false, force: false)
@@ -403,7 +440,9 @@ private final class ChatAutoScrollController: ObservableObject {
         case 2: return .milliseconds(33)
         case 3: return .milliseconds(66)
         case 4: return .milliseconds(120)
-        default: return .milliseconds(200)
+        case 5: return .milliseconds(200)
+        case 6: return .milliseconds(320)
+        default: return .milliseconds(500)
         }
     }
 
@@ -448,6 +487,29 @@ private final class ChatAutoScrollController: ObservableObject {
             scrollView.reflectScrolledClipView(clipView)
             finishProgrammaticScroll()
         }
+    }
+
+    @discardableResult
+    private func clampVisibleBoundsIfNeeded(in scrollView: NSScrollView) -> Bool {
+        guard let documentView = scrollView.documentView else { return false }
+
+        scrollView.layoutSubtreeIfNeeded()
+        documentView.layoutSubtreeIfNeeded()
+
+        let clipView = scrollView.contentView
+        let constrainedOrigin = clipView
+            .constrainBoundsRect(clipView.bounds)
+            .origin
+        let currentOrigin = clipView.bounds.origin
+        guard abs(currentOrigin.x - constrainedOrigin.x) > 0.5
+            || abs(currentOrigin.y - constrainedOrigin.y) > 0.5
+        else { return false }
+
+        isProgrammaticScroll = true
+        clipView.scroll(to: constrainedOrigin)
+        scrollView.reflectScrolledClipView(clipView)
+        isProgrammaticScroll = false
+        return true
     }
 
     private func finishProgrammaticScroll() {
