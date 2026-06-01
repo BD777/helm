@@ -21,8 +21,8 @@ struct SessionEventView: View {
             divider(label: "Goal enabled for \(vendor.displayName) turn",
                     icon: "target",
                     detail: Self.goalDetail(goal: goal, vendor: vendor, appliedAt: appliedAt))
-        case .promptAppended:
-            simpleDivider(label: "已追加输入，正在处理…",
+        case .promptAppended(_, let appendedAt):
+            simpleDivider(label: "\(Self.format(appendedAt)) 已受理追加输入，正在处理…",
                          icon: "arrow.right.circle")
         case .projectWorkflowStarted(_, let workflowId, let title, let nodeCount, let startedAt):
             divider(label: "Project workflow started",

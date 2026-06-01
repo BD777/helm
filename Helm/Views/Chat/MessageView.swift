@@ -126,19 +126,33 @@ struct MessageListView: View {
         case .event(let event):
             SessionEventView(event: event)
         case .assistantTurn(let thinking, let answer):
+            let isRunning = answer == nil && store.selectedSessionIsStreaming
             VStack(alignment: .leading, spacing: 10) {
                 if !thinking.isEmpty {
                     ThinkingBlock(
                         messages: thinking,
-                        isRunning: answer == nil
-                            && store.selectedSessionIsStreaming
+                        isRunning: isRunning
                     )
                 }
                 if let answer {
-                    MessageView(message: answer)
+                    MessageView(
+                        message: answer,
+                        renderMarkdown: !isLiveStreamingMessage(answer)
+                    )
                 }
             }
         }
+    }
+
+    private func isLiveStreamingMessage(_ message: Message) -> Bool {
+        guard store.selectedSessionIsStreaming else { return false }
+        if message.meta == "streaming…" || message.meta == "thinking…" {
+            return true
+        }
+        if case .assistant(let meta) = message.role {
+            return meta == "streaming…" || meta == "thinking…"
+        }
+        return false
     }
 
     /// Combined "did the rendered transcript grow?" signal.
@@ -572,31 +586,19 @@ private enum DisplayItem: Identifiable {
     }
 }
 
-/// Groups consecutive assistant messages into one `assistantTurn`. The
-/// last message in such a run is treated as the "answer" if it has no
-/// tool calls (Claude only stops emitting `tool_use` blocks when it's
-/// done working), otherwise everything is still mid-think.
+/// Groups consecutive assistant messages into one `assistantTurn`.
+/// Tool-heavy assistant messages are split so process chatter and workflow
+/// recaps collapse together, while the final substantive answer remains
+/// visible in the transcript.
 private func groupTranscript(_ items: [TranscriptItem]) -> [DisplayItem] {
     var out: [DisplayItem] = []
     var pending: [Message] = []
 
     func flush() {
         guard !pending.isEmpty else { return }
-        let last = pending.last!
-        let lastHasTool = last.parts.contains { part in
-            if case .toolCall = part { return true }
-            return false
-        }
-        if lastHasTool || isWorkingPlaceholder(last) {
-            // Still in the tool-use phase: no formal answer yet, the
-            // whole run stays as thinking.
-            out.append(.assistantTurn(thinking: pending.filter { message in
-                !isWorkingPlaceholder(message) || message.id == last.id
-            }, answer: nil))
-        } else {
-            let thinking = pending.dropLast().filter { !isWorkingPlaceholder($0) }
-            out.append(.assistantTurn(thinking: thinking, answer: last))
-        }
+        let presentation = assistantTurnPresentation(for: pending)
+        out.append(.assistantTurn(thinking: presentation.thinking,
+                                  answer: presentation.answer))
         pending = []
     }
 
@@ -618,6 +620,153 @@ private func groupTranscript(_ items: [TranscriptItem]) -> [DisplayItem] {
     return out
 }
 
+private func assistantTurnPresentation(for messages: [Message]) -> (thinking: [Message], answer: Message?) {
+    guard let last = messages.last else { return ([], nil) }
+    let hasProcessArtifacts = messages.contains { containsToolCall($0) || isWorkflowRecapMessage($0) }
+
+    if hasProcessArtifacts,
+       let split = splitSubstantiveAnswer(from: messages) {
+        return split
+    }
+
+    if containsToolCall(last) || isWorkingPlaceholder(last) || isWorkflowRecapMessage(last) {
+        return (messages.filter { message in
+            !isWorkingPlaceholder(message) || message.id == last.id
+        }, nil)
+    }
+
+    let thinking = messages.dropLast().filter { !isWorkingPlaceholder($0) }
+    return (Array(thinking), last)
+}
+
+private func splitSubstantiveAnswer(from messages: [Message]) -> (thinking: [Message], answer: Message?)? {
+    for messageIndex in messages.indices.reversed() {
+        let message = messages[messageIndex]
+        guard !isWorkflowRecapMessage(message) else { continue }
+        for partIndex in message.parts.indices.reversed() {
+            guard case .text(let text) = message.parts[partIndex],
+                  isSubstantiveAnswerText(text),
+                  suffixIsHousekeeping(messages: messages,
+                                       messageIndex: messageIndex,
+                                       partIndex: partIndex)
+            else { continue }
+
+            var thinking: [Message] = []
+            for idx in messages.indices {
+                if idx == messageIndex {
+                    let thoughtParts = Array(message.parts[..<partIndex])
+                        + Array(message.parts[message.parts.index(after: partIndex)...])
+                    appendThinkingMessage(message, parts: thoughtParts, to: &thinking)
+                } else {
+                    appendThinkingMessage(messages[idx], parts: messages[idx].parts, to: &thinking)
+                }
+            }
+
+            var answer = message
+            answer.role = .assistant(meta: "done")
+            answer.meta = nil
+            answer.parts = [.text(text)]
+            answer.tokenUsage = estimateTokens(in: answer.parts)
+            return (thinking, answer)
+        }
+    }
+    return nil
+}
+
+private func appendThinkingMessage(_ message: Message, parts: [Part], to thinking: inout [Message]) {
+    guard !parts.isEmpty || isWorkingPlaceholder(message) else { return }
+    var copy = message
+    copy.parts = parts
+    thinking.append(copy)
+}
+
+private func suffixIsHousekeeping(messages: [Message], messageIndex: Int, partIndex: Int) -> Bool {
+    let message = messages[messageIndex]
+    let nextIndex = message.parts.index(after: partIndex)
+    if nextIndex < message.parts.endIndex {
+        for part in message.parts[nextIndex...] where !isHousekeepingPart(part) {
+            return false
+        }
+    }
+    if messageIndex + 1 < messages.endIndex {
+        for message in messages[(messageIndex + 1)...] where !isHousekeepingMessage(message) {
+            return false
+        }
+    }
+    return true
+}
+
+private func isHousekeepingMessage(_ message: Message) -> Bool {
+    if isWorkingPlaceholder(message) || isWorkflowRecapMessage(message) {
+        return true
+    }
+    return !message.parts.isEmpty && message.parts.allSatisfy(isHousekeepingPart)
+}
+
+private func isHousekeepingPart(_ part: Part) -> Bool {
+    switch part {
+    case .toolCall(let call):
+        return isHousekeepingToolCall(call)
+    case .text(let text):
+        return isWorkflowRecapText(text)
+    case .skillText, .image:
+        return false
+    }
+}
+
+private func containsToolCall(_ message: Message) -> Bool {
+    message.parts.contains { part in
+        if case .toolCall = part { return true }
+        return false
+    }
+}
+
+private func isHousekeepingToolCall(_ call: ToolCall) -> Bool {
+    let normalized = call.name
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .replacingOccurrences(of: " ", with: "")
+        .lowercased()
+    return normalized == "taskupdate"
+}
+
+private func isWorkflowRecapMessage(_ message: Message) -> Bool {
+    !message.parts.isEmpty && message.parts.allSatisfy { part in
+        if case .text(let text) = part {
+            return isWorkflowRecapText(text)
+        }
+        return isHousekeepingPart(part)
+    }
+}
+
+private func isWorkflowRecapText(_ text: String) -> Bool {
+    let normalized = text
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    guard !normalized.isEmpty else { return false }
+    return normalized.contains("## workflow recap")
+        || normalized.contains("workflow recap as required by the skill contract")
+        || (normalized.contains("workflow recap") && normalized.contains("node outcomes"))
+}
+
+private func isSubstantiveAnswerText(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !isWorkflowRecapText(trimmed) else { return false }
+    if trimmed.count >= 180 { return true }
+    if trimmed.contains("\n## ") || trimmed.contains("\n### ") { return true }
+    if trimmed.contains("|") && trimmed.contains("\n|") { return true }
+    let lower = trimmed.lowercased()
+    let progressPrefixes = [
+        "now let me",
+        "let me ",
+        "i'll ",
+        "i will ",
+        "good, ",
+        "the binary is",
+        "this is a different"
+    ]
+    return !progressPrefixes.contains { lower.hasPrefix($0) }
+}
+
 private func isWorkingPlaceholder(_ message: Message) -> Bool {
     guard message.parts.isEmpty else { return false }
     if message.meta == "thinking…" || message.meta == "streaming…" {
@@ -631,9 +780,12 @@ private func isWorkingPlaceholder(_ message: Message) -> Bool {
 
 struct MessageView: View {
     let message: Message
+    var renderMarkdown: Bool = true
 
     var body: some View {
-        MessagePartListView(parts: message.parts, spacing: 6)
+        MessagePartListView(parts: message.parts,
+                            spacing: 6,
+                            renderMarkdown: renderMarkdown)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, isUser ? 12 : 0)
         .padding(.vertical, isUser ? 8 : 0)
@@ -666,6 +818,7 @@ private enum MessagePartDisplayItem: Identifiable {
 private struct MessagePartListView: View {
     let parts: [Part]
     let spacing: CGFloat
+    var renderMarkdown: Bool = true
     var turnStartedAt: Date? = nil
     var isTurnRunning: Bool = false
     var turnTokenUsage: Int? = nil
@@ -702,8 +855,13 @@ private struct MessagePartListView: View {
     private func partView(_ part: Part) -> some View {
         switch part {
         case .text(let s):
-            MarkdownishText(s)
-                .padding(.top, 2)
+            if renderMarkdown {
+                MarkdownishText(s)
+                    .padding(.top, 2)
+            } else {
+                PlainStreamingText(s)
+                    .padding(.top, 2)
+            }
         case .skillText(let segments):
             InlineSkillText(segments: segments)
                 .padding(.top, 2)
@@ -770,6 +928,7 @@ private struct ThinkingBlock: View {
                 MessagePartListView(
                     parts: flattenedParts,
                     spacing: 10,
+                    renderMarkdown: !isRunning,
                     turnStartedAt: turnStartedAt,
                     isTurnRunning: isRunning,
                     turnTokenUsage: turnTokenUsage
@@ -1208,6 +1367,19 @@ struct MarkdownishText: View {
             .markdownTheme(.helmChat)
             .markdownImageProvider(HelmMarkdownImageProvider())
             .markdownInlineImageProvider(HelmMarkdownInlineImageProvider())
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct PlainStreamingText: View {
+    let raw: String
+    init(_ raw: String) { self.raw = raw }
+
+    var body: some View {
+        Text(raw)
+            .font(.system(size: 14))
+            .foregroundStyle(.primary)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }

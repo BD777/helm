@@ -2784,7 +2784,7 @@ else:
     private var runningSessionIds: Set<UUID> = []
     private var activeRunStartedAts: [UUID: Date] = [:]
     private var pendingApprovalQueue: [PendingApprovalEntry] = []
-    private static let assistantTextFlushDelayNanos: UInt64 = 50_000_000
+    private static let assistantTextFlushDelayNanos: UInt64 = 120_000_000
 
     @discardableResult
     func send(_ prompt: String,
@@ -2945,9 +2945,10 @@ else:
                                  fallbackText: fallbackDisplayText,
                                  attachments: attachments)
         )
-        let insertionIndex = sessions[sIdx].transcript.firstIndex {
+        let assistantIndex = sessions[sIdx].transcript.firstIndex {
             $0.message?.id == run.assistantId
-        } ?? sessions[sIdx].transcript.count
+        }
+        let insertionIndex = assistantIndex.map { $0 + 1 } ?? sessions[sIdx].transcript.count
         let insertedItems = preUserEvents.map(TranscriptItem.event)
             + [.event(.promptAppended(id: UUID(), appendedAt: Date()))]
             + [.message(userMsg)]
