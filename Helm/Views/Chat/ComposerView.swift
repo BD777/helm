@@ -14,7 +14,6 @@ struct ComposerView: View {
     @State private var attachments: [ImageAttachment] = []
     @State private var selectedSkills: [ComposerSkill] = []
     @State private var draftSessionId: UUID?
-    @State private var drafts: [UUID: ComposerDraft] = [:]
     @State private var pasteMonitor: Any? = nil
     @State private var focusRequest = 0
     @State private var composerInteractionResetRequest = 0
@@ -43,6 +42,18 @@ struct ComposerView: View {
             activeBuiltinAction = nil
             requestComposerFocus()
         }
+        .onChange(of: text) { _, _ in
+            saveCurrentDraft()
+        }
+        .onChange(of: attachments) { _, _ in
+            saveCurrentDraft()
+        }
+        .onChange(of: selectedSkills) { _, _ in
+            saveCurrentDraft()
+        }
+        .onChange(of: goalActionActive) { _, _ in
+            saveCurrentDraft()
+        }
         .onChange(of: pickerOpen) { _, isOpen in
             if !isOpen {
                 requestComposerFocus()
@@ -52,6 +63,7 @@ struct ComposerView: View {
             requestComposerFocus()
         }
         .onDisappear {
+            saveCurrentDraft()
             removePasteMonitor()
         }
     }
@@ -215,7 +227,7 @@ struct ComposerView: View {
         activeBuiltinAction = nil
         goalActionActive = false
         if let sessionId = draftSessionId {
-            drafts[sessionId] = nil
+            store.clearComposerDraft(for: sessionId, removeAttachmentFiles: false)
         }
     }
 
@@ -786,23 +798,17 @@ struct ComposerView: View {
 
     private func saveCurrentDraft() {
         guard let sessionId = draftSessionId else { return }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && attachments.isEmpty
-            && selectedSkills.isEmpty
-            && !goalActionActive {
-            drafts[sessionId] = nil
-        } else {
-            drafts[sessionId] = ComposerDraft(text: text,
-                                              attachments: attachments,
-                                              selectedSkills: selectedSkills,
-                                              goalActionActive: goalActionActive)
-        }
+        store.setComposerDraft(ComposerDraft(text: text,
+                                             attachments: attachments,
+                                             selectedSkills: selectedSkills,
+                                             goalActionActive: goalActionActive),
+                               for: sessionId)
     }
 
     private func loadDraft(for sessionId: UUID?) {
         draftSessionId = sessionId
         composerInteractionResetRequest &+= 1
-        guard let sessionId, let draft = drafts[sessionId] else {
+        guard let draft = store.composerDraft(for: sessionId) else {
             text = ""
             attachments = []
             selectedSkills = []
@@ -2058,6 +2064,42 @@ struct ComposerSkill: Identifiable, Hashable {
     }
 }
 
+extension ComposerSkill: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, description, source, path
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let path = try c.decode(String.self, forKey: .path)
+        let id = try c.decodeIfPresent(String.self, forKey: .id) ?? path
+        let name = try c.decode(String.self, forKey: .name)
+        let description = try c.decode(String.self, forKey: .description)
+        let source = try c.decode(String.self, forKey: .source)
+        let haystack = [name, description, source].joined(separator: " ")
+        let searchName = Self.normalizedSearchText(name)
+        let searchHaystack = Self.normalizedSearchText(haystack)
+        self.init(id: id,
+                  name: name,
+                  description: description,
+                  source: source,
+                  path: path,
+                  haystack: haystack,
+                  searchName: searchName,
+                  searchHaystack: searchHaystack,
+                  searchNameCharacters: Array(searchName))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(description, forKey: .description)
+        try c.encode(source, forKey: .source)
+        try c.encode(path, forKey: .path)
+    }
+}
+
 private struct ComposerSkillMatchScore: Comparable, Equatable {
     let tier: Int
     let gaps: Int
@@ -2778,9 +2820,31 @@ print(json.dumps(records, ensure_ascii=False))
     }
 }
 
-private struct ComposerDraft {
+struct ComposerDraft: Hashable, Codable {
     var text: String
     var attachments: [ImageAttachment]
     var selectedSkills: [ComposerSkill]
     var goalActionActive: Bool
+
+    var isEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty
+            && selectedSkills.isEmpty
+            && !goalActionActive
+    }
+}
+
+struct ProjectInboxComposerDraft: Hashable, Codable {
+    var text: String
+    var attachments: [ImageAttachment]
+    var selectedSkills: [ComposerSkill]
+    var workerProfileId: UUID?
+    var runConfiguration: SessionRunConfiguration
+    var attachmentStorageId: UUID
+
+    var isEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty
+            && selectedSkills.isEmpty
+    }
 }

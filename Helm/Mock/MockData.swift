@@ -23,8 +23,7 @@ final class AppStore {
             if let oldId = oldValue,
                let oldIdx = sessions.firstIndex(where: { $0.id == oldId }),
                sessions[oldIdx].isDraft {
-                removeSidebarSession(oldId)
-                sessions.remove(at: oldIdx)
+                discardDraftSessionIfEmptyAfterComposerSave(oldId)
             }
             if let selectedSessionId,
                let project = project(for: selectedSessionId) {
@@ -68,6 +67,8 @@ final class AppStore {
     }
     var composerFocusTick: Int = 0
 
+    @ObservationIgnored private var composerDrafts: [UUID: ComposerDraft] = [:]
+    @ObservationIgnored private var projectInboxComposerDrafts: [UUID: ProjectInboxComposerDraft] = [:]
     private var schedulerWorkspaceLayouts: [UUID: ProjectSchedulerWorkspaceLayout] = [:]
     private var workflowResourceLocks: [String: UUID] = [:]
 
@@ -119,6 +120,14 @@ final class AppStore {
         let profilesFile = profileStore.load()
         let stateFile = stateStore.load()
         let loadedProjects = projects.isEmpty ? stateFile.projects : projects
+        var loadedComposerDrafts: [UUID: ComposerDraft] = [:]
+        for record in stateFile.composerDrafts where !record.draft.isEmpty {
+            loadedComposerDrafts[record.sessionId] = record.draft
+        }
+        var loadedProjectInboxComposerDrafts: [UUID: ProjectInboxComposerDraft] = [:]
+        for record in stateFile.projectInboxComposerDrafts where !record.draft.isEmpty {
+            loadedProjectInboxComposerDrafts[record.projectId] = record.draft
+        }
         let sshProjectIds = Set(loadedProjects.filter { $0.location.isSSH }.map(\.id))
         let scopedProviderIdsToDrop = Set(profilesFile.providers.filter { provider in
             provider.sshProjectId.map { !sshProjectIds.contains($0) } ?? false
@@ -156,7 +165,10 @@ final class AppStore {
         // first run because the scheduler state owns them by reference.
         let cleanSessions = (sessions.isEmpty ? stateFile.sessions : sessions)
             .filter {
-                $0.isArchived ||
+                if $0.isDraft {
+                    return loadedComposerDrafts[$0.id]?.isEmpty == false
+                }
+                return $0.isArchived ||
                 !$0.transcript.isEmpty ||
                 $0.vendorSessionId != nil ||
                 Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
@@ -174,6 +186,10 @@ final class AppStore {
         self.projectSchedulers = loadedSchedulers
         self.sessions = cleanSessions
         self.sidebarSessions = Self.sidebarSessions(from: cleanSessions)
+        let cleanSessionIds = Set(cleanSessions.map(\.id))
+        self.composerDrafts = loadedComposerDrafts.filter { cleanSessionIds.contains($0.key) }
+        let cleanProjectIds = Set(loadedProjects.map(\.id))
+        self.projectInboxComposerDrafts = loadedProjectInboxComposerDrafts.filter { cleanProjectIds.contains($0.key) }
         let restoredSelection = selectedSessionId ?? stateFile.selectedSessionId
         self.selectedSessionId = cleanSessions.contains {
             $0.id == restoredSelection && !$0.isArchived
@@ -226,6 +242,8 @@ final class AppStore {
             scheduleProfilesSave()
         }
         if cleanSessions.count != stateFile.sessions.count ||
+            self.composerDrafts.count != stateFile.composerDrafts.count ||
+            self.projectInboxComposerDrafts.count != stateFile.projectInboxComposerDrafts.count ||
             importedTargetSessions ||
             !removedSchedulerTaskIds.isEmpty ||
             !interruptedSchedulerTaskIds.isEmpty {
@@ -617,15 +635,7 @@ final class AppStore {
     }
 
     private func scheduleStateSave() {
-        stateStore.scheduleSave(AppStateFile(
-            version: AppStateFile.currentVersion,
-            projects: projects,
-            sessions: sessions.filter { !$0.isDraft },
-            selectedSessionId: selectedSessionId,
-            selectedProjectId: selectedProjectId,
-            schedulers: projectSchedulers,
-            sshProfileAccess: sshProfileAccess
-        ))
+        stateStore.scheduleSave(appStateSnapshot())
         scheduleTargetSessionIndexSave()
     }
 
@@ -639,15 +649,7 @@ final class AppStore {
             models: models,
             profiles: profiles
         ))
-        stateStore.flush(AppStateFile(
-            version: AppStateFile.currentVersion,
-            projects: projects,
-            sessions: sessions.filter { !$0.isDraft },
-            selectedSessionId: selectedSessionId,
-            selectedProjectId: selectedProjectId,
-            schedulers: projectSchedulers,
-            sshProfileAccess: sshProfileAccess
-        ))
+        stateStore.flush(appStateSnapshot())
         pendingTargetSessionIndexSaveTask?.cancel()
         pendingTargetSessionIndexSaveTask = nil
         let entriesByTarget = targetSessionIndexEntriesByTarget()
@@ -659,6 +661,40 @@ final class AppStore {
             }
             _ = semaphore.wait(timeout: .now() + 5)
         }
+    }
+
+    private func appStateSnapshot() -> AppStateFile {
+        AppStateFile(
+            version: AppStateFile.currentVersion,
+            projects: projects,
+            sessions: persistableSessions,
+            selectedSessionId: selectedSessionId,
+            selectedProjectId: selectedProjectId,
+            schedulers: projectSchedulers,
+            sshProfileAccess: sshProfileAccess,
+            composerDrafts: composerDraftRecords,
+            projectInboxComposerDrafts: projectInboxComposerDraftRecords
+        )
+    }
+
+    private var persistableSessions: [Session] {
+        sessions.filter { session in
+            !session.isDraft || hasComposerDraft(session.id)
+        }
+    }
+
+    private var composerDraftRecords: [ComposerDraftRecord] {
+        composerDrafts
+            .filter { !$0.value.isEmpty }
+            .map { ComposerDraftRecord(sessionId: $0.key, draft: $0.value) }
+            .sorted { $0.sessionId.uuidString < $1.sessionId.uuidString }
+    }
+
+    private var projectInboxComposerDraftRecords: [ProjectInboxComposerDraftRecord] {
+        projectInboxComposerDrafts
+            .filter { !$0.value.isEmpty }
+            .map { ProjectInboxComposerDraftRecord(projectId: $0.key, draft: $0.value) }
+            .sorted { $0.projectId.uuidString < $1.projectId.uuidString }
     }
 
     private func scheduleTargetSessionIndexSave() {
@@ -886,6 +922,66 @@ final class AppStore {
         composerFocusTick &+= 1
     }
 
+    func composerDraft(for sessionId: UUID?) -> ComposerDraft? {
+        guard let sessionId else { return nil }
+        return composerDrafts[sessionId]
+    }
+
+    func setComposerDraft(_ draft: ComposerDraft, for sessionId: UUID) {
+        guard sessions.contains(where: { $0.id == sessionId }) else { return }
+        let normalized: ComposerDraft? = draft.isEmpty ? nil : draft
+        guard composerDrafts[sessionId] != normalized else { return }
+        composerDrafts[sessionId] = normalized
+        scheduleStateSave()
+    }
+
+    func clearComposerDraft(for sessionId: UUID, removeAttachmentFiles: Bool) {
+        guard let draft = composerDrafts.removeValue(forKey: sessionId) else { return }
+        if removeAttachmentFiles {
+            ComposerImagePasteboard.removeFiles(draft.attachments)
+        }
+        scheduleStateSave()
+    }
+
+    private func hasComposerDraft(_ sessionId: UUID) -> Bool {
+        composerDrafts[sessionId]?.isEmpty == false
+    }
+
+    private func discardDraftSessionIfEmptyAfterComposerSave(_ sessionId: UUID) {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  self.selectedSessionId != sessionId,
+                  let idx = self.sessions.firstIndex(where: { $0.id == sessionId }),
+                  self.sessions[idx].isDraft,
+                  !self.hasComposerDraft(sessionId)
+            else { return }
+            self.removeSidebarSession(sessionId)
+            self.sessions.remove(at: idx)
+            self.scheduleStateSave()
+        }
+    }
+
+    func projectInboxComposerDraft(for projectId: UUID) -> ProjectInboxComposerDraft? {
+        projectInboxComposerDrafts[projectId]
+    }
+
+    func setProjectInboxComposerDraft(_ draft: ProjectInboxComposerDraft, for projectId: UUID) {
+        guard projects.contains(where: { $0.id == projectId }) else { return }
+        let normalized: ProjectInboxComposerDraft? = draft.isEmpty ? nil : draft
+        guard projectInboxComposerDrafts[projectId] != normalized else { return }
+        projectInboxComposerDrafts[projectId] = normalized
+        scheduleStateSave()
+    }
+
+    func clearProjectInboxComposerDraft(for projectId: UUID, removeAttachmentFiles: Bool) {
+        guard let draft = projectInboxComposerDrafts.removeValue(forKey: projectId) else { return }
+        if removeAttachmentFiles {
+            ComposerImagePasteboard.removeFiles(draft.attachments)
+        }
+        scheduleStateSave()
+    }
+
     func selectProjectOverview(_ projectId: UUID) {
         guard projects.contains(where: { $0.id == projectId }) else { return }
         selectedProjectId = projectId
@@ -972,6 +1068,7 @@ final class AppStore {
         if let project = projects.first(where: { $0.id == projectId }) {
             removeTargetSessionIndexEntries([id], for: project)
         }
+        clearComposerDraft(for: id, removeAttachmentFiles: true)
         removeSchedulerEntries(referencingSession: id)
         let wasSelected = selectedSessionId == id
         sessions.remove(at: idx)
@@ -1005,6 +1102,7 @@ final class AppStore {
 
         sessions[idx].isDraft = false
         sessions[idx].archivedAt = archivedAt
+        clearComposerDraft(for: id, removeAttachmentFiles: true)
         removeSidebarSession(id)
 
         if selectedSessionId == id {
@@ -1031,6 +1129,10 @@ final class AppStore {
         removeTargetSessionIndexEntries(removedSessionIds, for: removedProject)
 
         projects.remove(at: idx)
+        for sessionId in removedSessionIds {
+            clearComposerDraft(for: sessionId, removeAttachmentFiles: true)
+        }
+        clearProjectInboxComposerDraft(for: projectId, removeAttachmentFiles: true)
         sessions.removeAll { $0.projectId == projectId }
         sidebarSessions.removeAll { removedSessionIds.contains($0.id) }
         for sessionId in removedSessionIds {
@@ -2452,12 +2554,21 @@ else:
     func newSession(in projectId: UUID,
                     vendor: Vendor? = nil,
                     profileId: UUID? = nil) -> UUID? {
-        createSession(in: projectId,
-                      title: "New chat",
-                      vendor: vendor,
-                      profileId: profileId,
-                      isDraft: true,
-                      select: true)
+        if vendor == nil,
+           profileId == nil,
+           let draft = sessions.last(where: {
+            $0.projectId == projectId && $0.isDraft && !$0.isArchived
+           }) {
+            selectedSessionId = draft.id
+            requestComposerFocus()
+            return draft.id
+        }
+        return createSession(in: projectId,
+                             title: "New chat",
+                             vendor: vendor,
+                             profileId: profileId,
+                             isDraft: true,
+                             select: true)
     }
 
     @discardableResult

@@ -13,19 +13,24 @@ struct AppStateFile: Codable {
     var selectedProjectId: UUID?
     var schedulers: [ProjectSchedulerState]
     var sshProfileAccess: [SSHProfileAccessState]
+    var composerDrafts: [ComposerDraftRecord]
+    var projectInboxComposerDrafts: [ProjectInboxComposerDraftRecord]
 
-    static let currentVersion = 4
+    static let currentVersion = 5
     static let empty = AppStateFile(version: currentVersion,
                                     projects: [],
                                     sessions: [],
                                     selectedSessionId: nil,
                                     selectedProjectId: nil,
                                     schedulers: [],
-                                    sshProfileAccess: [])
+                                    sshProfileAccess: [],
+                                    composerDrafts: [],
+                                    projectInboxComposerDrafts: [])
 
     private enum CodingKeys: String, CodingKey {
         case version, projects, sessions, selectedSessionId,
-             selectedProjectId, schedulers, sshProfileAccess
+             selectedProjectId, schedulers, sshProfileAccess,
+             composerDrafts, projectInboxComposerDrafts
     }
 
     init(version: Int,
@@ -34,7 +39,9 @@ struct AppStateFile: Codable {
          selectedSessionId: UUID?,
          selectedProjectId: UUID?,
          schedulers: [ProjectSchedulerState],
-         sshProfileAccess: [SSHProfileAccessState] = []) {
+         sshProfileAccess: [SSHProfileAccessState] = [],
+         composerDrafts: [ComposerDraftRecord] = [],
+         projectInboxComposerDrafts: [ProjectInboxComposerDraftRecord] = []) {
         self.version = version
         self.projects = projects
         self.sessions = sessions
@@ -42,6 +49,8 @@ struct AppStateFile: Codable {
         self.selectedProjectId = selectedProjectId
         self.schedulers = schedulers
         self.sshProfileAccess = sshProfileAccess
+        self.composerDrafts = composerDrafts
+        self.projectInboxComposerDrafts = projectInboxComposerDrafts
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +64,10 @@ struct AppStateFile: Codable {
                                                 forKey: .schedulers) ?? []
         self.sshProfileAccess = try c.decodeIfPresent([SSHProfileAccessState].self,
                                                        forKey: .sshProfileAccess) ?? []
+        self.composerDrafts = try c.decodeIfPresent([ComposerDraftRecord].self,
+                                                     forKey: .composerDrafts) ?? []
+        self.projectInboxComposerDrafts = try c.decodeIfPresent([ProjectInboxComposerDraftRecord].self,
+                                                                forKey: .projectInboxComposerDrafts) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -66,7 +79,19 @@ struct AppStateFile: Codable {
         try c.encodeIfPresent(selectedProjectId, forKey: .selectedProjectId)
         try c.encode(schedulers, forKey: .schedulers)
         try c.encode(sshProfileAccess, forKey: .sshProfileAccess)
+        try c.encode(composerDrafts, forKey: .composerDrafts)
+        try c.encode(projectInboxComposerDrafts, forKey: .projectInboxComposerDrafts)
     }
+}
+
+struct ComposerDraftRecord: Hashable, Codable {
+    var sessionId: UUID
+    var draft: ComposerDraft
+}
+
+struct ProjectInboxComposerDraftRecord: Hashable, Codable {
+    var projectId: UUID
+    var draft: ProjectInboxComposerDraft
 }
 
 /// Synchronous load + debounced save of the runtime state file. App lifetime;

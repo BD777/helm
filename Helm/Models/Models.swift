@@ -476,13 +476,15 @@ struct Session: Identifiable, Hashable, Codable {
     var isArchived: Bool { archivedAt != nil }
 
     // Persistence: transcript items live in the vendor's own session log
-    // (~/.claude/projects/...) and isDraft is transient by design — both are
-    // skipped from Codable. The three vendor-native chip fields persist so
-    // the user's picks survive restart. See [[helm-storage]] for layering.
+    // (~/.claude/projects/...) and are skipped from Codable. Draft sessions
+    // normally stay transient, but sessions with composer drafts can persist
+    // their draft bit so unsent input survives navigation and restart.
+    // The three vendor-native chip fields persist so the user's picks survive
+    // restart. See [[helm-storage]] for layering.
     private enum CodingKeys: String, CodingKey {
         case id, projectId, title, profileId, lastUpdate, vendorSessionId,
              claudePermissionMode, codexSandboxMode, codexApprovalMode,
-             claudeEffort, codexEffort, archivedAt
+             claudeEffort, codexEffort, isDraft, archivedAt
     }
 
     init(id: UUID, projectId: UUID, title: String, profileId: UUID,
@@ -524,9 +526,9 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = try c.decodeIfPresent(CodexApprovalMode.self, forKey: .codexApprovalMode) ?? .onRequest
         self.claudeEffort = try c.decodeIfPresent(ClaudeEffort.self, forKey: .claudeEffort) ?? .medium
         self.codexEffort = try c.decodeIfPresent(Profile.ReasoningEffort.self, forKey: .codexEffort) ?? .medium
+        self.isDraft = try c.decodeIfPresent(Bool.self, forKey: .isDraft) ?? false
         self.archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         self.transcript = []
-        self.isDraft = false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -542,11 +544,12 @@ struct Session: Identifiable, Hashable, Codable {
         try c.encode(codexApprovalMode, forKey: .codexApprovalMode)
         try c.encode(claudeEffort, forKey: .claudeEffort)
         try c.encode(codexEffort, forKey: .codexEffort)
+        try c.encode(isDraft, forKey: .isDraft)
         try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
     }
 }
 
-struct SessionRunConfiguration: Hashable {
+struct SessionRunConfiguration: Hashable, Codable {
     var claudePermissionMode: ClaudePermissionMode
     var codexSandboxMode: Profile.SandboxMode
     var codexApprovalMode: CodexApprovalMode

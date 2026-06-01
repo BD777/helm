@@ -279,7 +279,6 @@ private struct ProjectSchedulerView: View {
             composerFocusRequest &+= 1
         }
         .onChange(of: project.id) { _, _ in
-            ideaText = ""
             composerFocusRequest &+= 1
         }
         .sheet(isPresented: $showWorkflowSettings) {
@@ -1277,24 +1276,34 @@ private struct ProjectSchedulerComposer: View {
         }
         .frame(maxWidth: DS.messageMaxWidth)
         .onAppear {
-            syncSelectedProfileIfNeeded(resetConfiguration: true)
+            loadDraft()
             installPasteMonitor()
         }
-        .onChange(of: project.id) { _, _ in
-            workerProfileId = nil
-            skillChips = []
-            removeAllAttachments()
-            attachmentStorageId = UUID()
-            composerInteractionResetRequest &+= 1
-            syncSelectedProfileIfNeeded(resetConfiguration: true)
+        .onChange(of: project.id) { oldProjectId, _ in
+            saveDraft(for: oldProjectId)
+            loadDraft()
         }
         .onChange(of: store.profiles.map(\.id)) { _, _ in
             syncSelectedProfileIfNeeded(resetConfiguration: false)
         }
+        .onChange(of: text) { _, _ in
+            saveDraft()
+        }
+        .onChange(of: skillChips) { _, _ in
+            saveDraft()
+        }
+        .onChange(of: attachments) { _, _ in
+            saveDraft()
+        }
+        .onChange(of: workerProfileId) { _, _ in
+            saveDraft()
+        }
+        .onChange(of: runConfiguration) { _, _ in
+            saveDraft()
+        }
         .onDisappear {
+            saveDraft()
             removePasteMonitor()
-            removeAllAttachments()
-            attachmentStorageId = UUID()
         }
     }
 
@@ -1666,6 +1675,45 @@ private struct ProjectSchedulerComposer: View {
         return mode.helpText
     }
 
+    private func saveDraft() {
+        saveDraft(for: project.id)
+    }
+
+    private func saveDraft(for projectId: UUID) {
+        store.setProjectInboxComposerDraft(
+            ProjectInboxComposerDraft(text: text,
+                                      attachments: attachments,
+                                      selectedSkills: skillChips,
+                                      workerProfileId: workerProfileId,
+                                      runConfiguration: runConfiguration,
+                                      attachmentStorageId: attachmentStorageId),
+            for: projectId
+        )
+    }
+
+    private func loadDraft() {
+        if let draft = store.projectInboxComposerDraft(for: project.id) {
+            text = draft.text
+            skillChips = draft.selectedSkills
+            attachments = draft.attachments
+            workerProfileId = draft.workerProfileId
+            runConfiguration = draft.runConfiguration
+            attachmentStorageId = draft.attachmentStorageId
+            composerInteractionResetRequest &+= 1
+            syncSelectedProfileIfNeeded(resetConfiguration: false)
+            return
+        }
+
+        text = ""
+        skillChips = []
+        attachments = []
+        workerProfileId = nil
+        runConfiguration = SessionRunConfiguration()
+        attachmentStorageId = UUID()
+        composerInteractionResetRequest &+= 1
+        syncSelectedProfileIfNeeded(resetConfiguration: true)
+    }
+
     private func syncSelectedProfileIfNeeded(resetConfiguration: Bool) {
         guard let profile = selectedProfile else { return }
         if workerProfileId != profile.id {
@@ -1709,11 +1757,6 @@ private struct ProjectSchedulerComposer: View {
         ComposerImagePasteboard.remove(attachment, from: &attachments)
     }
 
-    private func removeAllAttachments() {
-        ComposerImagePasteboard.removeFiles(attachments)
-        attachments = []
-    }
-
     private func submitIfPossible() {
         syncSelectedProfileIfNeeded(resetConfiguration: false)
         guard canSubmit, let selectedProfile else { return }
@@ -1722,7 +1765,8 @@ private struct ProjectSchedulerComposer: View {
         if onSubmit(composedPrompt, displayParts, submittedAttachments, selectedProfile.id, runConfiguration) {
             text = ""
             skillChips = []
-            removeAllAttachments()
+            store.clearProjectInboxComposerDraft(for: project.id, removeAttachmentFiles: true)
+            attachments = []
             attachmentStorageId = UUID()
             composerInteractionResetRequest &+= 1
         }
