@@ -39,6 +39,7 @@ struct MessageListView: View {
                 }
             )
         }
+        .id(scrollContentIdentity)
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -92,7 +93,11 @@ struct MessageListView: View {
         }
         .onChange(of: store.selectedSessionId) { _, _ in
             autoScroll.prepareForSessionChange()
-            autoScroll.forceScrollToBottom(animated: true)
+            autoScroll.forceScrollToBottom(animated: false)
+        }
+        .onChange(of: scrollContentIdentity) { _, _ in
+            autoScroll.prepareForSessionChange()
+            autoScroll.forceScrollToBottom(animated: false)
         }
     }
 
@@ -107,6 +112,12 @@ struct MessageListView: View {
 
     private var showHistoryLoading: Bool {
         store.selectedSessionIsLoadingHistory && displayItems.isEmpty
+    }
+
+    private var scrollContentIdentity: String {
+        let sessionID = store.selectedSessionId?.uuidString ?? "none"
+        let loadPhase = showHistoryLoading ? "loading" : "ready"
+        return "\(sessionID)-\(loadPhase)"
     }
 
     private var showStreamingPlaceholder: Bool {
