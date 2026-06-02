@@ -174,14 +174,20 @@ final class AppStore {
                 Self.hasRestorableTranscriptSnapshot(sessionId: $0.id) ||
                 managedWorkerSessionIds.contains($0.id)
             }
+        let stateLoadTime = Date()
         let removedSchedulerTaskIds = Self.removeSchedulerTasks(
             referencingMissingSessionsFrom: &loadedSchedulers,
             existingSessionIds: Set(cleanSessions.map(\.id)),
-            updatedAt: Date()
+            updatedAt: stateLoadTime
+        )
+        let archivedSchedulerTaskIds = Self.markSchedulerTasksDone(
+            referencingArchivedSessionsFrom: &loadedSchedulers,
+            archivedSessionIds: Set(cleanSessions.filter(\.isArchived).map(\.id)),
+            updatedAt: stateLoadTime
         )
         let interruptedSchedulerTaskIds = Self.markInterruptedSchedulerRuns(
             in: &loadedSchedulers,
-            updatedAt: Date()
+            updatedAt: stateLoadTime
         )
         self.projectSchedulers = loadedSchedulers
         self.sessions = cleanSessions
@@ -246,6 +252,7 @@ final class AppStore {
             self.projectInboxComposerDrafts.count != stateFile.projectInboxComposerDrafts.count ||
             importedTargetSessions ||
             !removedSchedulerTaskIds.isEmpty ||
+            !archivedSchedulerTaskIds.isEmpty ||
             !interruptedSchedulerTaskIds.isEmpty {
             scheduleStateSave()
         }
@@ -1086,13 +1093,20 @@ final class AppStore {
     @discardableResult
     private func archiveSession(_ id: UUID,
                                 archivedAt: Date,
-                                schedulesSave: Bool) -> Bool {
+                                schedulesSave: Bool,
+                                syncScheduler: Bool = true) -> Bool {
         guard !isSessionStreaming(id),
               let idx = sessions.firstIndex(where: { $0.id == id })
         else { return false }
 
         if sessions[idx].archivedAt == archivedAt {
-            return false
+            let schedulerChanged = syncScheduler
+                ? markSchedulerTasksDone(referencingSession: id, archivedAt: archivedAt)
+                : false
+            if schedulerChanged && schedulesSave {
+                scheduleStateSave()
+            }
+            return schedulerChanged
         }
 
         let projectId = sessions[idx].projectId
@@ -1104,6 +1118,9 @@ final class AppStore {
         sessions[idx].archivedAt = archivedAt
         clearComposerDraft(for: id, removeAttachmentFiles: true)
         removeSidebarSession(id)
+        _ = syncScheduler
+            ? markSchedulerTasksDone(referencingSession: id, archivedAt: archivedAt)
+            : false
 
         if selectedSessionId == id {
             selectedProjectId = projectId
@@ -1246,6 +1263,8 @@ final class AppStore {
         }
     }
 
+    private static let schedulerArchivedSessionSummary = "Archived with linked session."
+
     @discardableResult
     private static func removeSchedulerTasks(referencingMissingSessionsFrom schedulers: inout [ProjectSchedulerState],
                                              existingSessionIds: Set<UUID>,
@@ -1278,6 +1297,131 @@ final class AppStore {
         }
 
         return removedTaskIds
+    }
+
+    @discardableResult
+    private static func markSchedulerTasksDone(referencingArchivedSessionsFrom schedulers: inout [ProjectSchedulerState],
+                                               archivedSessionIds: Set<UUID>,
+                                               updatedAt now: Date) -> Set<UUID> {
+        guard !archivedSessionIds.isEmpty else { return [] }
+        var changedTaskIds: Set<UUID> = []
+
+        for schedulerIndex in schedulers.indices {
+            let taskIds = schedulers[schedulerIndex].tasks.compactMap { task -> UUID? in
+                guard let sessionId = task.sessionId,
+                      archivedSessionIds.contains(sessionId)
+                else { return nil }
+                return task.id
+            }
+            for taskId in taskIds {
+                if markSchedulerTaskDone(taskId: taskId,
+                                         scheduler: &schedulers[schedulerIndex],
+                                         updatedAt: now,
+                                         summary: schedulerArchivedSessionSummary) {
+                    changedTaskIds.insert(taskId)
+                }
+            }
+        }
+
+        return changedTaskIds
+    }
+
+    @discardableResult
+    private func markSchedulerTasksDone(referencingSession sessionId: UUID,
+                                        archivedAt now: Date) -> Bool {
+        var changed = false
+        for schedulerIndex in projectSchedulers.indices {
+            let taskIds = projectSchedulers[schedulerIndex].tasks.compactMap { task -> UUID? in
+                task.sessionId == sessionId ? task.id : nil
+            }
+            for taskId in taskIds {
+                changed = markSchedulerTaskDone(taskId: taskId,
+                                                schedulerIndex: schedulerIndex,
+                                                completedAt: now,
+                                                archiveLinkedSession: false,
+                                                summary: Self.schedulerArchivedSessionSummary) || changed
+            }
+        }
+        return changed
+    }
+
+    @discardableResult
+    private func markSchedulerTaskDone(taskId: UUID,
+                                       schedulerIndex: Int,
+                                       completedAt now: Date,
+                                       archiveLinkedSession: Bool,
+                                       summary: String? = nil) -> Bool {
+        guard projectSchedulers.indices.contains(schedulerIndex),
+              let task = projectSchedulers[schedulerIndex].tasks.first(where: { $0.id == taskId })
+        else { return false }
+
+        let projectId = projectSchedulers[schedulerIndex].projectId
+        let linkedSessionId = task.sessionId
+        var changed = Self.markSchedulerTaskDone(taskId: taskId,
+                                                 scheduler: &projectSchedulers[schedulerIndex],
+                                                 updatedAt: now,
+                                                 summary: summary)
+        releaseWorkflowResourceLocks(taskId: taskId, projectId: projectId)
+        if archiveLinkedSession,
+           let linkedSessionId,
+           archiveSession(linkedSessionId,
+                          archivedAt: now,
+                          schedulesSave: false,
+                          syncScheduler: false) {
+            changed = true
+        }
+        return changed
+    }
+
+    @discardableResult
+    private static func markSchedulerTaskDone(taskId: UUID,
+                                              scheduler: inout ProjectSchedulerState,
+                                              updatedAt now: Date,
+                                              summary: String? = nil) -> Bool {
+        guard let taskIndex = scheduler.tasks.firstIndex(where: { $0.id == taskId }) else {
+            return false
+        }
+
+        var changed = false
+        var taskChanged = false
+        let wasDone = scheduler.tasks[taskIndex].phase == .done
+        if scheduler.tasks[taskIndex].phase != .done {
+            scheduler.tasks[taskIndex].phase = .done
+            taskChanged = true
+        }
+        if let summary,
+           !wasDone,
+           scheduler.tasks[taskIndex].summary != summary {
+            scheduler.tasks[taskIndex].summary = summary
+            taskChanged = true
+        }
+        if taskChanged {
+            scheduler.tasks[taskIndex].updatedAt = now
+            changed = true
+        }
+        if markWorkflowRunPassed(taskId: taskId,
+                                 scheduler: &scheduler,
+                                 updatedAt: now) {
+            changed = true
+        }
+        for inboxIndex in scheduler.inbox.indices {
+            guard scheduler.inbox[inboxIndex].taskId == taskId,
+                  scheduler.inbox[inboxIndex].status != .archived
+            else { continue }
+            scheduler.inbox[inboxIndex].status = .archived
+            changed = true
+        }
+        for actionIndex in scheduler.humanActions.indices {
+            guard scheduler.humanActions[actionIndex].taskId == taskId,
+                  scheduler.humanActions[actionIndex].resolvedAt == nil
+            else { continue }
+            scheduler.humanActions[actionIndex].resolvedAt = now
+            changed = true
+        }
+        if changed {
+            scheduler.updatedAt = now
+        }
+        return changed
     }
 
     @discardableResult
@@ -1322,6 +1466,40 @@ final class AppStore {
                 break
             }
         }
+    }
+
+    @discardableResult
+    private static func markWorkflowRunPassed(taskId: UUID,
+                                              scheduler: inout ProjectSchedulerState,
+                                              updatedAt now: Date) -> Bool {
+        guard let runIndex = scheduler.workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
+            return false
+        }
+
+        var changed = false
+        if scheduler.workflowRuns[runIndex].status != .passed {
+            scheduler.workflowRuns[runIndex].status = .passed
+            changed = true
+        }
+        for nodeIndex in scheduler.workflowRuns[runIndex].nodes.indices {
+            switch scheduler.workflowRuns[runIndex].nodes[nodeIndex].status {
+            case .failed, .skipped:
+                break
+            case .planned, .running, .waiting, .passed:
+                if scheduler.workflowRuns[runIndex].nodes[nodeIndex].status != .passed {
+                    scheduler.workflowRuns[runIndex].nodes[nodeIndex].status = .passed
+                    changed = true
+                }
+                if scheduler.workflowRuns[runIndex].nodes[nodeIndex].endedAt == nil {
+                    scheduler.workflowRuns[runIndex].nodes[nodeIndex].endedAt = now
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            scheduler.workflowRuns[runIndex].updatedAt = now
+        }
+        return changed
     }
 
     // MARK: - Project scheduler
@@ -1469,14 +1647,22 @@ final class AppStore {
 
     func schedulerRunningTaskCount(in projectId: UUID) -> Int {
         schedulerState(for: projectId).tasks.filter { task in
-            task.sessionId.map(isSessionStreaming) ?? false
+            guard !schedulerTaskReferencesArchivedSession(task) else { return false }
+            return task.sessionId.map(isSessionStreaming) ?? false
         }.count
     }
 
     func schedulerWaitingTaskCount(in projectId: UUID) -> Int {
         schedulerState(for: projectId).tasks.filter { task in
-            task.phase != .done && !(task.sessionId.map(isSessionStreaming) ?? false)
+            task.phase != .done &&
+                !schedulerTaskReferencesArchivedSession(task) &&
+                !(task.sessionId.map(isSessionStreaming) ?? false)
         }.count
+    }
+
+    private func schedulerTaskReferencesArchivedSession(_ task: ProjectSchedulerTask) -> Bool {
+        guard let sessionId = task.sessionId else { return false }
+        return sessions.first { $0.id == sessionId }?.isArchived == true
     }
 
     func setDefaultWorkerProfile(_ profileId: UUID, for projectId: UUID) {
@@ -1746,26 +1932,23 @@ final class AppStore {
         let idx = ensureSchedulerStateIndex(for: projectId)
         guard let taskIndex = projectSchedulers[idx].tasks.firstIndex(where: { $0.id == taskId }) else { return }
         let now = Date()
+        if phase == .done {
+            _ = markSchedulerTaskDone(taskId: taskId,
+                                      schedulerIndex: idx,
+                                      completedAt: now,
+                                      archiveLinkedSession: true)
+            scheduleStateSave()
+            startRunnableSchedulerTasks(projectId: projectId)
+            return
+        }
+
         projectSchedulers[idx].tasks[taskIndex].phase = phase
         projectSchedulers[idx].tasks[taskIndex].updatedAt = now
-        if phase == .readyToMerge || phase == .done {
+        if phase == .readyToMerge {
             resolveHumanActions(projectId: projectId, taskId: taskId, kind: nil)
-        }
-        if phase == .done {
-            markWorkflowRunPassed(taskId: taskId, schedulerIndex: idx)
-            releaseWorkflowResourceLocks(taskId: taskId, projectId: projectId)
-            if let sessionId = projectSchedulers[idx].tasks[taskIndex].sessionId {
-                archiveSession(sessionId, archivedAt: now, schedulesSave: false)
-            }
-            if let inboxIndex = projectSchedulers[idx].inbox.firstIndex(where: { $0.taskId == taskId }) {
-                projectSchedulers[idx].inbox[inboxIndex].status = .archived
-            }
         }
         projectSchedulers[idx].updatedAt = now
         scheduleStateSave()
-        if phase == .done {
-            startRunnableSchedulerTasks(projectId: projectId)
-        }
     }
 
     private func ensureSchedulerStateIndex(for projectId: UUID) -> Int {
@@ -1917,7 +2100,7 @@ final class AppStore {
                                      schedulerIndex: Int,
                                      projectId: UUID) -> UUID? {
         if let sessionId = projectSchedulers[schedulerIndex].tasks[taskIndex].sessionId,
-           sessions.contains(where: { $0.id == sessionId }) {
+           sessions.contains(where: { $0.id == sessionId && !$0.isArchived }) {
             return sessionId
         }
         guard let workerProfile = defaultWorkerProfile(for: projectId) else { return nil }
@@ -1951,6 +2134,16 @@ final class AppStore {
         let now = Date()
         let task = projectSchedulers[location.schedulerIndex].tasks[location.taskIndex]
         guard task.phase == .running || task.phase == .waiting || task.phase == .planned else { return }
+        if sessions.first(where: { $0.id == sessionId })?.isArchived == true {
+            _ = markSchedulerTaskDone(taskId: task.id,
+                                      schedulerIndex: location.schedulerIndex,
+                                      completedAt: now,
+                                      archiveLinkedSession: false,
+                                      summary: Self.schedulerArchivedSessionSummary)
+            scheduleStateSave()
+            startRunnableSchedulerTasks(projectId: projectSchedulers[location.schedulerIndex].projectId)
+            return
+        }
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].phase = .waiting
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].summary = "Waiting for review: worker session stopped."
         projectSchedulers[location.schedulerIndex].tasks[location.taskIndex].updatedAt = now
@@ -2029,27 +2222,6 @@ final class AppStore {
                 projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status = .waiting
             case .waiting, .passed, .failed, .skipped:
                 break
-            }
-        }
-    }
-
-    private func markWorkflowRunPassed(taskId: UUID,
-                                       schedulerIndex: Int) {
-        guard let runIndex = projectSchedulers[schedulerIndex].workflowRuns.firstIndex(where: { $0.taskId == taskId }) else {
-            return
-        }
-        let now = Date()
-        projectSchedulers[schedulerIndex].workflowRuns[runIndex].status = .passed
-        projectSchedulers[schedulerIndex].workflowRuns[runIndex].updatedAt = now
-        for nodeIndex in projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes.indices {
-            switch projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status {
-            case .failed, .skipped:
-                break
-            case .planned, .running, .waiting, .passed:
-                projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].status = .passed
-                if projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].endedAt == nil {
-                    projectSchedulers[schedulerIndex].workflowRuns[runIndex].nodes[nodeIndex].endedAt = now
-                }
             }
         }
     }
@@ -2798,6 +2970,7 @@ else:
         guard !promptForAgent.isEmpty || !attachments.isEmpty else { return false }
         let targetSessionId = targetSessionId ?? selectedSessionId
         guard let sIdx = sessions.firstIndex(where: { $0.id == targetSessionId }) else { return false }
+        guard !sessions[sIdx].isArchived else { return false }
         if isSessionStreaming(sessions[sIdx].id) {
             return appendToActiveRun(prompt: promptForAgent,
                                      displayParts: displayParts,

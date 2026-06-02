@@ -463,11 +463,11 @@ private struct ProjectSchedulerView: View {
                 } else {
                     VStack(spacing: 6) {
                         ForEach(completedTasks) { task in
+                            let linkedSession = task.sessionId.flatMap { store.session($0) }
                             ProjectSchedulerCompletedTaskRow(
                                 task: task,
-                                headline: task.sessionId
-                                    .flatMap { store.session($0) }
-                                    .map { store.sessionHeadline($0) },
+                                headline: linkedSession.map { store.sessionHeadline($0) },
+                                canOpenSession: linkedSession?.isArchived == false,
                                 onOpen: {
                                     store.openSchedulerTaskSession(task.id, projectId: project.id)
                                 }
@@ -2003,6 +2003,7 @@ private struct ProjectSchedulerSessionRecapRow: View {
 private struct ProjectSchedulerCompletedTaskRow: View {
     let task: ProjectSchedulerTask
     let headline: String?
+    let canOpenSession: Bool
     var onOpen: () -> Void
 
     var body: some View {
@@ -2024,7 +2025,7 @@ private struct ProjectSchedulerCompletedTaskRow: View {
             Text(ProjectSchedulerView.relative(task.updatedAt))
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-            if task.sessionId != nil {
+            if canOpenSession {
                 Button {
                     onOpen()
                 } label: {
