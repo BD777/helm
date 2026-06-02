@@ -29,7 +29,9 @@ struct MessageListView: View {
                     }
                 }
             }
-            .animation(nil)
+            .transaction { transaction in
+                transaction.animation = nil
+            }
             .padding(.vertical, 24)
             .background(
                 ScrollViewResolver { scrollView in
