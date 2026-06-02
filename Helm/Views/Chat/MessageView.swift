@@ -843,34 +843,140 @@ private func isWorkingPlaceholder(_ message: Message) -> Bool {
 struct MessageView: View {
     let message: Message
     var renderMarkdown: Bool = true
+    @State private var isHovering = false
 
     var body: some View {
-        MessagePartListView(parts: message.parts,
-                            spacing: 6,
-                            renderMarkdown: renderMarkdown)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, isUser ? 12 : 0)
-        .padding(.vertical, isUser ? 8 : 0)
-        .background(
-            isUser
-            ? RoundedRectangle(cornerRadius: DS.cornerRadius)
-                .fill(Color.accentColor.opacity(0.08))
-            : nil
-        )
+        VStack(alignment: .leading, spacing: 3) {
+            MessagePartListView(parts: message.parts,
+                                spacing: 6,
+                                renderMarkdown: renderMarkdown)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, isUser ? 12 : 0)
+            .padding(.vertical, isUser ? 8 : 0)
+            .background(
+                isUser
+                ? RoundedRectangle(cornerRadius: DS.cornerRadius)
+                    .fill(Color.accentColor.opacity(0.08))
+                : nil
+            )
+
+            if canCopyMarkdown {
+                HStack {
+                    Spacer(minLength: 0)
+                    CopyMarkdownButton(markdown: markdownForCopy)
+                        .opacity(isHovering ? 1 : 0)
+                        .allowsHitTesting(isHovering)
+                }
+                .frame(height: 20)
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
     }
 
     private var isUser: Bool {
         if case .user = message.role { return true }
         return false
     }
+
+    private var markdownForCopy: String {
+        message.parts.markdownSourceForCopy()
+    }
+
+    private var canCopyMarkdown: Bool {
+        !markdownForCopy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+private struct CopyMarkdownButton: View {
+    let markdown: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(markdown, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(copied ? "Copied" : "Copy Markdown")
+        .accessibilityLabel(copied ? "Copied Markdown" : "Copy Markdown")
+    }
+}
+
+private extension Array where Element == Part {
+    func markdownSourceForCopy() -> String {
+        var output = ""
+        var previousWasText = false
+
+        func appendBlock(_ block: String) {
+            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            if !output.isEmpty {
+                output += "\n\n"
+            }
+            output += trimmed
+            previousWasText = false
+        }
+
+        for part in self {
+            switch part {
+            case .text(let text):
+                guard !text.isEmpty else { continue }
+                output += text
+                previousWasText = true
+            case .skillText(let segments):
+                let text = segments.map(\.markdownSourceForCopy).joined()
+                if previousWasText, !output.isEmpty {
+                    output += text
+                    previousWasText = true
+                } else {
+                    appendBlock(text)
+                }
+            case .image(let url):
+                appendBlock("![\(url.lastPathComponent)](\(url.path))")
+            case .toolCall:
+                continue
+            }
+        }
+
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension SkillTextSegment {
+    var markdownSourceForCopy: String {
+        if let text {
+            return text
+        }
+        if let skillName, !skillName.isEmpty {
+            return "$\(skillName)"
+        }
+        return ""
+    }
 }
 
 private enum MessagePartDisplayItem: Identifiable {
+    case textGroup(id: String, text: String)
     case single(id: String, part: Part)
     case toolGroup(id: String, calls: [ToolCall])
 
     var id: String {
         switch self {
+        case .textGroup(let id, _):
+            return id
         case .single(let id, _), .toolGroup(let id, _):
             return id
         }
@@ -900,6 +1006,8 @@ private struct MessagePartListView: View {
     @ViewBuilder
     private func itemView(_ item: MessagePartDisplayItem) -> some View {
         switch item {
+        case .textGroup(_, let text):
+            textView(text)
         case .single(_, let part):
             partView(part)
         case .toolGroup(_, let calls):
@@ -917,13 +1025,7 @@ private struct MessagePartListView: View {
     private func partView(_ part: Part) -> some View {
         switch part {
         case .text(let s):
-            if renderMarkdown {
-                MarkdownishText(s)
-                    .padding(.top, 2)
-            } else {
-                PlainStreamingText(s)
-                    .padding(.top, 2)
-            }
+            textView(s)
         case .skillText(let segments):
             InlineSkillText(segments: segments)
                 .padding(.top, 2)
@@ -935,11 +1037,34 @@ private struct MessagePartListView: View {
                 .padding(.vertical, 4)
         }
     }
+
+    @ViewBuilder
+    private func textView(_ text: String) -> some View {
+        if renderMarkdown {
+            MarkdownishText(text)
+                .padding(.top, 2)
+        } else {
+            PlainStreamingText(text)
+                .padding(.top, 2)
+        }
+    }
 }
 
 private func groupConsecutiveToolCalls(_ parts: [Part]) -> [MessagePartDisplayItem] {
     var out: [MessagePartDisplayItem] = []
     var pendingCalls: [(offset: Int, call: ToolCall)] = []
+    var pendingText: [(offset: Int, text: String)] = []
+
+    func flushPendingText() {
+        guard !pendingText.isEmpty else { return }
+        let text = pendingText.map(\.text).joined()
+        let firstOffset = pendingText.first?.offset ?? 0
+        out.append(.textGroup(
+            id: "txt-\(firstOffset)-\(text.hashValue)",
+            text: text
+        ))
+        pendingText = []
+    }
 
     func flushPendingCalls() {
         guard !pendingCalls.isEmpty else { return }
@@ -960,13 +1085,19 @@ private func groupConsecutiveToolCalls(_ parts: [Part]) -> [MessagePartDisplayIt
 
     for (offset, part) in parts.enumerated() {
         switch part {
+        case .text(let text):
+            flushPendingCalls()
+            pendingText.append((offset, text))
         case .toolCall(let call):
+            flushPendingText()
             pendingCalls.append((offset, call))
         default:
+            flushPendingText()
             flushPendingCalls()
             out.append(.single(id: "p-\(offset)-\(part.id)", part: part))
         }
     }
+    flushPendingText()
     flushPendingCalls()
     return out
 }
@@ -1422,28 +1553,279 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
 /// Full block-level Markdown renderer for chat content.
 struct MarkdownishText: View {
     let raw: String
+    @Environment(\.colorScheme) private var colorScheme
+
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        Markdown(raw)
-            .markdownTheme(.helmChat)
-            .markdownImageProvider(HelmMarkdownImageProvider())
-            .markdownInlineImageProvider(HelmMarkdownInlineImageProvider())
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        SelectableRichText(raw: raw,
+                           renderMarkdown: true,
+                           colorScheme: colorScheme)
     }
 }
 
 private struct PlainStreamingText: View {
     let raw: String
+    @Environment(\.colorScheme) private var colorScheme
+
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        Text(raw)
-            .font(.system(size: 14))
-            .foregroundStyle(.primary)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        SelectableRichText(raw: raw,
+                           renderMarkdown: false,
+                           colorScheme: colorScheme)
+    }
+}
+
+private struct SelectableRichText: NSViewRepresentable {
+    let raw: String
+    let renderMarkdown: Bool
+    let colorScheme: ColorScheme
+
+    func makeNSView(context: Context) -> ChatTextView {
+        let tv = ChatTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = true
+        tv.allowsUndo = false
+        tv.drawsBackground = false
+        tv.backgroundColor = .clear
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.linkTextAttributes = [
+            .foregroundColor: NSColor.controlAccentColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+        tv.textStorage?.setAttributedString(attributedText())
+        return tv
+    }
+
+    func updateNSView(_ tv: ChatTextView, context: Context) {
+        let signature = "\(renderMarkdown)-\(colorScheme)-\(raw.hashValue)"
+        guard context.coordinator.signature != signature else { return }
+        context.coordinator.signature = signature
+        let selectedRange = tv.selectedRange()
+        tv.textStorage?.setAttributedString(attributedText())
+        tv.selectedRange = NSRange(location: min(selectedRange.location, tv.string.utf16.count),
+                                   length: 0)
+        tv.invalidateIntrinsicContentSize()
+        tv.needsLayout = true
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ChatTextView, context: Context) -> CGSize? {
+        guard let lm = nsView.layoutManager,
+              let tc = nsView.textContainer
+        else { return nil }
+        let width: CGFloat = {
+            if let w = proposal.width, w.isFinite, w > 0 { return w }
+            if nsView.bounds.width > 0 { return nsView.bounds.width }
+            return DS.messageMaxWidth
+        }()
+        if tc.size.width != width {
+            tc.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        }
+        lm.ensureLayout(for: tc)
+        let used = lm.usedRect(for: tc)
+        let fallbackHeight = lm.defaultLineHeight(for: ChatMarkdownAttributedRenderer.baseFont)
+        return CGSize(width: width, height: max(ceil(used.height), fallbackHeight))
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    private func attributedText() -> NSAttributedString {
+        if renderMarkdown {
+            return ChatMarkdownAttributedRenderer.markdown(raw, colorScheme: colorScheme)
+        }
+        return ChatMarkdownAttributedRenderer.plain(raw, colorScheme: colorScheme)
+    }
+
+    final class Coordinator {
+        var signature: String?
+    }
+}
+
+private final class ChatTextView: NSTextView {
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .iBeam)
+    }
+}
+
+private enum ChatMarkdownAttributedRenderer {
+    static let baseFont = NSFont.systemFont(ofSize: 13.5)
+
+    static func plain(_ raw: String, colorScheme: ColorScheme) -> NSAttributedString {
+        NSAttributedString(string: raw, attributes: [
+            .font: baseFont,
+            .foregroundColor: labelColor(for: colorScheme),
+            .paragraphStyle: paragraphStyle,
+        ])
+    }
+
+    static func markdown(_ raw: String, colorScheme: ColorScheme) -> NSAttributedString {
+        let attributed: NSMutableAttributedString
+        do {
+            let parsed = try AttributedString(
+                markdown: raw,
+                options: .init(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                    failurePolicy: .returnPartiallyParsedIfPossible
+                )
+            )
+            attributed = NSMutableAttributedString(attributedString: NSAttributedString(parsed))
+        } catch {
+            attributed = NSMutableAttributedString(string: raw)
+        }
+
+        applyBaseStyle(to: attributed, colorScheme: colorScheme)
+        applyHeadingStyle(to: attributed, colorScheme: colorScheme)
+        applyInlineMarkdownStyle(to: attributed, colorScheme: colorScheme)
+        return attributed
+    }
+
+    private static var paragraphStyle: NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 2.2
+        style.paragraphSpacing = 6
+        return style
+    }
+
+    private static func applyBaseStyle(to attributed: NSMutableAttributedString,
+                                       colorScheme: ColorScheme) {
+        guard attributed.length > 0 else { return }
+        attributed.addAttributes([
+            .font: baseFont,
+            .foregroundColor: labelColor(for: colorScheme),
+            .paragraphStyle: paragraphStyle,
+        ], range: NSRange(location: 0, length: attributed.length))
+    }
+
+    private static func applyHeadingStyle(to attributed: NSMutableAttributedString,
+                                          colorScheme: ColorScheme) {
+        let value = attributed.string as NSString
+        var lineRanges: [NSRange] = []
+        value.enumerateSubstrings(
+            in: NSRange(location: 0, length: value.length),
+            options: [.byLines, .substringNotRequired]
+        ) { _, range, _, _ in
+            lineRanges.append(range)
+        }
+
+        for range in lineRanges.reversed() {
+            guard range.length >= 3 else { continue }
+            let line = value.substring(with: range)
+            let hashes = line.prefix { $0 == "#" }.count
+            guard (1...4).contains(hashes),
+                  line.dropFirst(hashes).first == " "
+            else { continue }
+
+            attributed.deleteCharacters(in: NSRange(location: range.location, length: hashes + 1))
+            let contentRange = NSRange(location: range.location,
+                                       length: range.length - hashes - 1)
+            guard contentRange.length > 0 else { continue }
+            attributed.addAttributes([
+                .font: headingFont(level: hashes),
+                .foregroundColor: labelColor(for: colorScheme),
+            ], range: contentRange)
+        }
+    }
+
+    private static func applyInlineMarkdownStyle(to attributed: NSMutableAttributedString,
+                                                 colorScheme: ColorScheme) {
+        guard attributed.length > 0 else { return }
+
+        attributed.enumerateAttribute(
+            .inlinePresentationIntent,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            let rawValue = inlineIntentRawValue(value)
+            guard rawValue != 0 else { return }
+
+            let isEmphasized = rawValue & 1 != 0
+            let isStrong = rawValue & 2 != 0
+            let isCode = rawValue & 4 != 0
+            let isStrikethrough = rawValue & 32 != 0
+
+            if isCode {
+                attributed.addAttributes([
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                    .backgroundColor: codeBackground(for: colorScheme),
+                    .foregroundColor: labelColor(for: colorScheme),
+                ], range: range)
+            } else if isStrong || isEmphasized {
+                attributed.addAttribute(.font,
+                                        value: inlineFont(strong: isStrong,
+                                                          emphasized: isEmphasized),
+                                        range: range)
+            }
+            if isStrikethrough {
+                attributed.addAttribute(.strikethroughStyle,
+                                        value: NSUnderlineStyle.single.rawValue,
+                                        range: range)
+            }
+        }
+
+        attributed.enumerateAttribute(
+            .link,
+            in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            guard value != nil else { return }
+            attributed.addAttributes([
+                .foregroundColor: NSColor.controlAccentColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ], range: range)
+        }
+    }
+
+    private static func inlineIntentRawValue(_ value: Any?) -> Int {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let value {
+            return Mirror(reflecting: value).descendant("rawValue") as? Int ?? 0
+        }
+        return 0
+    }
+
+    private static func inlineFont(strong: Bool, emphasized: Bool) -> NSFont {
+        var traits: NSFontTraitMask = []
+        if strong {
+            traits.insert(.boldFontMask)
+        }
+        if emphasized {
+            traits.insert(.italicFontMask)
+        }
+        return NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
+    }
+
+    private static func headingFont(level: Int) -> NSFont {
+        let size: CGFloat
+        switch level {
+        case 1: size = 18
+        case 2: size = 16.2
+        case 3: size = 14.6
+        default: size = 13.5
+        }
+        return NSFont.systemFont(ofSize: size, weight: .semibold)
+    }
+
+    private static func labelColor(for colorScheme: ColorScheme) -> NSColor {
+        colorScheme == .dark
+        ? NSColor(calibratedWhite: 0.92, alpha: 1)
+        : NSColor(calibratedWhite: 0.08, alpha: 1)
+    }
+
+    private static func codeBackground(for colorScheme: ColorScheme) -> NSColor {
+        colorScheme == .dark
+        ? NSColor(calibratedWhite: 0.22, alpha: 1)
+        : NSColor(calibratedWhite: 0.92, alpha: 1)
     }
 }
 
