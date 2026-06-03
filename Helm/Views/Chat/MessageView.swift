@@ -1189,7 +1189,7 @@ private struct ThinkingBlock: View {
     }
 
     private var turnEndedAt: Date? {
-        messages.lazy.compactMap(\.endedAt).first
+        messages.lazy.compactMap(\.endedAt).max()
     }
 
     private var turnTokenUsage: Int {
@@ -1294,23 +1294,33 @@ private struct ThinkingBlock: View {
     }
 
     private func headerContent(showChevron: Bool) -> some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { context in
-            HStack(spacing: 6) {
-                if isRunning {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.72)
+        Group {
+            if isRunning {
+                TimelineView(.periodic(from: Date(), by: 1)) { context in
+                    headerRow(for: context.date, showChevron: showChevron)
                 }
-                Text(label(for: context.date))
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.tertiary)
-                if showChevron {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 0)
+            } else {
+                headerRow(for: turnEndedAt ?? Date(), showChevron: showChevron)
             }
+        }
+    }
+
+    private func headerRow(for date: Date, showChevron: Bool) -> some View {
+        HStack(spacing: 6) {
+            if isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.72)
+            }
+            Text(label(for: date))
+                .font(.system(size: 12.5))
+                .foregroundStyle(.tertiary)
+            if showChevron {
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
         }
     }
 }
@@ -1593,19 +1603,311 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
 }
 
 /// Full block-level Markdown renderer for chat content.
+///
+/// Uses a single AppKit `NSTextView` (via `NSAttributedString` built from the
+/// Markdown source) so drag selection works across wrapped lines, paragraphs,
+/// list items and headings. SwiftUI's `.textSelection(.enabled)` only works
+/// within a single `Text` view, which is why MarkdownUI-backed rendering kept
+/// selection stuck inside one logical block.
 struct MarkdownishText: View {
     let raw: String
 
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        Markdown(MarkdownDisplaySanitizer.sanitize(raw))
-            .markdownTheme(.helmChat)
-            .markdownImageProvider(HelmMarkdownImageProvider())
-            .markdownInlineImageProvider(HelmMarkdownInlineImageProvider())
-            .textSelection(.enabled)
+        SelectableMarkdownTextView(markdown: MarkdownDisplaySanitizer.sanitize(raw))
             .fixedSize(horizontal: false, vertical: true)
-            .overlay(IBeamCursorOverlay())
+    }
+}
+
+/// Plain (non-markdown) streaming text rendered inside a single selectable
+/// AppKit text view so multi-line drag selection works correctly.
+private struct PlainStreamingText: View {
+    let raw: String
+
+    init(_ raw: String) { self.raw = raw }
+
+    var body: some View {
+        SelectableMarkdownTextView(markdown: raw, treatAsPlainText: true)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// AppKit-backed text view that renders Markdown (or plain text) with full
+/// continuous multi-line / cross-paragraph selection support.
+private struct SelectableMarkdownTextView: NSViewRepresentable {
+    let markdown: String
+    var treatAsPlainText: Bool = false
+
+    func makeNSView(context: Context) -> NSTextView {
+        let tv = NonEditableTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = true
+        tv.drawsBackground = false
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.linkTextAttributes = [
+            .foregroundColor: NSColor.controlAccentColor,
+            .underlineStyle: NSNumber(value: NSUnderlineStyle.single.rawValue)
+        ]
+        tv.importsGraphics = true
+        updateContent(in: tv)
+        return tv
+    }
+
+    func updateNSView(_ nsView: NSTextView, context: Context) {
+        updateContent(in: nsView)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
+        guard let lm = nsView.layoutManager, let tc = nsView.textContainer else { return nil }
+        let width: CGFloat = {
+            if let w = proposal.width, w.isFinite, w > 0 { return w }
+            if nsView.bounds.width > 0 { return nsView.bounds.width }
+            return 600
+        }()
+        if tc.size.width != width {
+            tc.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+        }
+        lm.ensureLayout(for: tc)
+        let used = lm.usedRect(for: tc)
+        let minHeight = lm.defaultLineHeight(for: ChatTextStyler.baseFont)
+        return CGSize(width: width, height: max(minHeight, ceil(used.height)))
+    }
+
+    private func updateContent(in tv: NSTextView) {
+        let attributed: NSAttributedString = {
+            if treatAsPlainText {
+                return ChatTextStyler.plainTextAttributedString(markdown)
+            }
+            return ChatTextStyler.attributedString(fromMarkdown: markdown)
+        }()
+        tv.textStorage?.setAttributedString(attributed)
+    }
+}
+
+/// An `NSTextView` subclass that forces an I-beam cursor over its entire
+/// bounds and opens clicked links in the default browser instead of trying to
+/// edit them inline.
+private final class NonEditableTextView: NSTextView {
+    override var isFlipped: Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .iBeam)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        let range = NSRange(location: 0, length: textStorage?.length ?? 0)
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        if let storage = textStorage,
+           range.contains(index),
+           let link = storage.attribute(.link, at: index, longestEffectiveRange: &effectiveRange, in: range) {
+            if let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) {
+                NSWorkspace.shared.open(url)
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+/// Converts Markdown (and plain text) into rich `NSAttributedString` values
+/// that match Helm's chat visual style. The pipeline uses cmark-gfm (via
+/// MarkdownUI) for HTML generation and AppKit's HTML importer for the
+/// initial styling pass, then normalises font sizes / colors to match the
+/// rest of the chat surface.
+private enum ChatTextStyler {
+    static let baseFont = NSFont.systemFont(ofSize: 13.5)
+    static let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    static func plainTextAttributedString(_ text: String) -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 0.18 * baseFont.pointSize
+        para.lineBreakMode = .byWordWrapping
+        return NSAttributedString(string: text, attributes: [
+            .font: baseFont,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: para
+        ])
+    }
+
+    static func attributedString(fromMarkdown markdown: String) -> NSAttributedString {
+        let html = renderedHTML(from: markdown)
+        guard let data = html.data(using: .utf8) else {
+            return plainTextAttributedString(markdown)
+        }
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue
+        ]
+        guard let loaded = try? NSMutableAttributedString(data: data, options: options, documentAttributes: nil) else {
+            return plainTextAttributedString(markdown)
+        }
+        normalise(loaded)
+        return loaded
+    }
+
+    // MARK: - Helpers
+
+    private static func renderedHTML(from markdown: String) -> String {
+        // MarkdownUI ships a cmark-gfm parser; going through HTML lets us
+        // keep GFM support (tables, task lists, strikethrough, autolinks)
+        // without pulling in a separate parser.
+        let content = MarkdownContent(markdown)
+        let html = content.renderHTML()
+        if html.isEmpty { return "" }
+
+        // Wrap the fragment in a full HTML document with a base style so the
+        // AppKit HTML importer has a well-defined starting point. We still
+        // run a normalisation pass afterwards to line up with Helm's metrics.
+        let escapedBaseColor = "#000000" // colour is fixed up later; this is a placeholder
+        let style = """
+        body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; \
+        font-size: 13.5px; color: \(escapedBaseColor); line-height: 1.45; } \
+        pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
+        font-size: 12px; background: rgba(127,127,127,0.12); padding: 0 0.25em; \
+        border-radius: 3px; } \
+        pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; } \
+        pre code { background: transparent; padding: 0; } \
+        h1 { font-size: 18px; font-weight: 600; margin: 12px 0 8px; } \
+        h2 { font-size: 16px; font-weight: 600; margin: 12px 0 8px; } \
+        h3 { font-size: 14.5px; font-weight: 600; margin: 10px 0 6px; } \
+        h4 { font-size: 13.5px; font-weight: 600; margin: 8px 0 5px; } \
+        blockquote { margin: 2px 0 8px; padding: 2px 0 2px 10px; \
+        border-left: 3px solid rgba(0,0,0,0.25); color: rgba(0,0,0,0.55); } \
+        p { margin: 0 0 8px; } \
+        ul, ol { margin: 0 0 8px; padding-left: 22px; } \
+        li { margin: 2px 0; } \
+        table { border-collapse: collapse; margin: 2px 0 10px; } \
+        th, td { border: 1px solid rgba(127,127,127,0.35); padding: 5px 10px; font-size: 13px; } \
+        th { background: rgba(127,127,127,0.08); font-weight: 600; } \
+        hr { border: none; border-top: 1px solid rgba(127,127,127,0.35); margin: 10px 0; }
+        """
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\(style)</style></head><body>\(html)</body></html>"
+    }
+
+    /// Walk every run and make fonts / colours consistent with Helm's chat
+    /// appearance. AppKit's HTML importer picks arbitrary defaults, so we
+    /// explicitly clamp sizes, swap in system fonts and honour the current
+    /// effective appearance via `NSColor.labelColor`/`.secondaryLabelColor`.
+    private static func normalise(_ astr: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: astr.length)
+        astr.enumerateAttributes(in: full, options: []) { attrs, range, _ in
+            var updated = attrs
+            var changed = false
+
+            // Font: keep monospaced runs as monospaced; everything else uses
+            // the chat base font. Preserve bold / italic traits and clamp size
+            // to a sensible range so headings stay readable.
+            if let currentFont = updated[.font] as? NSFont {
+                let isMono = currentFont.fontDescriptor.symbolicTraits.contains(.monoSpace)
+                    || currentFont.familyName?.lowercased().contains("mono") ?? false
+                var traits = currentFont.fontDescriptor.symbolicTraits
+                traits.remove(.monoSpace) // trait doesn't combine cleanly with NSFont()
+                var size = currentFont.pointSize
+                if size < 10 { size = 11 }
+                if size > 24 { size = 24 }
+                // Heuristic: if HTML gave us a size noticeably larger than
+                // base, it is probably a heading — preserve the bump.
+                let headingScale: CGFloat = size > baseFont.pointSize + 0.5
+                    ? size / 16.0 * 1.0
+                    : 1.0
+                let targetSize = max(baseFont.pointSize, min(size, baseFont.pointSize * headingScale + 4))
+
+                let base: NSFont = isMono ? monoFont : baseFont
+                var newFont: NSFont
+                if traits.contains(.bold) && traits.contains(.italic) {
+                    newFont = NSFontManager.shared.convert(
+                        NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask),
+                        toHaveTrait: .italicFontMask
+                    )
+                } else if traits.contains(.bold) {
+                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+                } else if traits.contains(.italic) {
+                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
+                } else {
+                    newFont = base
+                }
+                if abs(newFont.pointSize - targetSize) > 0.25,
+                   let resized = NSFont(descriptor: newFont.fontDescriptor, size: targetSize) {
+                    newFont = resized
+                }
+                if newFont != currentFont {
+                    updated[.font] = newFont
+                    changed = true
+                }
+            } else {
+                updated[.font] = baseFont
+                changed = true
+            }
+
+            // Colour: links keep accent; everything else falls back to the
+            // current effective foreground. We specifically do NOT use an
+            // absolute `NSColor.black` so dark mode stays readable.
+            if updated[.link] != nil {
+                let accent = NSColor.controlAccentColor
+                let underline = NSNumber(value: NSUnderlineStyle.single.rawValue)
+                if updated[.foregroundColor] as? NSColor != accent
+                    || (updated[.underlineStyle] as? NSNumber) != underline {
+                    updated[.foregroundColor] = accent
+                    updated[.underlineStyle] = underline
+                    changed = true
+                }
+            } else {
+                // Always map HTML-injected absolute colours to the adaptive
+                // label colour family so dark mode stays readable. Blockquote
+                // text from the HTML pipeline tends to render as a mid-gray;
+                // detect those via brightness and promote to `.secondaryLabel`.
+                let existingColor = updated[.foregroundColor] as? NSColor
+                let brightness: CGFloat
+                if let existing = existingColor {
+                    if let rgb = existing.usingColorSpace(.sRGB) {
+                        brightness = rgb.brightnessComponent
+                    } else if let gray = existing.usingColorSpace(.genericGray) {
+                        brightness = gray.whiteComponent
+                    } else {
+                        brightness = 0.5
+                    }
+                } else {
+                    brightness = 0.0
+                }
+                let target: NSColor = brightness < 0.55
+                    ? NSColor.labelColor
+                    : NSColor.secondaryLabelColor
+                if existingColor != target {
+                    updated[.foregroundColor] = target
+                    changed = true
+                }
+            }
+
+            // Line height — bump leading slightly for readability, matching
+            // the SwiftUI `.relativeLineSpacing(.em(0.18))` used previously.
+            if let para = (updated[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
+                let lineHeight = baseFont.pointSize * 1.18
+                if para.minimumLineHeight < lineHeight * 0.9 {
+                    para.minimumLineHeight = lineHeight
+                    para.maximumLineHeight = lineHeight
+                    updated[.paragraphStyle] = para
+                    changed = true
+                }
+            }
+
+            // Strikethrough / underline already set by the HTML importer —
+            // keep them as long as the values aren't `nil` placeholders.
+
+            if changed {
+                astr.setAttributes(updated, range: range)
+            }
+        }
     }
 }
 
@@ -1804,375 +2106,4 @@ private enum MarkdownDisplaySanitizer {
 
         return !slashCount.isMultiple(of: 2)
     }
-}
-
-private struct PlainStreamingText: View {
-    let raw: String
-
-    init(_ raw: String) { self.raw = raw }
-
-    var body: some View {
-        Text(raw)
-            .font(.system(size: 14))
-            .foregroundStyle(.primary)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .overlay(IBeamCursorOverlay())
-    }
-}
-
-private struct IBeamCursorOverlay: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        CursorOverlayView()
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    /// An overlay NSView that forces the I-beam cursor whenever the pointer
-    /// is inside its bounds. Unlike `resetCursorRects` (which is shadowed by
-    /// any descendant NSView — notably MarkdownUI's link/text views), a
-    /// tracking-area-based approach re-applies the cursor on every
-    /// `mouseMoved`, so subviews cannot starve it. Hit testing explicitly
-    /// returns nil so text selection and link clicks pass through unimpeded.
-    private final class CursorOverlayView: NSView {
-        private var trackingArea: NSTrackingArea?
-        private var cursorPushed = false
-
-        override var isFlipped: Bool { true }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            installTrackingAreaIfNeeded()
-        }
-
-        override func viewDidMoveToSuperview() {
-            super.viewDidMoveToSuperview()
-            installTrackingAreaIfNeeded()
-        }
-
-        override func layout() {
-            super.layout()
-            installTrackingAreaIfNeeded()
-        }
-
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            // Never claim events — let the text underneath handle selection/links.
-            nil
-        }
-
-        override func resetCursorRects() {
-            super.resetCursorRects()
-            addCursorRect(bounds, cursor: .iBeam)
-        }
-
-        private func installTrackingAreaIfNeeded() {
-            if let trackingArea, trackingArea.rect == bounds { return }
-            if let trackingArea { removeTrackingArea(trackingArea) }
-            let area = NSTrackingArea(
-                rect: bounds,
-                options: [.mouseMoved, .mouseEnteredAndExited,
-                          .activeAlways, .inVisibleRect],
-                owner: self,
-                userInfo: nil
-            )
-            addTrackingArea(area)
-            trackingArea = area
-        }
-
-        override func mouseEntered(with event: NSEvent) {
-            pushCursor()
-        }
-
-        override func mouseMoved(with event: NSEvent) {
-            pushCursor()
-        }
-
-        override func mouseExited(with event: NSEvent) {
-            popCursor()
-        }
-
-        private func pushCursor() {
-            guard !cursorPushed else { return }
-            NSCursor.iBeam.push()
-            cursorPushed = true
-        }
-
-        private func popCursor() {
-            guard cursorPushed else { return }
-            NSCursor.iBeam.pop()
-            cursorPushed = false
-        }
-
-        deinit {
-            if cursorPushed {
-                NSCursor.iBeam.pop()
-            }
-        }
-    }
-}
-
-private struct HelmMarkdownImageProvider: ImageProvider {
-    func makeImage(url: URL?) -> some View {
-        HelmMarkdownImageView(url: url)
-    }
-}
-
-private struct HelmMarkdownImageView: View {
-    let url: URL?
-    @State private var image: NSImage?
-    @State private var didFail = false
-
-    var body: some View {
-        Group {
-            if let image {
-                let size = fittedDisplaySize(for: image)
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: size.width, height: size.height)
-                    .background(Color.helmChatBg)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.helmBorderStrong, lineWidth: 0.5)
-                    )
-            } else if didFail {
-                imageUnavailableView
-            } else {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 36, height: 28)
-            }
-        }
-        .task(id: url?.absoluteString ?? "") {
-            await loadImage()
-        }
-    }
-
-    private var imageUnavailableView: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "photo")
-                .foregroundStyle(.tertiary)
-            Text("image unavailable")
-                .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.1))
-        )
-    }
-
-    @MainActor
-    private func loadImage() async {
-        image = nil
-        didFail = false
-
-        guard let url else {
-            didFail = true
-            return
-        }
-
-        if let fileURL = HelmMarkdownImageURL.localFileURL(from: url) {
-            image = NSImage(contentsOf: fileURL)
-            didFail = image == nil
-            return
-        }
-
-        guard HelmMarkdownImageURL.isNetworkURL(url) else {
-            didFail = true
-            return
-        }
-
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            image = NSImage(data: data)
-            didFail = image == nil
-        } catch {
-            didFail = true
-        }
-    }
-
-    private func fittedDisplaySize(for image: NSImage) -> CGSize {
-        let rawSize = bitmapSize(for: image)
-        guard rawSize.width > 0, rawSize.height > 0 else {
-            return CGSize(width: 240, height: 160)
-        }
-
-        let maxSize = CGSize(width: 420, height: 320)
-        let scale = min(maxSize.width / rawSize.width,
-                        maxSize.height / rawSize.height,
-                        1)
-
-        return CGSize(width: max(1, floor(rawSize.width * scale)),
-                      height: max(1, floor(rawSize.height * scale)))
-    }
-
-    private func bitmapSize(for image: NSImage) -> CGSize {
-        if let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first {
-            return CGSize(width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
-        }
-        return image.size
-    }
-}
-
-private struct HelmMarkdownInlineImageProvider: InlineImageProvider {
-    func image(with url: URL, label: String) async throws -> Image {
-        if let fileURL = HelmMarkdownImageURL.localFileURL(from: url),
-           let image = NSImage(contentsOf: fileURL) {
-            return Image(nsImage: image)
-        }
-
-        guard HelmMarkdownImageURL.isNetworkURL(url) else {
-            throw URLError(.unsupportedURL)
-        }
-
-        let (data, _) = try await URLSession.shared.data(from: url)
-        guard let image = NSImage(data: data) else {
-            throw URLError(.cannotDecodeContentData)
-        }
-        return Image(nsImage: image)
-    }
-}
-
-private enum HelmMarkdownImageURL {
-    static func localFileURL(from url: URL) -> URL? {
-        if url.isFileURL {
-            return url
-        }
-        if url.scheme == nil, url.path.hasPrefix("/") {
-            return URL(fileURLWithPath: url.path)
-        }
-        return nil
-    }
-
-    static func isNetworkURL(_ url: URL) -> Bool {
-        let scheme = url.scheme?.lowercased()
-        return scheme == "http" || scheme == "https"
-    }
-}
-
-private extension Theme {
-    static let helmChat = Theme.gitHub
-        .text {
-            ForegroundColor(.primary)
-            BackgroundColor(nil)
-            FontSize(13.5)
-        }
-        .code {
-            FontFamilyVariant(.monospaced)
-            FontSize(.em(0.88))
-            ForegroundColor(.primary)
-            BackgroundColor(Color.secondary.opacity(0.12))
-        }
-        .strong {
-            FontWeight(.semibold)
-        }
-        .link {
-            ForegroundColor(.accentColor)
-        }
-        .heading1 { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(1.35))
-                }
-                .markdownMargin(top: 12, bottom: 8)
-        }
-        .heading2 { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(1.2))
-                }
-                .markdownMargin(top: 12, bottom: 8)
-        }
-        .heading3 { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                    FontSize(.em(1.08))
-                }
-                .markdownMargin(top: 10, bottom: 6)
-        }
-        .heading4 { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    FontWeight(.semibold)
-                }
-                .markdownMargin(top: 8, bottom: 5)
-        }
-        .paragraph { configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.18))
-                .markdownMargin(top: 0, bottom: 8)
-        }
-        .blockquote { configuration in
-            HStack(spacing: 0) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.helmBorderStrong.opacity(0.75))
-                    .relativeFrame(width: .em(0.18))
-                configuration.label
-                    .markdownTextStyle {
-                        ForegroundColor(.secondary)
-                    }
-                    .relativePadding(.leading, length: .em(0.75))
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .markdownMargin(top: 2, bottom: 8)
-        }
-        .codeBlock { configuration in
-            ScrollView(.horizontal, showsIndicators: false) {
-                configuration.label
-                    .fixedSize(horizontal: true, vertical: true)
-                    .relativeLineSpacing(.em(0.18))
-                    .markdownTextStyle {
-                        FontFamilyVariant(.monospaced)
-                        FontSize(.em(0.88))
-                        ForegroundColor(.primary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-            }
-            .background(Color.secondary.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
-                    .stroke(Color.helmBorder, lineWidth: 1)
-            )
-            .markdownMargin(top: 2, bottom: 10)
-        }
-        .listItem { configuration in
-            configuration.label
-                .markdownMargin(top: .em(0.18))
-        }
-        .table { configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .markdownTableBorderStyle(.init(color: Color.helmBorderStrong.opacity(0.75)))
-                .markdownTableBackgroundStyle(
-                    .alternatingRows(Color.clear, Color.secondary.opacity(0.06))
-                )
-                .markdownMargin(top: 2, bottom: 10)
-        }
-        .tableCell { configuration in
-            configuration.label
-                .markdownTextStyle {
-                    if configuration.row == 0 {
-                        FontWeight(.semibold)
-                    }
-                    BackgroundColor(nil)
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 10)
-        }
-        .image { configuration in
-            configuration.label
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .markdownMargin(top: 4, bottom: 10)
-        }
 }
