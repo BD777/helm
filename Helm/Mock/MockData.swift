@@ -3096,7 +3096,7 @@ else:
                                    preUserEvents: [SessionEvent],
                                    sessionIndex sIdx: Int) -> Bool {
         let sessionId = sessions[sIdx].id
-        guard let run = activeRuns[sessionId] else { return false }
+        guard var run = activeRuns[sessionId] else { return false }
         guard run.adapter.supportsPromptAppend else {
             appendError(to: sIdx, "This agent cannot accept more input while a response is running.")
             return false
@@ -3109,6 +3109,26 @@ else:
             return false
         }
 
+        // Flush any text buffered for the current (pre-append) assistant
+        // message so it lands in the right row before we switch targets.
+        if !run.pendingAssistantText.isEmpty {
+            run.assistantTextFlushTask?.cancel()
+            run.assistantTextFlushTask = nil
+            let chunk = run.pendingAssistantText
+            run.pendingAssistantText = ""
+            if let mIdx = sessions[sIdx].transcript.firstIndex(where: {
+                $0.message?.id == run.assistantId
+            }), case .message(var msg) = sessions[sIdx].transcript[mIdx] {
+                msg.meta = "streaming…"
+                if case .text(let existing) = msg.parts.last {
+                    msg.parts[msg.parts.count - 1] = .text(existing + chunk)
+                } else {
+                    msg.parts.append(.text(chunk))
+                }
+                sessions[sIdx].transcript[mIdx] = .message(msg)
+            }
+        }
+
         let userMsg = Message(
             id: UUID(),
             role: .user,
@@ -3118,6 +3138,21 @@ else:
                                  fallbackText: fallbackDisplayText,
                                  attachments: attachments)
         )
+        // After the user's appended input, install a fresh assistant
+        // placeholder so subsequent streaming updates land *after* the
+        // appended turn instead of continuing the pre-append thinking block.
+        let newAssistantId = UUID()
+        let newAssistant = Message(
+            id: newAssistantId,
+            role: .assistant(meta: "thinking…"),
+            who: sessions[sIdx].transcript
+                .first(where: { $0.message?.id == run.assistantId })?
+                .message?.who ?? "",
+            meta: "thinking…",
+            parts: [],
+            startedAt: Date()
+        )
+
         let assistantIndex = sessions[sIdx].transcript.firstIndex {
             $0.message?.id == run.assistantId
         }
@@ -3125,8 +3160,14 @@ else:
         let insertedItems = preUserEvents.map(TranscriptItem.event)
             + [.event(.promptAppended(id: UUID(), appendedAt: Date()))]
             + [.message(userMsg)]
+            + [.message(newAssistant)]
         sessions[sIdx].transcript.insert(contentsOf: insertedItems, at: insertionIndex)
         sessions[sIdx].lastUpdate = "now"
+
+        // Redirect future streaming updates to the new assistant placeholder.
+        run.assistantId = newAssistantId
+        activeRuns[sessionId] = run
+
         upsertSidebarSession(for: sessions[sIdx])
         appendImageManifestEntries(sessionIndex: sIdx,
                                    userMessageId: userMsg.id,
