@@ -2017,13 +2017,27 @@ final class AppStore {
         }
     }
 
+    private static let maxConcurrentSchedulerTasks = 2
+
+    private func globalRunningSchedulerTaskCount() -> Int {
+        projectSchedulers.reduce(0) { total, state in
+            total + state.tasks.filter { task in
+                guard !schedulerTaskReferencesArchivedSession(task) else { return false }
+                return task.sessionId.map(isSessionStreaming) ?? false
+            }.count
+        }
+    }
+
     private func startRunnableSchedulerTasks(projectId: UUID) {
         let schedulerIndex = ensureSchedulerStateIndex(for: projectId)
         guard let project = projects.first(where: { $0.id == projectId }) else { return }
 
-        var startedAny = false
+        var startedCount = 0
         var attemptedTaskIds: Set<UUID> = []
         while true {
+            if globalRunningSchedulerTaskCount() + startedCount >= Self.maxConcurrentSchedulerTasks {
+                break
+            }
             guard let taskIndex = projectSchedulers[schedulerIndex].tasks.indices.first(where: { index in
                 let task = projectSchedulers[schedulerIndex].tasks[index]
                 guard task.phase == .planned,
@@ -2037,7 +2051,7 @@ final class AppStore {
             let taskId = projectSchedulers[schedulerIndex].tasks[taskIndex].id
             attemptedTaskIds.insert(taskId)
             if startSchedulerTask(taskId, projectId: projectId) {
-                startedAny = true
+                startedCount += 1
             }
         }
 
@@ -2046,7 +2060,7 @@ final class AppStore {
                                           schedulerIndex: schedulerIndex,
                                           project: project)
         }
-        if startedAny || projectSchedulers[schedulerIndex].tasks.contains(where: { $0.phase == .planned }) {
+        if startedCount > 0 || projectSchedulers[schedulerIndex].tasks.contains(where: { $0.phase == .planned }) {
             projectSchedulers[schedulerIndex].updatedAt = Date()
             scheduleStateSave()
         }
@@ -2082,6 +2096,8 @@ final class AppStore {
         } else if case .ssh(_, _, let status) = project.location,
                   !status.isConnected {
             newSummary = "Waiting for SSH connection: \(status.shortLabel)."
+        } else if globalRunningSchedulerTaskCount() >= Self.maxConcurrentSchedulerTasks {
+            newSummary = "Waiting for another worker session to finish (max \(Self.maxConcurrentSchedulerTasks) concurrent)."
         } else {
             newSummary = "Waiting to start."
         }
