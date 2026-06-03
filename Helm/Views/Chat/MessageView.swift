@@ -1057,10 +1057,7 @@ private struct MessagePartListView: View {
             partView(part)
         case .toolGroup(_, let calls):
             ToolCallGroupCard(
-                calls: calls,
-                turnStartedAt: turnStartedAt,
-                isTurnRunning: isTurnRunning,
-                turnTokenUsage: turnTokenUsage
+                calls: calls
             )
             .padding(.vertical, 4)
         }
