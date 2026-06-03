@@ -1644,14 +1644,22 @@ private struct SelectableMarkdownTextView: NSViewRepresentable {
         tv.isEditable = false
         tv.isSelectable = true
         tv.isRichText = true
+        tv.allowsUndo = false
         tv.drawsBackground = false
         tv.textContainerInset = .zero
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = true
         tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.lineBreakMode = .byWordWrapping
         tv.isHorizontallyResizable = false
         tv.isVerticallyResizable = true
         tv.autoresizingMask = [.width]
+        tv.isAutomaticLinkDetectionEnabled = false
+        tv.isAutomaticDataDetectionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
+        tv.isAutomaticSpellingCorrectionEnabled = false
         tv.linkTextAttributes = [
             .foregroundColor: NSColor.controlAccentColor,
             .underlineStyle: NSNumber(value: NSUnderlineStyle.single.rawValue)
@@ -1704,13 +1712,38 @@ private final class NonEditableTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Only intercept single clicks that land precisely on a link.
+        // Double-clicks (word selection) and drag selections always fall
+        // through to super so cross-line / cross-paragraph selection works.
+        guard event.clickCount == 1, event.type == .leftMouseDown else {
+            super.mouseDown(with: event)
+            return
+        }
+
         let point = convert(event.locationInWindow, from: nil)
-        let index = characterIndexForInsertion(at: point)
-        let range = NSRange(location: 0, length: textStorage?.length ?? 0)
+        let length = textStorage?.length ?? 0
+        guard length > 0 else {
+            super.mouseDown(with: event)
+            return
+        }
+        let glyphIndex = layoutManager?.glyphIndex(
+            for: point,
+            in: textContainer ?? NSTextContainer(),
+            fractionOfDistanceThroughGlyph: nil
+        ) ?? NSNotFound
+        guard glyphIndex != NSNotFound, glyphIndex < length else {
+            super.mouseDown(with: event)
+            return
+        }
+        let charIndex = layoutManager?.characterIndexForGlyph(at: glyphIndex) ?? glyphIndex
+        guard charIndex < length else {
+            super.mouseDown(with: event)
+            return
+        }
+        let fullRange = NSRange(location: 0, length: length)
         var effectiveRange = NSRange(location: NSNotFound, length: 0)
         if let storage = textStorage,
-           range.contains(index),
-           let link = storage.attribute(.link, at: index, longestEffectiveRange: &effectiveRange, in: range) {
+           let link = storage.attribute(.link, at: charIndex, longestEffectiveRange: &effectiveRange, in: fullRange) {
             if let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) {
                 NSWorkspace.shared.open(url)
                 return
@@ -1816,14 +1849,23 @@ private enum ChatTextStyler {
                 var size = currentFont.pointSize
                 if size < 10 { size = 11 }
                 if size > 24 { size = 24 }
-                // Heuristic: if HTML gave us a size noticeably larger than
-                // base, it is probably a heading — preserve the bump.
-                let headingScale: CGFloat = size > baseFont.pointSize + 0.5
-                    ? size / 16.0 * 1.0
-                    : 1.0
-                let targetSize = max(baseFont.pointSize, min(size, baseFont.pointSize * headingScale + 4))
-
                 let base: NSFont = isMono ? monoFont : baseFont
+                // Headings get a size bump above the base; monospace and
+                // regular body text both anchor to their respective base
+                // font sizes so inline/fenced code stays visually smaller.
+                let defaultTarget: CGFloat = isMono ? monoFont.pointSize : baseFont.pointSize
+                let targetSize: CGFloat = {
+                    if isMono {
+                        // Preserve HTML-implied size within a narrow band so
+                        // 12pt (body) and 13px (table) styles both land near 12.
+                        return max(11, min(size, 13.5))
+                    }
+                    if size > baseFont.pointSize + 0.5 {
+                        // Heuristic: a size noticeably above base is a heading.
+                        return min(size, baseFont.pointSize + 5)
+                    }
+                    return defaultTarget
+                }()
                 var newFont: NSFont
                 if traits.contains(.bold) && traits.contains(.italic) {
                     newFont = NSFontManager.shared.convert(
@@ -1866,23 +1908,34 @@ private enum ChatTextStyler {
                 // Always map HTML-injected absolute colours to the adaptive
                 // label colour family so dark mode stays readable. Blockquote
                 // text from the HTML pipeline tends to render as a mid-gray;
-                // detect those via brightness and promote to `.secondaryLabel`.
+                // detect those via alpha (semitransparent black → ~55% opacity)
+                // and promote to `.secondaryLabel`.
                 let existingColor = updated[.foregroundColor] as? NSColor
-                let brightness: CGFloat
+                let effectiveAlpha: CGFloat
+                let effectiveBrightness: CGFloat
                 if let existing = existingColor {
                     if let rgb = existing.usingColorSpace(.sRGB) {
-                        brightness = rgb.brightnessComponent
+                        effectiveBrightness = rgb.brightnessComponent
+                        effectiveAlpha = rgb.alphaComponent
                     } else if let gray = existing.usingColorSpace(.genericGray) {
-                        brightness = gray.whiteComponent
+                        effectiveBrightness = gray.whiteComponent
+                        effectiveAlpha = gray.alphaComponent
                     } else {
-                        brightness = 0.5
+                        effectiveBrightness = 0.5
+                        effectiveAlpha = 1.0
                     }
                 } else {
-                    brightness = 0.0
+                    effectiveBrightness = 0.0
+                    effectiveAlpha = 1.0
                 }
-                let target: NSColor = brightness < 0.55
-                    ? NSColor.labelColor
-                    : NSColor.secondaryLabelColor
+                // Treat a semitransparent black (brightness near 0, alpha < 1)
+                // as the HTML importer's representation of a muted blockquote
+                // or comment style → map it to secondaryLabelColor. Otherwise
+                // use brightness alone: darker == label, lighter == secondary.
+                let looksMuted = effectiveBrightness < 0.15 && effectiveAlpha < 0.95
+                let target: NSColor = (looksMuted || effectiveBrightness >= 0.55)
+                    ? NSColor.secondaryLabelColor
+                    : NSColor.labelColor
                 if existingColor != target {
                     updated[.foregroundColor] = target
                     changed = true
