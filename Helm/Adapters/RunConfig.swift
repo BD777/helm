@@ -557,9 +557,10 @@ enum CodexComputerUseMCP {
     private static let validationLock = NSLock()
     private static var validatedServerKeys: Set<String> = []
     private static var failedServerKeys: [String: String] = [:]
+    private static var inflightProbeKeys: Set<String> = []
 
     static func configArgs(isRemoteProject: Bool) throws -> [String] {
-        guard try attachableServer(isRemoteProject: isRemoteProject) != nil else { return [] }
+        guard try attachableServer(isRemoteProject: isRemoteProject, allowAsyncProbe: true) != nil else { return [] }
         guard let executable = Bundle.main.executablePath else { return [] }
 
         return [
@@ -569,18 +570,18 @@ enum CodexComputerUseMCP {
     }
 
     static func claudeConfigArgs(isRemoteProject: Bool) throws -> [String] {
-        guard try attachableServer(isRemoteProject: isRemoteProject) != nil else { return [] }
+        guard try attachableServer(isRemoteProject: isRemoteProject, allowAsyncProbe: true) != nil else { return [] }
         guard let executable = Bundle.main.executablePath else { return [] }
         return ["--mcp-config", claudeProxyConfigString(command: executable)]
     }
 
     static func localServerForProxy() throws -> (command: String, cwd: String)? {
-        guard let server = try attachableServer(isRemoteProject: false) else { return nil }
+        guard let server = try attachableServer(isRemoteProject: false, allowAsyncProbe: true) else { return nil }
         return (server.command, server.cwd)
     }
 
     static func directConfigArgsForProxy() throws -> [String] {
-        guard let server = try attachableServer(isRemoteProject: false) else { return [] }
+        guard let server = try attachableServer(isRemoteProject: false, allowAsyncProbe: true) else { return [] }
         return [
             "-c", "mcp_servers.computer-use.command=\(tomlStringLiteral(server.command))",
             "-c", "mcp_servers.computer-use.args=[\"mcp\"]",
@@ -588,7 +589,8 @@ enum CodexComputerUseMCP {
         ]
     }
 
-    private static func attachableServer(isRemoteProject: Bool) throws -> Server? {
+    private static func attachableServer(isRemoteProject: Bool,
+                                         allowAsyncProbe: Bool) throws -> Server? {
         guard !isRemoteProject else { return nil }
         guard ProcessInfo.processInfo.environment["HELM_DISABLE_CODEX_COMPUTER_USE_MCP"] != "1" else { return nil }
 
@@ -600,13 +602,21 @@ enum CodexComputerUseMCP {
             }
             return nil
         }
-        if let failure = startFailure(for: server, refresh: false) {
+        let cache = cachedState(for: server)
+        if cache.ready {
+            return server
+        }
+        if let failure = cache.failure {
             if mode == .enabled {
                 throw ResolverError.computerUseUnavailable(failure)
             }
             return nil
         }
-        return server
+        // No cache yet: don't block the caller. Kick off a background probe
+        // so the next resolve can use the result. In enabled mode we still
+        // refuse silently rather than blocking the main actor.
+        scheduleAsyncProbe(for: server)
+        return nil
     }
 
     static func diagnose(mode: CodexComputerUseMode = CodexComputerUseMode.stored(),
@@ -749,6 +759,33 @@ enum CodexComputerUseMCP {
         let failure = failedServerKeys[key]
         validationLock.unlock()
         return (ready, failure)
+    }
+
+    /// Kick off a background probe so a future `resolve` call can use the
+    /// cached result. Multiple callers racing for the same server collapse
+    /// into a single probe.
+    private static func scheduleAsyncProbe(for server: Server) {
+        let key = "\(server.command)\n\(server.cwd)"
+        validationLock.lock()
+        if validatedServerKeys.contains(key) || failedServerKeys[key] != nil || inflightProbeKeys.contains(key) {
+            validationLock.unlock()
+            return
+        }
+        inflightProbeKeys.insert(key)
+        validationLock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let failure = launchProbeFailure(for: server)
+            validationLock.lock()
+            if let failure {
+                failedServerKeys[key] = failure
+            } else {
+                validatedServerKeys.insert(key)
+                failedServerKeys.removeValue(forKey: key)
+            }
+            inflightProbeKeys.remove(key)
+            validationLock.unlock()
+        }
     }
 
     private static func startFailure(for server: Server, refresh: Bool) -> String? {
