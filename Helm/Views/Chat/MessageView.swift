@@ -874,11 +874,30 @@ struct MessageView: View {
             )
 
             if canCopyMarkdown {
-                HStack {
+                HStack(spacing: 6) {
+                    if !isUser {
+                        CopyMarkdownButton(markdown: markdownForCopy)
+                            .opacity(isHovering ? 1 : 0)
+                            .allowsHitTesting(isHovering)
+                    }
+                    if isHovering, let timestamp = displayTimestamp {
+                        Text(timestamp)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 0)
-                    CopyMarkdownButton(markdown: markdownForCopy)
-                        .opacity(isHovering ? 1 : 0)
-                        .allowsHitTesting(isHovering)
+                    if isUser {
+                        if isHovering, let timestamp = displayTimestamp {
+                            Text(timestamp)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        CopyMarkdownButton(markdown: markdownForCopy)
+                            .opacity(isHovering ? 1 : 0)
+                            .allowsHitTesting(isHovering)
+                    }
                 }
                 .frame(height: 20)
             }
@@ -902,6 +921,19 @@ struct MessageView: View {
     private var canCopyMarkdown: Bool {
         !markdownForCopy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    private var displayTimestamp: String? {
+        guard let date = message.startedAt ?? message.endedAt else { return nil }
+        return Self.timestampFormatter.string(from: date)
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale.current
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
 }
 
 private struct CopyMarkdownButton: View {
@@ -1576,7 +1608,7 @@ struct MarkdownishText: View {
             .markdownInlineImageProvider(HelmMarkdownInlineImageProvider())
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .overlay(IBeamCursorOverlay().allowsHitTesting(false))
+            .overlay(IBeamCursorOverlay())
     }
 }
 
@@ -1788,21 +1820,96 @@ private struct PlainStreamingText: View {
             .foregroundStyle(.primary)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-            .overlay(IBeamCursorOverlay().allowsHitTesting(false))
+            .overlay(IBeamCursorOverlay())
     }
 }
 
 private struct IBeamCursorOverlay: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
-        CursorView()
+        CursorOverlayView()
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 
-    private final class CursorView: NSView {
+    /// An overlay NSView that forces the I-beam cursor whenever the pointer
+    /// is inside its bounds. Unlike `resetCursorRects` (which is shadowed by
+    /// any descendant NSView — notably MarkdownUI's link/text views), a
+    /// tracking-area-based approach re-applies the cursor on every
+    /// `mouseMoved`, so subviews cannot starve it. Hit testing explicitly
+    /// returns nil so text selection and link clicks pass through unimpeded.
+    private final class CursorOverlayView: NSView {
+        private var trackingArea: NSTrackingArea?
+        private var cursorPushed = false
+
+        override var isFlipped: Bool { true }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            installTrackingAreaIfNeeded()
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            installTrackingAreaIfNeeded()
+        }
+
+        override func layout() {
+            super.layout()
+            installTrackingAreaIfNeeded()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // Never claim events — let the text underneath handle selection/links.
+            nil
+        }
+
         override func resetCursorRects() {
             super.resetCursorRects()
             addCursorRect(bounds, cursor: .iBeam)
+        }
+
+        private func installTrackingAreaIfNeeded() {
+            if let trackingArea, trackingArea.rect == bounds { return }
+            if let trackingArea { removeTrackingArea(trackingArea) }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseMoved, .mouseEnteredAndExited,
+                          .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            pushCursor()
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            pushCursor()
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            popCursor()
+        }
+
+        private func pushCursor() {
+            guard !cursorPushed else { return }
+            NSCursor.iBeam.push()
+            cursorPushed = true
+        }
+
+        private func popCursor() {
+            guard cursorPushed else { return }
+            NSCursor.iBeam.pop()
+            cursorPushed = false
+        }
+
+        deinit {
+            if cursorPushed {
+                NSCursor.iBeam.pop()
+            }
         }
     }
 }
