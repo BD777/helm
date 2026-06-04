@@ -5,9 +5,9 @@ import Foundation
 ///
 /// ```
 /// claude-relay() {
-///   ANTHROPIC_BASE_URL="https://relay.example.com" \
+///   ANTHROPIC_BASE_URL="https://api-proxy.example.com" \
 ///   ANTHROPIC_AUTH_TOKEN="plat_..." \
-///   ANTHROPIC_MODEL="model_hub/es2_orange_o47" \
+///   ANTHROPIC_MODEL="provider-model-id" \
 ///   claude "$@"
 /// }
 /// ```

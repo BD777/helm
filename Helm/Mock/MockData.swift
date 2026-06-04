@@ -1196,7 +1196,7 @@ final class AppStore {
     }
 
     /// Display string for a session's current binding (e.g.
-    /// "Claude Sonnet 4.6 · es2-relay"). Falls back gracefully if the
+    /// "Claude Sonnet · team gateway"). Falls back gracefully if the
     /// profile / model has been deleted.
     func sessionHeadline(_ session: Session) -> String {
         sessionHeadline(profileId: session.profileId)

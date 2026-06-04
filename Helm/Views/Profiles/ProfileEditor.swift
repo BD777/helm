@@ -60,7 +60,7 @@ struct ProfileEditor: View {
     private var identitySection: some View {
         section("Identity") {
             field("Name") {
-                TextField("es2-relay", text: $profile.name)
+                TextField("team gateway", text: $profile.name)
                     .textFieldStyle(.roundedBorder)
             }
         }

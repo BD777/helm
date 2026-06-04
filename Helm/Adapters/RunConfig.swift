@@ -11,9 +11,9 @@ struct RunConfig {
     /// Env layered on top of the inherited environment.
     var env: [String: String]
     /// Helpful description for the picker / chat header (e.g.
-    /// "Claude Sonnet 4.6 · es2-relay").
+    /// "Claude Sonnet · team gateway").
     var headlineModel: String
-    /// Provider model id sent over the wire (e.g. "model_hub/es2_orange_o47").
+    /// Provider model id sent over the wire (e.g. "provider-model-id").
     var providerModelId: String
 }
 

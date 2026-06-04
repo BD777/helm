@@ -1,8 +1,8 @@
 import Foundation
 
 /// A remote endpoint that speaks a vendor's wire protocol. Multiple Models
-/// can hang off one Provider — e.g. relay.example.com exposes both
-/// `model_hub/es2_orange_o47` and `model_hub/es1_orange_o47`.
+/// can hang off one Provider, such as a team gateway that exposes several
+/// provider-specific model ids.
 struct Provider: Identifiable, Hashable, Codable {
     let id: UUID
     var name: String
@@ -73,8 +73,8 @@ struct Provider: Identifiable, Hashable, Codable {
 
 /// One model exposed by a provider. The wire id (`providerModelId`) is what
 /// gets sent over the network; `alias` is an optional human-readable label
-/// the user picks themselves (e.g. "es2 sonnet 4.6"). Empty alias falls back
-/// to the wire id.
+/// the user picks themselves (e.g. "team sonnet"). Empty alias falls back to
+/// the wire id.
 struct Model: Identifiable, Hashable, Codable {
     let id: UUID
     var providerId: UUID

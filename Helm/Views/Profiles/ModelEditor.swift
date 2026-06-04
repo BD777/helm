@@ -56,8 +56,8 @@ struct ModelEditor: View {
     private var identitySection: some View {
         section("Identity") {
             field("Provider model id",
-                  hint: "Wire id sent over the network. e.g. model_hub/es2_orange_o47, gpt-5.5-2026-04-24") {
-                TextField("model_hub/es2_orange_o47",
+                  hint: "Wire id sent over the network. e.g. provider-model-id") {
+                TextField("provider-model-id",
                           text: $model.providerModelId)
                     .textFieldStyle(.roundedBorder)
                     .font(DS.monoFontSmall)
@@ -65,7 +65,7 @@ struct ModelEditor: View {
 
             field("Alias",
                   hint: "Optional human-readable label shown in pickers and the chat header. Empty = render the wire id.") {
-                TextField("optional, e.g. es2 sonnet 4.6", text: $model.alias)
+                TextField("optional, e.g. team sonnet", text: $model.alias)
                     .textFieldStyle(.roundedBorder)
             }
         }

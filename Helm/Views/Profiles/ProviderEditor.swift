@@ -70,7 +70,7 @@ struct ProviderEditor: View {
     private var identitySection: some View {
         section("Identity") {
             field("Name") {
-                TextField("super-relay", text: $provider.name)
+                TextField("team gateway", text: $provider.name)
                     .textFieldStyle(.roundedBorder)
             }
         }
@@ -82,7 +82,7 @@ struct ProviderEditor: View {
                   hint: provider.vendor == .claude
                   ? "Sent as ANTHROPIC_BASE_URL. Leave blank for anthropic.com."
                   : "Codex provider base_url. e.g. http://127.0.0.1:8787/v1") {
-                TextField("https://relay.example.com", text: $provider.baseURL)
+                TextField("https://api-proxy.example.com", text: $provider.baseURL)
                     .textFieldStyle(.roundedBorder)
                     .font(DS.monoFontSmall)
             }

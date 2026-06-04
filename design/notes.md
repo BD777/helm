@@ -52,7 +52,7 @@ Window (NavigationSplitView，单窗口)
 │       │   ├── Session "Sketch session schema"   Cx  •  34m
 │       │   └── + New chat in helm
 │       ├── 📁 ccm    local   ~/workspace/ccm
-│       └── ● prod-api  ssh prod-1  /srv/api    (●=conn-state)
+│       └── ● staging-api  ssh build-host  /srv/api    (●=conn-state)
 │
 └── Detail (chat pane)
     ├── Toolbar
@@ -71,7 +71,7 @@ Window (NavigationSplitView，单窗口)
 ```
 Profile        host + provider + configRoot + envOverlay + commandPath
                  e.g. {host: localhost, provider: claude,
-                       envOverlay: {ANTHROPIC_BASE_URL: super-relay},
+                       envOverlay: {ANTHROPIC_BASE_URL: team-gateway},
                        commandPath: /usr/local/bin/claude}
 Project        host + cwd + title + defaultProfileId
 Session        projectId + currentProfileId + vendorSessionId + model
@@ -89,7 +89,7 @@ Part           text | tool_call | tool_output | diff | approval | reasoning | im
 
 ## 同生态 Profile 切换（MVP 做）
 
-**场景**：当前 Claude 会话跑着 super-relay profile，relay 挂了，用户想换到 direct anthropic.com 继续这个 session。
+**场景**：当前 Claude 会话跑着 team-gateway profile，gateway 挂了，用户想换到 direct anthropic.com 继续这个 session。
 
 **实现**：
 1. Sidebar 不动；session 不变；只换 underlying SDK 连接

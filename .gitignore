@@ -3,9 +3,17 @@ xcuserdata/
 *.xcuserstate
 build/
 DerivedData/
+*.xcresult
 *.xcworkspace/xcuserdata
 .swiftpm/
-Package.resolved
+*.log
 
-# Build artifacts
-build/
+# Local agent and workflow state. Project-level skills may be committed, but
+# generated worktrees and package artifacts should stay local.
+.claude/worktrees/
+.codex-artifacts/
+
+# Local secrets and environment overrides.
+.env
+.env.*
+!.env.example

@@ -11,8 +11,8 @@ struct ModelCatalogEntry: Hashable, Identifiable, Sendable {
 /// Cached in-memory per `Provider.id` so reopening the editor doesn't burn a
 /// round trip on every keystroke. Use `force: true` from the Refresh button.
 ///
-/// Auth: send both `x-api-key` and `Authorization: Bearer` so super-relay
-/// setups don't depend on which header the relay actually checks.
+/// Auth: send both `x-api-key` and `Authorization: Bearer` so proxy or
+/// gateway setups don't depend on which header the endpoint actually checks.
 actor ModelCatalogService {
     static let shared = ModelCatalogService()
 

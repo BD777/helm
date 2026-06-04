@@ -240,7 +240,7 @@ struct AddModelsSheet: View {
                 Text("Or add custom:")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                TextField("model_hub/es2_orange_o47", text: $customId)
+                TextField("provider-model-id", text: $customId)
                     .textFieldStyle(.roundedBorder)
                     .font(DS.monoFontSmall)
                     .onSubmit { addCustom() }
