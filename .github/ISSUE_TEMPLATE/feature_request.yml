@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement or new workflow.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep examples public-safe. Avoid private prompts, repository names, hostnames, provider tokens, and transcript excerpts.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and where does Helm get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should Helm do differently?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. Include workarounds or related tools if useful.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Chat UI
+        - Profiles and providers
+        - Claude Code
+        - Codex
+        - SSH projects
+        - Project Inbox workflows
+        - Build and distribution
+        - Documentation

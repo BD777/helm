@@ -1,5 +1,7 @@
 # Helm
 
+[![CI](https://github.com/BD777/helm/actions/workflows/ci.yml/badge.svg)](https://github.com/BD777/helm/actions/workflows/ci.yml)
+
 Helm is a native macOS client for working with Claude Code and Codex sessions
 across local and SSH projects.
 
@@ -14,7 +16,12 @@ indexes in its own app support directory.
 ## Status
 
 Pre-1.0 and moving quickly. Expect data shapes, settings, and UI details to
-change while the project settles.
+change while the project settles. Public users should build from source for
+now; downloadable binaries still need a signed and notarized release flow.
+
+Security note: provider tokens configured inside Helm are currently stored in
+plaintext app support JSON files. Do not share app state, transcripts, logs, or
+screenshots without reviewing them for sensitive data.
 
 ## Features
 
@@ -64,6 +71,13 @@ That script fetches the configured remote branch, builds a Release app, and
 installs it into `/Applications` by default. It may quit a running Helm app
 before replacing it.
 
+Before opening a pull request or publishing a release, run:
+
+```bash
+./scripts/open-source-scan.sh
+git diff --check
+```
+
 ## Layout
 
 - `Helm/` - SwiftUI app source.
@@ -79,8 +93,11 @@ before replacing it.
 - [Architecture](docs/architecture.md)
 - [Development](docs/development.md)
 - [Privacy and Data Handling](docs/privacy.md)
+- [Release Notes](docs/release.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Third Party Notices](THIRD_PARTY_NOTICES.md)
 
 ## License
 

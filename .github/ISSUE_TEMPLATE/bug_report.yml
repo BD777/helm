@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem in Helm.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please do not include provider tokens, private transcripts, proprietary source code, SSH hostnames, or screenshots with sensitive data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the shortest sequence that reproduces the issue.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Send ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "Example: macOS 15.5"
+  - type: input
+    id: helm
+    attributes:
+      label: Helm version or commit
+      placeholder: "Example: 0.1.0, 84ce265, or local build date"
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      multiple: true
+      options:
+        - Claude Code
+        - Codex
+        - SSH project
+        - Local project
+        - Not provider-specific
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Remove tokens, hostnames, local paths, prompts, transcripts, and private file content before posting.

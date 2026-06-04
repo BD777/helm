@@ -28,7 +28,8 @@ provider is needed to exercise real agent sessions.
 - Do not commit local app state, generated worktrees, build outputs, logs,
   credentials, tokens, session transcripts, or screenshots containing private
   data.
-- Run `git diff --check` before opening a pull request.
+- Run `./scripts/open-source-scan.sh` and `git diff --check` before opening a
+  pull request.
 - For UI or provider changes, include the validation you performed in the pull
   request description.
 
@@ -42,9 +43,16 @@ xcodebuild -project Helm.xcodeproj \
   -configuration Debug \
   -derivedDataPath build/DerivedData \
   build
+./scripts/open-source-scan.sh
 git diff --check
 ```
 
 Provider, SSH, approval, and Computer Use changes should also be validated in a
 real debug app session because direct CLI calls do not prove Helm's UI and
 transcript behavior.
+
+## Releases
+
+Helm is source-build first until a signed and notarized distribution pipeline is
+available. See [docs/release.md](docs/release.md) before publishing a binary
+archive.

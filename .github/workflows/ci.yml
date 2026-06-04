@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Open source hygiene scan
+        run: ./scripts/open-source-scan.sh
+
+      - name: Whitespace check
+        run: git diff --check
+
+      - name: Build Helm
+        run: |
+          xcodebuild \
+            -project Helm.xcodeproj \
+            -scheme Helm \
+            -configuration Debug \
+            -derivedDataPath build/DerivedData \
+            build
