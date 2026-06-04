@@ -2,7 +2,8 @@ import Foundation
 
 /// Spawns the local `claude` CLI in `--print --input-format stream-json
 /// --output-format stream-json --verbose --include-partial-messages` mode and
-/// translates its JSONL output into `AgentEvent`s.
+/// translates its JSONL output into `AgentEvent`s. Replayed user messages are
+/// enabled so local slash-command acknowledgements like `/goal` are visible.
 final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
     let sessionStore: AgentSessionStore = ClaudeSessionStore()
     let capabilities: AgentAdapterCapabilities = .promptGuidedChildAgents
@@ -24,6 +25,7 @@ final class ClaudeLocalAdapter: AgentAdapter, @unchecked Sendable {
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--replay-user-messages",
         ]
         if let resume = session.vendorSessionId {
             args.append(contentsOf: ["--resume", resume])
@@ -708,6 +710,10 @@ final class ClaudeStreamParser {
     /// as text. Buffer text deltas long enough to keep partial tags from
     /// flashing into the transcript.
     private var textToolBuffer: String = ""
+    /// Claude's `/goal` command is exposed in stream-json via replayed user
+    /// command messages. Remember the active objective so a successful result
+    /// can mirror Claude's met=true terminal state.
+    private var activeGoalObjective: String?
 
     func feed(_ data: Data) -> [AgentEvent] {
         guard let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty else {
@@ -764,7 +770,10 @@ final class ClaudeStreamParser {
             // Echoed user message containing tool_result blocks from the
             // agent's own tool runs.
             guard let msg = obj["message"] as? [String: Any],
-                  let blocks = msg["content"] as? [[String: Any]] else { return [] }
+                  let content = msg["content"] else { return [] }
+            let goalEvents = parseGoalUserContent(content)
+            if !goalEvents.isEmpty { return goalEvents }
+            guard let blocks = content as? [[String: Any]] else { return [] }
             var out: [AgentEvent] = []
             for block in blocks where (block["type"] as? String) == "tool_result" {
                 let id = block["tool_use_id"] as? String ?? ""
@@ -785,8 +794,16 @@ final class ClaudeStreamParser {
             var out: [AgentEvent] = []
             out.append(contentsOf: flushTextToolBuffer())
             if let sid = obj["session_id"] as? String { out.append(.sessionId(sid)) }
+            if !isError, let objective = activeGoalObjective {
+                out.append(.goalUpdated(goalState(objective: objective, status: .complete)))
+                activeGoalObjective = nil
+            }
             out.append(.finalResult(text: text, isError: isError))
             return out
+
+        case "attachment":
+            guard let attachment = obj["attachment"] as? [String: Any] else { return [] }
+            return parseGoalStatusAttachment(attachment)
 
         default:
             return []
@@ -842,6 +859,76 @@ final class ClaudeStreamParser {
         default:
             return []
         }
+    }
+
+    private func parseGoalUserContent(_ raw: Any) -> [AgentEvent] {
+        guard let text = flattenContent(raw) else { return [] }
+        if text.contains("<command-name>/goal</command-name>") {
+            let args = Self.extractTag("command-args", from: text) ?? ""
+            return updateGoalFromCommandArgs(args)
+        }
+        if let stdout = Self.extractTag("local-command-stdout", from: text) {
+            return updateGoalFromCommandOutput(stdout)
+        }
+        return []
+    }
+
+    private func parseGoalStatusAttachment(_ attachment: [String: Any]) -> [AgentEvent] {
+        guard (attachment["type"] as? String) == "goal_status" else { return [] }
+        let objective = attachment["condition"] as? String
+            ?? activeGoalObjective
+            ?? ""
+        let met = attachment["met"] as? Bool ?? false
+        let status: GoalStatus = met ? .complete : .active
+        return [.goalUpdated(goalState(objective: objective, status: status))]
+    }
+
+    private func updateGoalFromCommandArgs(_ args: String) -> [AgentEvent] {
+        let objective = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        if objective.lowercased() == "clear" {
+            activeGoalObjective = nil
+            return [.goalUpdated(goalState(objective: "", status: .cleared))]
+        }
+        guard !objective.isEmpty else { return [] }
+        activeGoalObjective = objective
+        return [.goalUpdated(goalState(objective: objective, status: .active))]
+    }
+
+    private func updateGoalFromCommandOutput(_ output: String) -> [AgentEvent] {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("goal set:") {
+            let objective = String(trimmed.dropFirst("Goal set:".count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !objective.isEmpty else { return [] }
+            activeGoalObjective = objective
+            return [.goalUpdated(goalState(objective: objective, status: .active))]
+        }
+        if trimmed.lowercased().contains("goal cleared") {
+            activeGoalObjective = nil
+            return [.goalUpdated(goalState(objective: "", status: .cleared))]
+        }
+        return []
+    }
+
+    private func goalState(objective: String, status: GoalStatus) -> GoalRuntimeState {
+        if status == .active {
+            activeGoalObjective = objective
+        } else if status.isTerminal {
+            activeGoalObjective = nil
+        }
+        return GoalRuntimeState(objective: objective,
+                                vendor: .claude,
+                                status: status,
+                                source: .agent)
+    }
+
+    private static func extractTag(_ tag: String, from text: String) -> String? {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        guard let start = text.range(of: open),
+              let end = text.range(of: close, range: start.upperBound..<text.endIndex)
+        else { return nil }
+        return String(text[start.upperBound..<end.lowerBound])
     }
 
     private func flattenContent(_ raw: Any?) -> String? {

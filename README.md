@@ -3,6 +3,8 @@
 Helm is a native macOS client for working with Claude Code and Codex sessions
 across local and SSH projects.
 
+![Helm Project Inbox screenshot](docs/assets/project-inbox.jpg)
+
 It is intentionally a thin SwiftUI shell over the vendor CLIs and SDKs. Agent
 transcripts, auth, and config live on the machine running the agent: local
 `~/.codex` / `~/.claude` for local projects, or the remote SSH host for remote

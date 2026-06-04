@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum Vendor: String, CaseIterable, Codable, Hashable {
+enum Vendor: String, CaseIterable, Codable, Hashable, Sendable {
     case claude
     case codex
 
@@ -24,6 +24,142 @@ enum Vendor: String, CaseIterable, Codable, Hashable {
         case .claude: return Color(red: 0.85, green: 0.45, blue: 0.04)
         case .codex:  return Color(red: 0.18, green: 0.22, blue: 0.28)
         }
+    }
+}
+
+/// Current goal state for a session. Codex exposes a full native lifecycle;
+/// Claude's `/goal` writes `goal_status` attachments with `met=false/true`,
+/// which map to `.active` and `.complete`.
+enum GoalStatus: String, CaseIterable, Codable, Hashable, Sendable {
+    case active
+    case paused
+    case blocked
+    case usageLimited
+    case budgetLimited
+    case complete
+    case cleared
+
+    var isTerminal: Bool {
+        switch self {
+        case .active, .paused, .blocked:
+            return false
+        case .usageLimited, .budgetLimited, .complete, .cleared:
+            return true
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .active: return "Active"
+        case .paused: return "Paused"
+        case .blocked: return "Blocked"
+        case .usageLimited: return "Usage limited"
+        case .budgetLimited: return "Budget limited"
+        case .complete: return "Complete"
+        case .cleared: return "Cleared"
+        }
+    }
+
+    static func parse(_ raw: String) -> GoalStatus? {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+        switch normalized {
+        case "active", "running", "in_progress":
+            return .active
+        case "paused", "pause":
+            return .paused
+        case "blocked":
+            return .blocked
+        case "usage_limited", "usagelimited":
+            return .usageLimited
+        case "budget_limited", "budgetlimited":
+            return .budgetLimited
+        case "complete", "completed", "achieved", "met":
+            return .complete
+        case "cleared", "clear", "abandoned":
+            return .cleared
+        default:
+            return nil
+        }
+    }
+}
+
+enum GoalUpdateSource: String, Codable, Hashable, Sendable {
+    case helm
+    case agent
+}
+
+struct GoalRuntimeState: Hashable, Codable, Sendable {
+    var objective: String
+    var vendor: Vendor
+    var status: GoalStatus
+    var tokenBudget: Int64?
+    var tokensUsed: Int64?
+    var timeUsedSeconds: Int64?
+    var updatedAt: Date
+    var source: GoalUpdateSource
+
+    init(objective: String,
+         vendor: Vendor,
+         status: GoalStatus,
+         tokenBudget: Int64? = nil,
+         tokensUsed: Int64? = nil,
+         timeUsedSeconds: Int64? = nil,
+         updatedAt: Date = Date(),
+         source: GoalUpdateSource = .agent) {
+        self.objective = objective
+        self.vendor = vendor
+        self.status = status
+        self.tokenBudget = tokenBudget
+        self.tokensUsed = tokensUsed
+        self.timeUsedSeconds = timeUsedSeconds
+        self.updatedAt = updatedAt
+        self.source = source
+    }
+
+    var compactStatusLabel: String {
+        switch (vendor, status) {
+        case (.codex, .active): return "Pursuing goal"
+        case (.codex, .paused): return "Goal paused"
+        case (.codex, .blocked): return "Goal blocked"
+        case (.codex, .usageLimited): return "Goal usage limited"
+        case (.codex, .budgetLimited): return "Goal budget limited"
+        case (.codex, .complete): return "Goal achieved"
+        case (.codex, .cleared): return "Goal cleared"
+        case (.claude, .active): return "Goal active"
+        case (.claude, .complete): return "Goal met"
+        case (.claude, .cleared): return "Goal cleared"
+        default: return "Goal \(status.displayName.lowercased())"
+        }
+    }
+
+    var usageSummary: String? {
+        var pieces: [String] = []
+        if let tokensUsed {
+            if let tokenBudget {
+                pieces.append("\(tokensUsed.formatted()) / \(tokenBudget.formatted()) tokens")
+            } else {
+                pieces.append("\(tokensUsed.formatted()) tokens")
+            }
+        } else if let tokenBudget {
+            pieces.append("\(tokenBudget.formatted()) token budget")
+        }
+        if let timeUsedSeconds {
+            pieces.append(Self.formatDuration(seconds: timeUsedSeconds))
+        }
+        return pieces.isEmpty ? nil : pieces.joined(separator: " · ")
+    }
+
+    private static func formatDuration(seconds: Int64) -> String {
+        let minutes = seconds / 60
+        let remainingSeconds = seconds % 60
+        if minutes > 0 {
+            return "\(minutes)m \(remainingSeconds)s"
+        }
+        return "\(remainingSeconds)s"
     }
 }
 
@@ -459,6 +595,9 @@ struct Session: Identifiable, Hashable, Codable {
     /// Codex reasoning effort (`model_reasoning_effort`). Reuses
     /// `Profile.ReasoningEffort` since the values are the same set.
     var codexEffort: Profile.ReasoningEffort = .medium
+    /// Latest known goal status for this session, if the user has enabled a
+    /// goal through Helm or the agent has reported one.
+    var goalRuntime: GoalRuntimeState? = nil
     var lastUpdate: String
     /// Ordered transcript: real dialog turns (`.message`) interleaved with
     /// runtime events (`.event` — compact summaries, etc). See [[TranscriptItem]].
@@ -484,7 +623,7 @@ struct Session: Identifiable, Hashable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, projectId, title, profileId, lastUpdate, vendorSessionId,
              claudePermissionMode, codexSandboxMode, codexApprovalMode,
-             claudeEffort, codexEffort, isDraft, archivedAt
+             claudeEffort, codexEffort, goalRuntime, isDraft, archivedAt
     }
 
     init(id: UUID, projectId: UUID, title: String, profileId: UUID,
@@ -493,6 +632,7 @@ struct Session: Identifiable, Hashable, Codable {
          codexApprovalMode: CodexApprovalMode = .onRequest,
          claudeEffort: ClaudeEffort = .medium,
          codexEffort: Profile.ReasoningEffort = .medium,
+         goalRuntime: GoalRuntimeState? = nil,
          lastUpdate: String,
          transcript: [TranscriptItem] = [], vendorSessionId: String? = nil,
          isDraft: Bool = false,
@@ -506,6 +646,7 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = codexApprovalMode
         self.claudeEffort = claudeEffort
         self.codexEffort = codexEffort
+        self.goalRuntime = goalRuntime
         self.lastUpdate = lastUpdate
         self.transcript = transcript
         self.vendorSessionId = vendorSessionId
@@ -526,6 +667,7 @@ struct Session: Identifiable, Hashable, Codable {
         self.codexApprovalMode = try c.decodeIfPresent(CodexApprovalMode.self, forKey: .codexApprovalMode) ?? .onRequest
         self.claudeEffort = try c.decodeIfPresent(ClaudeEffort.self, forKey: .claudeEffort) ?? .medium
         self.codexEffort = try c.decodeIfPresent(Profile.ReasoningEffort.self, forKey: .codexEffort) ?? .medium
+        self.goalRuntime = try c.decodeIfPresent(GoalRuntimeState.self, forKey: .goalRuntime)
         self.isDraft = try c.decodeIfPresent(Bool.self, forKey: .isDraft) ?? false
         self.archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         self.transcript = []
@@ -544,6 +686,7 @@ struct Session: Identifiable, Hashable, Codable {
         try c.encode(codexApprovalMode, forKey: .codexApprovalMode)
         try c.encode(claudeEffort, forKey: .claudeEffort)
         try c.encode(codexEffort, forKey: .codexEffort)
+        try c.encodeIfPresent(goalRuntime, forKey: .goalRuntime)
         try c.encode(isDraft, forKey: .isDraft)
         try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
     }
@@ -1271,6 +1414,8 @@ enum SessionEvent: Identifiable, Hashable, Codable {
     /// Helm sent a composer turn through the Goal action. This is a
     /// deterministic UI acknowledgement, not a model-generated message.
     case goalApplied(id: UUID, goal: String, vendor: Vendor, appliedAt: Date)
+    /// The agent runtime reported a concrete goal state transition.
+    case goalStatusChanged(id: UUID, state: GoalRuntimeState)
     /// User appended input to a running turn. The vendor adapter has
     /// accepted the input; this event confirms receipt to the user.
     case promptAppended(id: UUID, appendedAt: Date)
@@ -1283,6 +1428,7 @@ enum SessionEvent: Identifiable, Hashable, Codable {
         switch self {
         case .compactSummary(let id, _): return id
         case .goalApplied(let id, _, _, _): return id
+        case .goalStatusChanged(let id, _): return id
         case .promptAppended(let id, _): return id
         case .projectWorkflowStarted(let id, _, _, _, _): return id
         }

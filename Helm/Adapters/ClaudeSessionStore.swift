@@ -258,12 +258,28 @@ struct ClaudeSessionLogParser {
         // ToolCall.id we generated). Lets us mutate the ToolCall part when a
         // matching tool_result comes in later.
         var toolIndex: [String: (itemIdx: Int, callId: UUID)] = [:]
+        func appendGoalEvent(_ state: GoalRuntimeState) {
+            if case .event(.goalStatusChanged(_, let previous)) = items.last,
+               previous.vendor == state.vendor,
+               previous.status == state.status,
+               previous.objective == state.objective {
+                return
+            }
+            items.append(.event(.goalStatusChanged(id: UUID(), state: state)))
+        }
 
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = raw.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
             let type = obj["type"] as? String ?? ""
             if obj["isSidechain"] as? Bool == true { continue }
+
+            if type == "attachment",
+               let attachment = obj["attachment"] as? [String: Any],
+               let state = Self.goalState(fromAttachment: attachment) {
+                appendGoalEvent(state)
+                continue
+            }
 
             // Compact-summary entries arrive as type:"user" but are not user
             // input — they're Claude's own summary of the prior conversation
@@ -286,6 +302,11 @@ struct ClaudeSessionLogParser {
                 guard let msg = obj["message"] as? [String: Any],
                       (msg["role"] as? String) == "user" else { continue }
                 let content = msg["content"]
+                if let state = Self.goalState(fromUserContent: content) {
+                    appendGoalEvent(state)
+                    continue
+                }
+                if Self.isGoalMetaPrompt(content) { continue }
                 if let s = content as? String, !s.isEmpty {
                     items.append(.message(Message(
                         id: UUID(), role: .user, who: "you", meta: nil,
@@ -428,5 +449,68 @@ struct ClaudeSessionLogParser {
             return out.isEmpty ? nil : out
         }
         return nil
+    }
+
+    private static func goalState(fromAttachment attachment: [String: Any]) -> GoalRuntimeState? {
+        guard (attachment["type"] as? String) == "goal_status" else { return nil }
+        let objective = attachment["condition"] as? String ?? ""
+        let met = attachment["met"] as? Bool ?? false
+        return GoalRuntimeState(objective: objective,
+                                vendor: .claude,
+                                status: met ? .complete : .active,
+                                source: .agent)
+    }
+
+    private static func goalState(fromUserContent content: Any?) -> GoalRuntimeState? {
+        guard let text = extractFirstText(content) else { return nil }
+        if text.contains("<command-name>/goal</command-name>") {
+            let args = extractTag("command-args", from: text) ?? ""
+            let objective = args.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !objective.isEmpty else { return nil }
+            if objective.lowercased() == "clear" {
+                return GoalRuntimeState(objective: "",
+                                        vendor: .claude,
+                                        status: .cleared,
+                                        source: .agent)
+            }
+            return GoalRuntimeState(objective: objective,
+                                    vendor: .claude,
+                                    status: .active,
+                                    source: .agent)
+        }
+        if let stdout = extractTag("local-command-stdout", from: text) {
+            let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.lowercased().hasPrefix("goal set:") {
+                let objective = String(trimmed.dropFirst("Goal set:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !objective.isEmpty else { return nil }
+                return GoalRuntimeState(objective: objective,
+                                        vendor: .claude,
+                                        status: .active,
+                                        source: .agent)
+            }
+            if trimmed.lowercased().contains("goal cleared") {
+                return GoalRuntimeState(objective: "",
+                                        vendor: .claude,
+                                        status: .cleared,
+                                        source: .agent)
+            }
+        }
+        return nil
+    }
+
+    private static func isGoalMetaPrompt(_ content: Any?) -> Bool {
+        guard let text = extractFirstText(content) else { return false }
+        return text.contains("A session-scoped Stop hook is now active with condition:")
+            || text.contains("The hook will block stopping until the condition holds.")
+    }
+
+    private static func extractTag(_ tag: String, from text: String) -> String? {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        guard let start = text.range(of: open),
+              let end = text.range(of: close, range: start.upperBound..<text.endIndex)
+        else { return nil }
+        return String(text[start.upperBound..<end.lowerBound])
     }
 }

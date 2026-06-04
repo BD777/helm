@@ -2911,6 +2911,10 @@ else:
             let currentCount = sessions[stillIdx].transcript.count
             guard currentCount == 0 || items.count >= currentCount else { return }
             sessions[stillIdx].transcript = items
+            let latestGoal = Self.latestGoalRuntime(from: items)
+            if latestGoal.found {
+                sessions[stillIdx].goalRuntime = latestGoal.state
+            }
             persistTranscriptSnapshot(for: sessionId)
             NSLog("[helm.history] loaded %ld items for %@",
                   items.count, vendorId)
@@ -2936,6 +2940,10 @@ else:
         }
 
         sessions[idx].transcript = snapshot
+        let latestGoal = Self.latestGoalRuntime(from: snapshot)
+        if latestGoal.found {
+            sessions[idx].goalRuntime = latestGoal.state
+        }
         if snapshot.count != rawSnapshot.count {
             TranscriptSnapshotStore.save(sessionId: sessionId, items: snapshot)
         }
@@ -3049,6 +3057,9 @@ else:
         )
         for event in preUserEvents {
             sessions[sIdx].transcript.append(.event(event))
+        }
+        if let goalState = Self.optimisticGoalState(from: preUserEvents) {
+            sessions[sIdx].goalRuntime = goalState
         }
         sessions[sIdx].transcript.append(.message(userMsg))
         sessions[sIdx].transcript.append(.message(assistantMsg))
@@ -3178,6 +3189,9 @@ else:
             + [.message(userMsg)]
             + [.message(newAssistant)]
         sessions[sIdx].transcript.insert(contentsOf: insertedItems, at: insertionIndex)
+        if let goalState = Self.optimisticGoalState(from: preUserEvents) {
+            sessions[sIdx].goalRuntime = goalState
+        }
         sessions[sIdx].lastUpdate = "now"
 
         // Redirect future streaming updates to the new assistant placeholder.
@@ -3246,6 +3260,7 @@ else:
                                  runId: run.runId,
                                  assistantId: run.assistantId)
         markRunStopped(sessionId: sessionId, assistantId: run.assistantId)
+        pauseCodexGoalAfterStop(sessionId: sessionId)
         finishStreaming(sessionId: sessionId, runId: run.runId)
         run.task?.cancel()
         run.adapter.cancel()
@@ -3477,6 +3492,9 @@ else:
         case .childRunStatus(let status):
             recordWorkflowChildRunStatus(status, sessionId: sessionId)
 
+        case .goalUpdated(let state):
+            applyGoalUpdate(state, to: sIdx)
+
         case .messageStop:
             mutateAssistant(at: sIdx, id: assistantId) { msg in
                 if msg.meta == "streaming…" || msg.meta == "thinking…" {
@@ -3541,6 +3559,65 @@ else:
                 msg.parts.append(.text("⚠️ " + detail))
             }
         }
+    }
+
+    private static func optimisticGoalState(from events: [SessionEvent]) -> GoalRuntimeState? {
+        for event in events.reversed() {
+            if case .goalApplied(_, let goal, let vendor, let appliedAt) = event {
+                return GoalRuntimeState(objective: goal,
+                                        vendor: vendor,
+                                        status: .active,
+                                        updatedAt: appliedAt,
+                                        source: .helm)
+            }
+        }
+        return nil
+    }
+
+    private static func latestGoalRuntime(from items: [TranscriptItem]) -> (found: Bool, state: GoalRuntimeState?) {
+        for item in items.reversed() {
+            guard case .event(.goalStatusChanged(_, let state)) = item else { continue }
+            return state.status == .cleared
+                ? (found: true, state: nil)
+                : (found: true, state: state)
+        }
+        return (found: false, state: nil)
+    }
+
+    private func applyGoalUpdate(_ state: GoalRuntimeState, to sIdx: Int) {
+        let previous = sessions[sIdx].goalRuntime
+        let shouldRecord = previous?.vendor != state.vendor
+            || previous?.objective != state.objective
+            || previous?.status != state.status
+            || previous?.source != .agent
+        if state.status == .cleared {
+            sessions[sIdx].goalRuntime = nil
+        } else {
+            sessions[sIdx].goalRuntime = state
+        }
+        if shouldRecord {
+            sessions[sIdx].transcript.append(.event(.goalStatusChanged(id: UUID(),
+                                                                       state: state)))
+            persistTranscriptSnapshot(for: sessions[sIdx].id)
+        }
+        scheduleStateSave()
+    }
+
+    private func pauseCodexGoalAfterStop(sessionId: UUID) {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+              let goal = sessions[sIdx].goalRuntime,
+              goal.vendor == .codex,
+              goal.status == .active
+        else { return }
+        let paused = GoalRuntimeState(objective: goal.objective,
+                                      vendor: .codex,
+                                      status: .paused,
+                                      tokenBudget: goal.tokenBudget,
+                                      tokensUsed: goal.tokensUsed,
+                                      timeUsedSeconds: goal.timeUsedSeconds,
+                                      updatedAt: Date(),
+                                      source: goal.source)
+        applyGoalUpdate(paused, to: sIdx)
     }
 
     private func recordWorkflowChildRunStatus(_ status: AgentChildRunStatus,

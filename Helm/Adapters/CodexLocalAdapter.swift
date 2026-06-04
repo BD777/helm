@@ -953,19 +953,21 @@ final class CodexStreamParser {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
         }
-        switch obj["type"] as? String {
+        let event = obj["msg"] as? [String: Any] ?? obj
+        switch event["type"] as? String {
         case "thread.started":
-            if let id = obj["thread_id"] as? String {
+            if let id = event["thread_id"] as? String
+                ?? event["threadId"] as? String {
                 return [.sessionId(id)]
             }
             return []
 
         case "item.started":
-            guard let item = obj["item"] as? [String: Any] else { return [] }
+            guard let item = event["item"] as? [String: Any] else { return [] }
             return parseItemStarted(item)
 
         case "item.completed":
-            guard let item = obj["item"] as? [String: Any] else { return [] }
+            guard let item = event["item"] as? [String: Any] else { return [] }
             return parseItemCompleted(item)
 
         case "turn.completed":
@@ -979,10 +981,19 @@ final class CodexStreamParser {
 
         case "turn.failed":
             sawTurnCompletion = true
-            let message = obj["message"] as? String
-                ?? obj["error"] as? String
+            let message = event["message"] as? String
+                ?? event["error"] as? String
                 ?? "Codex turn failed."
             return [.finalResult(text: message, isError: true)]
+
+        case "thread_goal_updated", "thread.goal.updated", "thread/goal/updated", "ThreadGoalUpdated":
+            return parseGoalUpdated(event)
+
+        case "thread_goal_cleared", "thread.goal.cleared", "thread/goal/cleared", "ThreadGoalCleared":
+            return [.goalUpdated(GoalRuntimeState(objective: "",
+                                                  vendor: .codex,
+                                                  status: .cleared,
+                                                  source: .agent))]
 
         default:
             return []
@@ -1098,6 +1109,46 @@ final class CodexStreamParser {
         default:
             return []
         }
+    }
+
+    private func parseGoalUpdated(_ obj: [String: Any]) -> [AgentEvent] {
+        let goal = obj["goal"] as? [String: Any]
+            ?? obj["thread_goal"] as? [String: Any]
+            ?? obj["threadGoal"] as? [String: Any]
+            ?? obj
+        guard let objective = goal["objective"] as? String else { return [] }
+        let rawStatus = goal["status"] as? String
+            ?? obj["status"] as? String
+            ?? "active"
+        guard let status = GoalStatus.parse(rawStatus) else { return [] }
+        let state = GoalRuntimeState(
+            objective: objective,
+            vendor: .codex,
+            status: status,
+            tokenBudget: Self.int64(goal["tokenBudget"] ?? goal["token_budget"]),
+            tokensUsed: Self.int64(goal["tokensUsed"] ?? goal["tokens_used"]),
+            timeUsedSeconds: Self.int64(goal["timeUsedSeconds"] ?? goal["time_used_seconds"]),
+            updatedAt: Self.date(goal["updatedAt"] ?? goal["updated_at"]) ?? Date(),
+            source: .agent
+        )
+        return [.goalUpdated(state)]
+    }
+
+    private static func int64(_ raw: Any?) -> Int64? {
+        if let value = raw as? Int64 { return value }
+        if let value = raw as? Int { return Int64(value) }
+        if let value = raw as? Double { return Int64(value) }
+        if let value = raw as? NSNumber { return value.int64Value }
+        if let value = raw as? String { return Int64(value) }
+        return nil
+    }
+
+    private static func date(_ raw: Any?) -> Date? {
+        guard let value = int64(raw) else { return nil }
+        if value > 1_000_000_000_000 {
+            return Date(timeIntervalSince1970: TimeInterval(value) / 1000)
+        }
+        return Date(timeIntervalSince1970: TimeInterval(value))
     }
 
     private func callId(from item: [String: Any]) -> String {

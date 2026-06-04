@@ -21,6 +21,10 @@ struct SessionEventView: View {
             divider(label: "Goal enabled for \(vendor.displayName) turn",
                     icon: "target",
                     detail: Self.goalDetail(goal: goal, vendor: vendor, appliedAt: appliedAt))
+        case .goalStatusChanged(_, let state):
+            divider(label: state.compactStatusLabel,
+                    icon: Self.goalIcon(for: state.status),
+                    detail: Self.goalStatusDetail(state))
         case .promptAppended(_, let appendedAt):
             simpleDivider(label: "\(Self.format(appendedAt)) 已受理追加输入，正在处理…",
                          icon: "arrow.right.circle")
@@ -105,6 +109,24 @@ struct SessionEventView: View {
         let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         let suffix = trimmed.isEmpty ? "" : ":\n\n\(trimmed)"
         return "Helm sent this turn to \(vendor.displayName) with /goal at \(Self.format(appliedAt))\(suffix)"
+    }
+
+    private static func goalStatusDetail(_ state: GoalRuntimeState) -> String {
+        let objective = state.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usage = state.usageSummary.map { "\n\n\($0)" } ?? ""
+        let suffix = objective.isEmpty ? "" : ":\n\n\(objective)"
+        return "\(state.vendor.displayName) reported \(state.status.displayName.lowercased()) at \(Self.format(state.updatedAt))\(usage)\(suffix)"
+    }
+
+    private static func goalIcon(for status: GoalStatus) -> String {
+        switch status {
+        case .active: return "target"
+        case .paused: return "pause.circle"
+        case .blocked: return "exclamationmark.triangle"
+        case .usageLimited, .budgetLimited: return "gauge"
+        case .complete: return "checkmark.circle"
+        case .cleared: return "xmark.circle"
+        }
     }
 
     private static func workflowDetail(workflowId: UUID,

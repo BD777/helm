@@ -205,6 +205,9 @@ enum AgentEvent: Sendable {
     /// One assistant message completes.
     case messageStop
 
+    /// Vendor-native goal lifecycle update, when the CLI exposes one.
+    case goalUpdated(GoalRuntimeState)
+
     /// Turn finished. `text` is the final result text the agent reports.
     case finalResult(text: String, isError: Bool)
 

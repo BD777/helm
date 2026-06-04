@@ -275,7 +275,7 @@ struct ComposerView: View {
         case .compact:
             return 156
         case .goal:
-            return 156
+            return 190
         case .help:
             return 286
         }
@@ -379,6 +379,70 @@ struct ComposerView: View {
         }
     }
 
+    @ViewBuilder
+    private func runtimeGoalChip(session: Session?) -> some View {
+        if let goal = session?.goalRuntime {
+            HStack(spacing: 6) {
+                Image(systemName: goalStatusIcon(goal.status))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(goalStatusTint(goal.status))
+                    .frame(width: 12)
+                Text(goal.compactStatusLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .frame(maxWidth: 180, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .fill(goalStatusTint(goal.status).opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                            .stroke(goalStatusTint(goal.status).opacity(0.35), lineWidth: 1)
+                    )
+            )
+            .help(runtimeGoalHelp(goal))
+            .accessibilityLabel(goal.compactStatusLabel)
+        }
+    }
+
+    private func runtimeGoalHelp(_ goal: GoalRuntimeState) -> String {
+        let objective = goal.objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usage = goal.usageSummary.map { "\n\($0)" } ?? ""
+        let suffix = objective.isEmpty ? "" : "\n\(objective)"
+        return "\(goal.vendor.displayName): \(goal.compactStatusLabel)\(usage)\(suffix)"
+    }
+
+    private func goalStatusIcon(_ status: GoalStatus) -> String {
+        switch status {
+        case .active: return "target"
+        case .paused: return "pause.circle"
+        case .blocked: return "exclamationmark.triangle"
+        case .usageLimited, .budgetLimited: return "gauge"
+        case .complete: return "checkmark.circle"
+        case .cleared: return "xmark.circle"
+        }
+    }
+
+    private func goalStatusTint(_ status: GoalStatus) -> Color {
+        switch status {
+        case .active:
+            return Color.accentColor
+        case .paused:
+            return Color.yellow
+        case .blocked:
+            return Color.orange
+        case .usageLimited, .budgetLimited:
+            return Color.red
+        case .complete:
+            return Color.green
+        case .cleared:
+            return Color.secondary
+        }
+    }
+
     private var attachmentRow: some View {
         ComposerAttachmentRow(attachments: attachments,
                               onRemove: removeAttachment)
@@ -413,6 +477,7 @@ struct ComposerView: View {
         HStack(spacing: 8) {
             builtinActionButton(profile: profile)
             goalActionChip
+            runtimeGoalChip(session: session)
             modelPickerButton(profile: profile,
                               modelLabel: modelLabel,
                               configLocked: configLocked,
@@ -433,6 +498,7 @@ struct ComposerView: View {
             HStack(spacing: 8) {
                 builtinActionButton(profile: profile)
                 goalActionChip
+                runtimeGoalChip(session: session)
                 modelPickerButton(profile: profile,
                                   modelLabel: modelLabel,
                                   configLocked: configLocked,
@@ -1853,6 +1919,15 @@ private struct BuiltinActionPanel: View {
     private var goalBody: some View {
         VStack(alignment: .leading, spacing: 9) {
             infoRow("Command", action.commandName, mono: true)
+            if let goal = session?.goalRuntime {
+                infoRow("Status", goal.compactStatusLabel)
+                if let usage = goal.usageSummary {
+                    infoRow("Usage", usage)
+                }
+                if !goal.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    infoRow("Objective", goal.objective)
+                }
+            }
             emptyPanelText("Goal marks the next composer send as /goal. Write the goal in the main input, then send normally.")
         }
     }
