@@ -24,6 +24,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Select Xcode
+        run: |
+          for app in \
+            /Applications/Xcode_26.3.app \
+            /Applications/Xcode_26.2.app \
+            /Applications/Xcode_26.1.1.app \
+            /Applications/Xcode_26.0.1.app \
+            /Applications/Xcode.app; do
+            if [ -x "$app/Contents/Developer/usr/bin/xcodebuild" ]; then
+              sudo xcode-select -s "$app/Contents/Developer"
+              break
+            fi
+          done
+
       - name: Show toolchain
         run: |
           xcodebuild -version
@@ -41,5 +55,6 @@ jobs:
             -project Helm.xcodeproj \
             -scheme Helm \
             -configuration Debug \
+            -destination "platform=macOS" \
             -derivedDataPath build/DerivedData \
             build
