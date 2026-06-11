@@ -1528,20 +1528,52 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
 
 /// Full GitHub-flavored Markdown renderer for completed chat content.
 ///
-/// MarkdownUI handles the mature block model here: tables, task lists, fenced
-/// code, blockquotes, links and images. Streaming text still uses the AppKit
-/// plain-text path below so partially emitted Markdown does not thrash layout.
+/// Uses an AppKit `NSTextView` (backed by an `NSAttributedString` built
+/// from MarkdownUI's HTML renderer) so drag selection works across
+/// paragraphs, list items, headings and code blocks. The HTML stylesheet
+/// is tuned to match Helm's chat visual style.
+///
+/// Streaming text still uses the plain-text path so partially emitted
+/// Markdown does not thrash layout.
 struct MarkdownishText: View {
     let raw: String
 
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        let markdown = MarkdownDisplaySanitizer.sanitize(raw)
-        Markdown(markdown)
-            .markdownTheme(.helmChat)
-            .textSelection(.enabled)
+        SelectableMarkdownTextView(markdown: MarkdownDisplaySanitizer.sanitize(raw))
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// AppKit-backed markdown text view with continuous multi-paragraph selection.
+private struct SelectableMarkdownTextView: NSViewRepresentable {
+    let markdown: String
+
+    func makeNSView(context: Context) -> MeasuredSelectableTextView {
+        let view = MeasuredSelectableTextView()
+        updateContent(in: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: MeasuredSelectableTextView, context: Context) {
+        updateContent(in: nsView)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: MeasuredSelectableTextView, context: Context) -> CGSize? {
+        let width: CGFloat = {
+            if let w = proposal.width, w.isFinite, w > 0 { return w }
+            if nsView.bounds.width > 0 { return nsView.bounds.width }
+            return 600
+        }()
+        return nsView.sizeThatFits(width: width)
+    }
+
+    private func updateContent(in view: MeasuredSelectableTextView) {
+        let attributed = ChatTextStyler.markdownAttributedString(markdown)
+        view.setAttributedString(attributed,
+                                 sourceText: markdown,
+                                 treatsAsPlainText: false)
     }
 }
 
@@ -1917,11 +1949,14 @@ private final class NonEditableTextView: NSTextView {
     }
 }
 
-/// Styles plain streaming text for the AppKit-backed selectable text view.
+/// Styles text for the AppKit-backed selectable text views.
 private enum ChatTextStyler {
     static let baseFont = NSFont.systemFont(ofSize: 15)
+    static let monoFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     private static let bodyLineSpacing: CGFloat = 5.2
     private static let bodyParagraphSpacing: CGFloat = 8.0
+
+    // MARK: - Plain text
 
     static func plainTextAttributedString(_ text: String) -> NSAttributedString {
         let displayText = trimTrailingWhitespaceAndNewlines(text)
@@ -1937,6 +1972,226 @@ private enum ChatTextStyler {
         removeTrailingParagraphSpacing(in: attributed)
         return attributed
     }
+
+    // MARK: - Markdown
+
+    /// Converts Markdown into a rich `NSAttributedString` that matches Helm's
+    /// chat visual style. Uses MarkdownUI's public `renderHTML()` as the
+    /// parser/HTML generator (no private API usage), then normalises the
+    /// AppKit HTML-importer output to line up with our design system.
+    static func markdownAttributedString(_ markdown: String) -> NSAttributedString {
+        let html = renderedHTML(from: markdown)
+        guard !html.isEmpty, let data = html.data(using: .utf8) else {
+            return plainTextAttributedString(markdown)
+        }
+
+        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue
+        ]
+
+        guard let loaded = try? NSMutableAttributedString(data: data, options: options, documentAttributes: nil) else {
+            return plainTextAttributedString(markdown)
+        }
+
+        normaliseMarkdownOutput(loaded)
+        trimTrailingWhitespaceAndNewlines(in: loaded)
+        removeTrailingParagraphSpacing(in: loaded)
+        return loaded
+    }
+
+    private static func renderedHTML(from markdown: String) -> String {
+        // Use MarkdownUI's public HTML renderer — gives us GFM support
+        // (tables, task lists, strikethrough, autolinks) without pulling in
+        // a separate parser. We wrap the fragment in a full HTML document
+        // with a base stylesheet so the AppKit HTML importer has a
+        // well-defined starting point.
+        let content = MarkdownContent(markdown)
+        let html = content.renderHTML()
+        guard !html.isEmpty else { return "" }
+
+        // Colour palette — these are placeholder sRGB values that the
+        // normalisation pass later maps to dynamic NSColor values. We use
+        // distinct sentinel values so the normaliser can reliably detect
+        // what each colour was intended for.
+        //
+        //   #000001 → primary text   → .labelColor
+        //   #666666 → secondary text → .secondaryLabelColor
+        //   #1f1f1f → code background (light) / code fill
+        //   #999999 → border / rule
+        //   #ff00ff → accent (link) placeholder, replaced with accentColor
+
+        let style = """
+        body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; \
+        font-size: 15px; color: #000001; line-height: 1.38; } \
+        p { margin: 0 0 8px; line-height: 1.38; } \
+        pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
+        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0 0.25em; \
+        border-radius: 3px; color: #000001; } \
+        pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; \
+        background: rgba(31,31,31,0.05) !important; margin: 2px 0 10px; } \
+        pre code { background: transparent; padding: 0; font-size: 13px; } \
+        h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; line-height: 1.3; color: #000001; } \
+        h2 { font-size: 18px; font-weight: 600; margin: 4px 0 9px; line-height: 1.3; color: #000001; } \
+        h3 { font-size: 16.5px; font-weight: 600; margin: 3px 0 8px; line-height: 1.3; color: #000001; } \
+        h4 { font-size: 15px; font-weight: 600; margin: 2px 0 7px; color: #000001; } \
+        h5 { font-size: 14px; font-weight: 600; margin: 2px 0 6px; color: #000001; } \
+        h6 { font-size: 13.5px; font-weight: 600; margin: 2px 0 6px; color: #666666; } \
+        blockquote { margin: 2px 0 10px; padding: 2px 0 2px 10px; \
+        border-left: 3px solid #999999; color: #666666; } \
+        blockquote p { color: #666666; } \
+        ul, ol { margin: 0 0 8px; padding-left: 22px; } \
+        li { margin: 2px 0; } \
+        ul li { list-style-type: disc; } \
+        ol li { list-style-type: decimal; } \
+        table { border-collapse: collapse; margin: 4px 0 12px; font-size: 14px; } \
+        th, td { border: 1px solid #999999; padding: 6px 10px; text-align: left; \
+        vertical-align: top; color: #000001; } \
+        th { background: rgba(153,153,153,0.12); font-weight: 600; } \
+        hr { border: none; border-top: 1px solid #999999; margin: 10px 0; } \
+        a { color: #ff00ff; text-decoration: none; } \
+        input[type="checkbox"] { transform: scale(0.85); margin-right: 4px; }
+        """
+
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\(style)</style></head><body>\(html)</body></html>"
+    }
+
+    /// Walk every attribute run and make fonts / colours consistent with
+    /// Helm's chat appearance. The AppKit HTML importer picks arbitrary
+    /// defaults, so we explicitly clamp sizes, swap in system fonts, and
+    /// honour the current effective appearance via dynamic `NSColor`s.
+    private static func normaliseMarkdownOutput(_ astr: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: astr.length)
+        astr.enumerateAttributes(in: full, options: []) { attrs, range, _ in
+            var updated = attrs
+            var changed = false
+
+            // MARK: Font
+
+            if let currentFont = updated[.font] as? NSFont {
+                let isMono = currentFont.fontDescriptor.symbolicTraits.contains(.monoSpace)
+                    || currentFont.familyName?.lowercased().contains("mono") ?? false
+                var traits = currentFont.fontDescriptor.symbolicTraits
+                traits.remove(.monoSpace)
+                var size = currentFont.pointSize
+
+                let base: NSFont = isMono ? monoFont : baseFont
+
+                // Clamp size to a sensible range, then nudge headings up
+                // and body text down to match our design scale.
+                if size < 10 { size = 11 }
+                if size > 28 { size = 28 }
+
+                let targetSize: CGFloat = {
+                    if isMono {
+                        // Keep monospace runs near the mono base size.
+                        return max(12, min(size, monoFont.pointSize + 1))
+                    }
+                    if size > baseFont.pointSize + 1 {
+                        // Heuristic: a size noticeably above base is a heading.
+                        // Scale it relative to our base.
+                        let ratio = size / 16.0 // HTML importer tends to assume 16px base
+                        return baseFont.pointSize * ratio
+                    }
+                    return baseFont.pointSize
+                }()
+
+                var newFont: NSFont
+                if traits.contains(.bold) && traits.contains(.italic) {
+                    newFont = NSFontManager.shared.convert(
+                        NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask),
+                        toHaveTrait: .italicFontMask)
+                } else if traits.contains(.bold) {
+                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+                } else if traits.contains(.italic) {
+                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
+                } else {
+                    newFont = base
+                }
+
+                if abs(newFont.pointSize - targetSize) > 0.25,
+                   let resized = NSFont(descriptor: newFont.fontDescriptor, size: targetSize) {
+                    newFont = resized
+                }
+
+                if newFont != currentFont {
+                    updated[.font] = newFont
+                    changed = true
+                }
+            } else {
+                updated[.font] = baseFont
+                changed = true
+            }
+
+            // MARK: Colour
+
+            let existingColor = updated[.foregroundColor] as? NSColor
+
+            // Links: replace magenta sentinel with accent colour
+            if updated[.link] != nil {
+                let accent = NSColor.controlAccentColor
+                let underline = NSNumber(value: NSUnderlineStyle.single.rawValue)
+                if existingColor != accent
+                    || (updated[.underlineStyle] as? NSNumber) != underline {
+                    updated[.foregroundColor] = accent
+                    updated[.underlineStyle] = underline
+                    changed = true
+                }
+            } else {
+                // Map HTML-injected absolute colours to the adaptive label
+                // colour family. We use sentinel values from our stylesheet:
+                //   #000001 → primary text (.labelColor)
+                //   #666666 → secondary text (.secondaryLabelColor)
+                //   anything else bright-ish → primary
+                //   anything else dim-ish → secondary
+                let target: NSColor
+                if let c = existingColor,
+                   let rgb = c.usingColorSpace(.sRGB) {
+                    let r = rgb.redComponent, g = rgb.greenComponent, b = rgb.blueComponent
+                    // #ff00ff magenta check shouldn't reach here (handled above),
+                    // but guard anyway.
+                    if r > 0.95 && g < 0.05 && b > 0.95 {
+                        target = .controlAccentColor
+                    } else if r < 0.005 && g < 0.005 && b > 0.003 && b < 0.008 {
+                        // near-black with a tiny blue tint → our #000001 sentinel
+                        target = .labelColor
+                    } else if abs(r - 0.4) < 0.05 && abs(g - 0.4) < 0.05 && abs(b - 0.4) < 0.05 {
+                        // ~#666666 → secondary text
+                        target = .secondaryLabelColor
+                    } else if rgb.brightnessComponent < 0.5 {
+                        target = .labelColor
+                    } else {
+                        target = .secondaryLabelColor
+                    }
+                } else {
+                    target = .labelColor
+                }
+
+                if existingColor != target {
+                    updated[.foregroundColor] = target
+                    changed = true
+                }
+            }
+
+            // MARK: Paragraph style — line height
+
+            if let para = (updated[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
+                let targetLineHeight = baseFont.pointSize * 1.34
+                if para.minimumLineHeight < targetLineHeight * 0.9 {
+                    para.minimumLineHeight = targetLineHeight
+                    para.maximumLineHeight = targetLineHeight
+                    updated[.paragraphStyle] = para
+                    changed = true
+                }
+            }
+
+            if changed {
+                astr.setAttributes(updated, range: range)
+            }
+        }
+    }
+
+    // MARK: - Helpers
 
     private static func trimTrailingWhitespaceAndNewlines(_ text: String) -> String {
         var output = text
