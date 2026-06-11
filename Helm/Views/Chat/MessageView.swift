@@ -1564,8 +1564,7 @@ struct MarkdownishText: View {
                         .markdownTheme(.helmChat)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.vertical, 2)
-                        .padding(.bottom, 2)
+                        .padding(.vertical, 10)
                 }
             }
         }
@@ -2281,7 +2280,7 @@ private enum ChatTextStyler {
             // MARK: Paragraph style — line height
 
             if let para = (updated[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
-                let targetLineHeight = baseFont.pointSize * 1.34
+                let targetLineHeight = baseFont.pointSize * 1.42
                 if para.minimumLineHeight < targetLineHeight * 0.9 {
                     para.minimumLineHeight = targetLineHeight
                     para.maximumLineHeight = targetLineHeight
@@ -2292,6 +2291,115 @@ private enum ChatTextStyler {
 
             if changed {
                 astr.setAttributes(updated, range: range)
+            }
+        }
+
+        // Second pass: walk by paragraph and tune spacing by block type.
+        // We do this in a separate pass because paragraph spacing applies
+        // to whole paragraphs, not individual attribute runs.
+        tuneParagraphSpacing(astr)
+    }
+
+    /// Detects the logical type of each paragraph (heading / body / list /
+    /// code / blockquote) and applies precise spacing values. More reliable
+    /// than trying to control spacing via CSS, which the AppKit HTML
+    /// importer only partially honours.
+    private static func tuneParagraphSpacing(_ astr: NSMutableAttributedString) {
+        let fullRange = NSRange(location: 0, length: astr.length)
+        let string = astr.string as NSString
+
+        var paraIdx = 0
+        var location = 0
+        while location < fullRange.length {
+            let paraRange = string.paragraphRange(for: NSRange(location: location, length: 0))
+            defer { location = NSMaxRange(paraRange) }
+            paraIdx += 1
+
+            // Skip empty / whitespace-only trailing paragraphs
+            let paraText = string.substring(with: paraRange)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !paraText.isEmpty else { continue }
+
+            // Sample the dominant font / colour at the paragraph start
+            var sampleRange = NSRange(location: 0, length: 0)
+            let sampleAttrs = astr.attributes(at: paraRange.location,
+                                               longestEffectiveRange: &sampleRange,
+                                               in: paraRange)
+
+            let font = sampleAttrs[.font] as? NSFont ?? baseFont
+            let isMono = font.fontDescriptor.symbolicTraits.contains(.monoSpace)
+                || font.familyName?.lowercased().contains("mono") ?? false
+            let isBold = font.fontDescriptor.symbolicTraits.contains(.bold)
+            let size = font.pointSize
+            let color = sampleAttrs[.foregroundColor] as? NSColor
+            let isSecondary = (color?.usingColorSpace(.sRGB)?.brightnessComponent ?? 0) > 0.45
+            let para = (sampleAttrs[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy()
+                as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+
+            let isFirstParagraph = paraIdx == 1
+            let hasIndent = para.headIndent > 0 || para.firstLineHeadIndent > 0
+
+            // Classify
+            //
+            // Important: indented paragraphs (list items, blockquotes) are
+            // NEVER treated as headings, even if they contain bold text.
+            // Bold within a list item is just an emphasis marker, not a
+            // section heading — it should be tight to the content below it.
+            let kind: ParagraphKind
+            if isMono {
+                kind = .code
+            } else if hasIndent {
+                if isSecondary {
+                    kind = .blockquote
+                } else {
+                    kind = .listItem
+                }
+            } else if isBold && size >= baseFont.pointSize + 0.5 {
+                // Heading — only applies to non-indented bold text
+                if size >= 19.5 { kind = .h1 }
+                else if size >= 17.5 { kind = .h2 }
+                else if size >= 16 { kind = .h3 }
+                else if size >= 14.8 { kind = .h4 }
+                else if size >= 13.8 { kind = .h5 }
+                else { kind = .h6 }
+            } else {
+                kind = .body
+            }
+
+            // Apply spacing
+
+            let (top, bottom) = kind.spacing(isFirst: isFirstParagraph)
+            para.paragraphSpacing = bottom
+            if !isFirstParagraph {
+                para.paragraphSpacingBefore = top
+            }
+
+            astr.addAttribute(.paragraphStyle, value: para, range: paraRange)
+        }
+    }
+
+    private enum ParagraphKind {
+        case h1, h2, h3, h4, h5, h6
+        case body
+        case listItem
+        case code
+        case blockquote
+
+        /// (top spacing, bottom spacing) in points. First paragraph of a
+        /// text block has zero top spacing so the message bubble doesn't
+        /// have dead air at the top.
+        func spacing(isFirst: Bool) -> (top: CGFloat, bottom: CGFloat) {
+            switch self {
+            case .h1: return (isFirst ? 0 : 22, 10)
+            case .h2: return (isFirst ? 0 : 20, 9)
+            case .h3: return (isFirst ? 0 : 18, 8)
+            case .h4: return (isFirst ? 0 : 16, 7)
+            case .h5: return (isFirst ? 0 : 14, 6)
+            case .h6: return (isFirst ? 0 : 14, 6)
+            case .body: return (isFirst ? 0 : 0, 11)
+            case .listItem: return (isFirst ? 0 : 6, 3)
+            case .code: return (isFirst ? 0 : 8, 14)
+            case .blockquote: return (isFirst ? 0 : 8, 12)
             }
         }
     }
