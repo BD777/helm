@@ -1528,12 +1528,21 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
 
 /// Full GitHub-flavored Markdown renderer for completed chat content.
 ///
-/// Uses an AppKit `NSTextView` (backed by an `NSAttributedString` built
-/// from MarkdownUI's HTML renderer) so drag selection works across
-/// paragraphs, list items, headings and code blocks. The HTML stylesheet
-/// is tuned to match Helm's chat visual style.
+/// Uses a mixed rendering strategy for best results:
 ///
-/// Streaming text still uses the plain-text path so partially emitted
+/// - **Text blocks** (paragraphs, headings, lists, code blocks, quotes) render via
+///   an AppKit `NSTextView` backed by an `NSAttributedString` built from
+///   MarkdownUI's HTML renderer. This gives continuous drag selection across
+///   paragraphs and proper I-beam cursors — things SwiftUI Text views can't do.
+///
+/// - **Table blocks** render with SwiftUI `Markdown` natively. NSTextView's
+///   HTML table support is too limited for good visuals, so tables fall back to
+///   SwiftUI rendering where MarkdownUI's full table theme shines.
+///
+/// The trade-off: selection can't cross a table boundary. That's rare in
+/// practice and a reasonable price for correct table visuals.
+///
+/// Streaming text still uses the plain-text AppKit path so partially emitted
 /// Markdown does not thrash layout.
 struct MarkdownishText: View {
     let raw: String
@@ -1541,8 +1550,99 @@ struct MarkdownishText: View {
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        SelectableMarkdownTextView(markdown: MarkdownDisplaySanitizer.sanitize(raw))
-            .fixedSize(horizontal: false, vertical: true)
+        let sanitized = MarkdownDisplaySanitizer.sanitize(raw)
+        let blocks = MarkdownBlockSplitter.split(sanitized)
+
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .text(let text):
+                    SelectableMarkdownTextView(markdown: text)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .table(let text):
+                    Markdown(text)
+                        .markdownTheme(.helmChat)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 2)
+                        .padding(.bottom, 2)
+                }
+            }
+        }
+    }
+}
+
+/// Splits a Markdown string into blocks that are optimally handled by
+/// different renderers. Currently only distinguishes table blocks from
+/// everything else — tables go to SwiftUI Markdown, the rest to NSTextView.
+private enum MarkdownBlockSplitter {
+    enum Block {
+        case text(String)
+        case table(String)
+    }
+
+    static func split(_ markdown: String) -> [Block] {
+        let lines = markdown.components(separatedBy: .newlines)
+        var blocks: [Block] = []
+        var currentTextLines: [String] = []
+        var i = 0
+
+        func flushText() {
+            if !currentTextLines.isEmpty {
+                blocks.append(.text(currentTextLines.joined(separator: "\n")))
+                currentTextLines.removeAll()
+            }
+        }
+
+        while i < lines.count {
+            let line = lines[i]
+
+            // Detect a potential table: line contains | and next line is a
+            // separator row (| --- | --- | pattern).
+            if looksLikeTableRow(line), i + 1 < lines.count, looksLikeTableSeparator(lines[i + 1]) {
+                flushText()
+
+                // Collect the full table block
+                var tableLines: [String] = []
+                tableLines.append(line)       // header
+                tableLines.append(lines[i + 1]) // separator
+                i += 2
+
+                while i < lines.count, looksLikeTableRow(lines[i]) {
+                    tableLines.append(lines[i])
+                    i += 1
+                }
+
+                blocks.append(.table(tableLines.joined(separator: "\n")))
+                continue
+            }
+
+            currentTextLines.append(line)
+            i += 1
+        }
+
+        flushText()
+        return blocks
+    }
+
+    private static func looksLikeTableRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        // A table row contains at least one | and isn't a fence / hr.
+        return trimmed.contains("|")
+            && !trimmed.hasPrefix("```")
+            && !trimmed.allSatisfy({ $0 == "-" || $0 == " " || $0 == "_" || $0 == "*" })
+    }
+
+    private static func looksLikeTableSeparator(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return false }
+        // Strip | and whitespace; remaining characters should be only - and :
+        let stripped = trimmed
+            .replacingOccurrences(of: "|", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        guard !stripped.isEmpty else { return false }
+        return stripped.allSatisfy({ $0 == "-" || $0 == ":" })
     }
 }
 
@@ -2023,28 +2123,33 @@ private enum ChatTextStyler {
 
         let style = """
         body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; \
-        font-size: 15px; color: #000001; line-height: 1.38; } \
-        p { margin: 0 0 8px; line-height: 1.38; } \
+        font-size: 15px; color: #000001; line-height: 1.45; } \
+        p { margin: 0 0 11px; line-height: 1.45; } \
         pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
-        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0 0.25em; \
+        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0 0.3em; \
         border-radius: 3px; color: #000001; } \
         pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; \
-        background: rgba(31,31,31,0.05) !important; margin: 2px 0 10px; } \
+        background: rgba(31,31,31,0.05) !important; margin: 6px 0 14px; } \
         pre code { background: transparent; padding: 0; font-size: 13px; } \
-        h1 { font-size: 20px; font-weight: 600; margin: 4px 0 10px; line-height: 1.3; color: #000001; } \
-        h2 { font-size: 18px; font-weight: 600; margin: 4px 0 9px; line-height: 1.3; color: #000001; } \
-        h3 { font-size: 16.5px; font-weight: 600; margin: 3px 0 8px; line-height: 1.3; color: #000001; } \
-        h4 { font-size: 15px; font-weight: 600; margin: 2px 0 7px; color: #000001; } \
-        h5 { font-size: 14px; font-weight: 600; margin: 2px 0 6px; color: #000001; } \
-        h6 { font-size: 13.5px; font-weight: 600; margin: 2px 0 6px; color: #666666; } \
-        blockquote { margin: 2px 0 10px; padding: 2px 0 2px 10px; \
+        h1 { font-size: 20px; font-weight: 600; margin: 22px 0 10px; line-height: 1.3; color: #000001; } \
+        h2 { font-size: 18px; font-weight: 600; margin: 20px 0 9px; line-height: 1.3; color: #000001; } \
+        h3 { font-size: 16.5px; font-weight: 600; margin: 18px 0 8px; line-height: 1.3; color: #000001; } \
+        h4 { font-size: 15px; font-weight: 600; margin: 16px 0 7px; color: #000001; } \
+        h5 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; color: #000001; } \
+        h6 { font-size: 13.5px; font-weight: 600; margin: 14px 0 6px; color: #666666; } \
+        body > h1:first-child, body > h2:first-child, body > h3:first-child, \
+        body > h4:first-child, body > h5:first-child, body > h6:first-child { margin-top: 0; } \
+        blockquote { margin: 6px 0 14px; padding: 2px 0 2px 10px; \
         border-left: 3px solid #999999; color: #666666; } \
-        blockquote p { color: #666666; } \
-        ul, ol { margin: 0 0 8px; padding-left: 22px; } \
-        li { margin: 2px 0; } \
+        blockquote p { color: #666666; margin-bottom: 8px; } \
+        blockquote p:last-child { margin-bottom: 0; } \
+        ul, ol { margin: 4px 0 12px; padding-left: 22px; } \
+        li { margin: 3px 0; } \
+        li > p { margin: 3px 0; } \
         ul li { list-style-type: disc; } \
         ol li { list-style-type: decimal; } \
-        table { border-collapse: collapse; margin: 4px 0 12px; font-size: 14px; } \
+        ul ul, ol ul, ul ol, ol ol { margin: 3px 0 4px; } \
+        table { border-collapse: collapse; margin: 6px 0 14px; font-size: 14px; } \
         th, td { border: 1px solid #999999; padding: 6px 10px; text-align: left; \
         vertical-align: top; color: #000001; } \
         th { background: rgba(153,153,153,0.12); font-weight: 600; } \
