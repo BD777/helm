@@ -61,9 +61,11 @@ struct ToolCallCard: View {
                 .truncationMode(.tail)
             Spacer(minLength: 0)
             if hasBody {
-                Image(systemName: collapsed ? "chevron.down" : "chevron.up")
+                Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 180))
+                    .animation(Self.expandCollapseAnimation, value: collapsed)
             }
         }
         .contentShape(Rectangle())
@@ -100,6 +102,8 @@ struct ToolCallCard: View {
         if let b = call.body { return !b.isEmpty }
         return false
     }
+
+    private static let expandCollapseAnimation = Animation.easeInOut(duration: 0.16)
 }
 
 /// Compact wrapper for a run of adjacent tool calls. This keeps long command
@@ -115,9 +119,7 @@ struct ToolCallGroupCard: View {
         } else if !calls.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Button {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        collapsed.toggle()
-                    }
+                    collapsed.toggle()
                 } label: {
                     headerContent
                         .accessibilityElement(children: .ignore)
@@ -151,9 +153,11 @@ struct ToolCallGroupCard: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
-            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+            Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
+                .rotationEffect(.degrees(collapsed ? 0 : 90))
+                .animation(Self.expandCollapseAnimation, value: collapsed)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -316,4 +320,6 @@ struct ToolCallGroupCard: View {
         }
         return .other
     }
+
+    private static let expandCollapseAnimation = Animation.easeInOut(duration: 0.16)
 }
