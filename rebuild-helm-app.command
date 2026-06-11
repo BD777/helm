@@ -8,6 +8,7 @@ REMOTE="${HELM_REMOTE:-origin}"
 BRANCH="${HELM_BRANCH:-main}"
 CONFIGURATION="${HELM_CONFIGURATION:-Release}"
 INSTALL_DIR="${HELM_INSTALL_DIR:-/Applications}"
+USE_CURRENT_WORKTREE="${HELM_USE_CURRENT_WORKTREE:-0}"
 
 SCRIPT_PATH="${0:A}"
 REPO_DIR="${SCRIPT_PATH:h}"
@@ -111,6 +112,12 @@ status_is_clean_except_this_script() {
 
 prepare_source_tree() {
   run git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null
+
+  if [[ "$USE_CURRENT_WORKTREE" == "1" ]]; then
+    log "Building from current checkout, including uncommitted changes."
+    SOURCE_DIR="$REPO_DIR"
+    return
+  fi
 
   log "Fetching latest $REMOTE/$BRANCH."
   run git -C "$REPO_DIR" fetch --prune "$REMOTE" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
@@ -314,7 +321,11 @@ install_packaged_app() {
 }
 
 main() {
-  log "Rebuild $APP_NAME.app from $REMOTE/$BRANCH."
+  if [[ "$USE_CURRENT_WORKTREE" == "1" ]]; then
+    log "Rebuild $APP_NAME.app from current checkout."
+  else
+    log "Rebuild $APP_NAME.app from $REMOTE/$BRANCH."
+  fi
   log "Repository: $REPO_DIR"
 
   ensure_full_xcode
