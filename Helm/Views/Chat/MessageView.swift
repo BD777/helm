@@ -776,7 +776,8 @@ struct MessageView: View {
                                 renderMarkdown: renderMarkdown)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, isUser ? 12 : 0)
-            .padding(.vertical, isUser ? 8 : 0)
+            .padding(.top, isUser ? 9 : 0)
+            .padding(.bottom, isUser ? 7 : 0)
             .background(
                 isUser
                 ? RoundedRectangle(cornerRadius: DS.cornerRadius)
@@ -2125,11 +2126,13 @@ private enum ChatTextStyler {
         font-size: 15px; color: #000001; line-height: 1.45; } \
         p { margin: 0 0 11px; line-height: 1.45; } \
         pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
-        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0 0.3em; \
-        border-radius: 3px; color: #000001; } \
-        pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; \
-        background: rgba(31,31,31,0.05) !important; margin: 6px 0 14px; } \
-        pre code { background: transparent; padding: 0; font-size: 13px; } \
+        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0.08em 0.35em; \
+        border-radius: 4px; color: #000001; line-height: 1.25; } \
+        pre { padding: 10px 14px; border-radius: 6px; overflow-x: auto; \
+        background: rgba(31,31,31,0.05) !important; margin: 6px 0 14px; \
+        line-height: 1.45; } \
+        pre code { background: transparent; padding: 0; font-size: 13px; \
+        line-height: 1.45; border-radius: 0; } \
         h1 { font-size: 20px; font-weight: 600; margin: 22px 0 10px; line-height: 1.3; color: #000001; } \
         h2 { font-size: 18px; font-weight: 600; margin: 20px 0 9px; line-height: 1.3; color: #000001; } \
         h3 { font-size: 16.5px; font-weight: 600; margin: 18px 0 8px; line-height: 1.3; color: #000001; } \

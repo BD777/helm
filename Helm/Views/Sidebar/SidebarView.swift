@@ -360,18 +360,18 @@ private struct ProjectSection: View {
                 }
                 ForEach(displayedSessions) { s in
                     let isRunning = store.isSessionStreaming(s.id)
-                    Button {
+                    SessionRow(
+                        session: s,
+                        vendor: store.profile(s.profileId)?.vendor,
+                        isActive: s.id == store.selectedSessionId,
+                        isHovered: hoveredSessionId == s.id,
+                        isRunning: isRunning,
+                        onArchive: { store.archiveSession(s.id) }
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
                         store.selectedSessionId = s.id
-                    } label: {
-                        SessionRow(
-                            session: s,
-                            vendor: store.profile(s.profileId)?.vendor,
-                            isActive: s.id == store.selectedSessionId,
-                            isHovered: hoveredSessionId == s.id,
-                            isRunning: isRunning
-                        )
                     }
-                    .buttonStyle(.plain)
                     .onHover { hovering in
                         hoveredSessionId = hovering ? s.id : (hoveredSessionId == s.id ? nil : hoveredSessionId)
                     }
@@ -833,6 +833,7 @@ private struct SessionRow: View {
     let isActive: Bool
     let isHovered: Bool
     let isRunning: Bool
+    var onArchive: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 8) {
@@ -850,6 +851,20 @@ private struct SessionRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
+            if isHovered && !isRunning {
+                Button(action: onArchive) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Archive conversation")
+                .accessibilityLabel("Archive conversation")
+                .transition(.opacity)
+                .padding(.trailing, -2)
+            }
         }
         .padding(.leading, 18)
         .padding(.trailing, 8)
@@ -868,6 +883,7 @@ private struct SessionRow: View {
         .accessibilityLabel(session.title)
         .accessibilityValue(isRunning ? "running" : "")
         .accessibilityHint(isRunning ? "Conversation is running" : "Open conversation")
+        .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 
     private var background: Color {

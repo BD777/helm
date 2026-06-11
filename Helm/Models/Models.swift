@@ -1182,7 +1182,7 @@ struct ProjectSchedulerState: Identifiable, Hashable, Codable {
     init(projectId: UUID,
          defaultWorkerProfileId: UUID? = nil,
          workflowTemplates: [ProjectWorkflowTemplate] = [.default],
-         selectedWorkflowTemplateId: UUID? = ProjectWorkflowTemplate.defaultID,
+         selectedWorkflowTemplateId: UUID? = nil,
          inbox: [ProjectSchedulerInboxItem] = [],
          tasks: [ProjectSchedulerTask] = [],
          humanActions: [ProjectSchedulerHumanAction] = [],

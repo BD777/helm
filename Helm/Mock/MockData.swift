@@ -31,7 +31,22 @@ final class AppStore {
             }
             scheduleStateSave()
             if let id = selectedSessionId {
-                restoreTranscriptSnapshotIfNeeded(for: id)
+                // Defer snapshot loading to a background queue so the tab
+                // switch itself feels instant. The transcript stays empty
+                // briefly (showing a loading indicator in the UI) and fills
+                // in on the next main-thread tick.
+                Task.detached(priority: .userInitiated) { [weak self] in
+                    let raw = TranscriptSnapshotStore.load(sessionId: id)
+                    await MainActor.run { [weak self] in
+                        guard let self,
+                              self.selectedSessionId == id,
+                              let sIdx = self.sessions.firstIndex(where: { $0.id == id }),
+                              self.sessions[sIdx].transcript.isEmpty,
+                              !raw.isEmpty
+                        else { return }
+                        self.applyLoadedSnapshotRaw(raw, sessionIndex: sIdx)
+                    }
+                }
                 Task { @MainActor [weak self] in
                     await self?.ensureHistoryLoaded(for: id)
                 }
@@ -2953,6 +2968,37 @@ else:
         NSLog("[helm.history] restored %ld snapshot items for %@",
               snapshot.count, sessionId.uuidString)
         return true
+    }
+
+    /// Apply a background-loaded snapshot (raw items from disk) to a session
+    /// on the main thread. Handles sanitisation and goal runtime extraction.
+    private func applyLoadedSnapshotRaw(_ rawItems: [TranscriptItem], sessionIndex: Int) {
+        guard sessions.indices.contains(sessionIndex),
+              sessions[sessionIndex].transcript.isEmpty,
+              !rawItems.isEmpty
+        else { return }
+
+        let items = Self.removingRecoverableResumeErrors(from: rawItems)
+        guard !items.isEmpty else {
+            if !rawItems.isEmpty {
+                let sessionId = sessions[sessionIndex].id
+                TranscriptSnapshotStore.delete(sessionId: sessionId)
+            }
+            return
+        }
+
+        let sessionId = sessions[sessionIndex].id
+        sessions[sessionIndex].transcript = items
+        let latestGoal = Self.latestGoalRuntime(from: items)
+        if latestGoal.found {
+            sessions[sessionIndex].goalRuntime = latestGoal.state
+        }
+        // If the cleaned snapshot differs from the raw one, re-save.
+        if items.count != rawItems.count {
+            TranscriptSnapshotStore.save(sessionId: sessionId, items: items)
+        }
+        NSLog("[helm.history] async-restored %ld items for %@",
+              items.count, sessionId.uuidString)
     }
 
     // MARK: - Agent invocation
