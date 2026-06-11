@@ -12,7 +12,7 @@ struct MessageListView: View {
         let items = displayItems
 
         ScrollView(showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 if showStreamingPlaceholder {
                     streamingPlaceholder
                         .frame(maxWidth: DS.messageMaxWidth, alignment: .leading)
@@ -39,7 +39,6 @@ struct MessageListView: View {
                 }
             )
         }
-        .id(scrollContentIdentity)
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded(onTranscriptTap))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -95,10 +94,6 @@ struct MessageListView: View {
             autoScroll.prepareForSessionChange()
             autoScroll.forceScrollToBottom(animated: false)
         }
-        .onChange(of: scrollContentIdentity) { _, _ in
-            autoScroll.prepareForSessionChange()
-            autoScroll.forceScrollToBottom(animated: false)
-        }
     }
 
     /// Re-derives the rendered turn structure from the raw transcript.
@@ -112,12 +107,6 @@ struct MessageListView: View {
 
     private var showHistoryLoading: Bool {
         store.selectedSessionIsLoadingHistory && displayItems.isEmpty
-    }
-
-    private var scrollContentIdentity: String {
-        let sessionID = store.selectedSessionId?.uuidString ?? "none"
-        let loadPhase = showHistoryLoading ? "loading" : "ready"
-        return "\(sessionID)-\(loadPhase)"
     }
 
     private var showStreamingPlaceholder: Bool {
@@ -228,16 +217,14 @@ private final class ChatAutoScrollController: ObservableObject {
     private weak var observedDocumentView: NSView?
     private var scrollObservers: [NSObjectProtocol] = []
     private var documentObserver: NSObjectProtocol?
-    private var followsBottom = true
+    private var isPinnedToBottom = true
     private var isProgrammaticScroll = false
     private var isLiveUserScroll = false
     private var scheduledScrollID = 0
-    private var userScrollResumeID = 0
 
     private let jumpButtonTolerance: CGFloat = 96
-    private let followResumeTolerance: CGFloat = 18
-    private let animatedDuration: TimeInterval = 0.18
-    private let maxScrollPasses = 8
+    private let pinnedTolerance: CGFloat = 32
+    private let animatedDuration: TimeInterval = 0.16
 
     deinit {
         let center = NotificationCenter.default
@@ -252,6 +239,7 @@ private final class ChatAutoScrollController: ObservableObject {
     func attach(_ scrollView: NSScrollView) {
         if self.scrollView !== scrollView {
             removeScrollObservers()
+            removeDocumentObserver()
             self.scrollView = scrollView
             scrollView.contentView.postsBoundsChangedNotifications = true
 
@@ -272,7 +260,6 @@ private final class ChatAutoScrollController: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLiveUserScroll = true
-                    self?.suspendBottomFollow()
                     self?.refreshJumpButton()
                 }
             })
@@ -283,7 +270,7 @@ private final class ChatAutoScrollController: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLiveUserScroll = true
-                    self?.userDidScroll()
+                    self?.refreshPinnedState(userInitiated: true)
                 }
             })
             scrollObservers.append(center.addObserver(
@@ -293,89 +280,55 @@ private final class ChatAutoScrollController: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLiveUserScroll = false
-                    self?.updateFollowPreference(resumeTolerance: self?.followResumeTolerance ?? 0)
+                    self?.refreshPinnedState(userInitiated: true)
                 }
             })
-            followsBottom = true
+            isPinnedToBottom = true
         }
 
         observeDocumentView(scrollView.documentView)
         refreshJumpButton()
-        if followsBottom {
+        if isPinnedToBottom {
             scheduleScrollToBottom(animated: false, force: false)
         }
     }
 
     func followIfNeeded() {
-        guard followsBottom else { return }
+        guard isPinnedToBottom else { return }
         scheduleScrollToBottom(animated: false, force: false)
     }
 
     func prepareForSessionChange() {
         scheduledScrollID += 1
-        followsBottom = true
+        isPinnedToBottom = true
         setShowJumpToBottom(false)
     }
 
     func forceScrollToBottom(animated: Bool) {
-        followsBottom = true
+        isPinnedToBottom = true
         scheduleScrollToBottom(animated: animated, force: true)
     }
 
     private func visibleBoundsDidChange() {
         guard !isProgrammaticScroll, let scrollView else { return }
-        if clampVisibleBoundsIfNeeded(in: scrollView) {
-            updateFollowPreference(resumeTolerance: followResumeTolerance)
-            return
-        }
-        if isLiveUserScroll || currentEventLooksLikeUserScroll(in: scrollView) {
-            userDidScroll()
-        } else if distanceFromBottom(in: scrollView) <= followResumeTolerance {
-            followsBottom = true
-            setShowJumpToBottom(false)
-        }
+        refreshPinnedState(userInitiated: isLiveUserScroll || currentEventLooksLikeUserScroll(in: scrollView))
     }
 
     private func documentFrameDidChange() {
-        guard let scrollView else { return }
-        if clampVisibleBoundsIfNeeded(in: scrollView) {
-            followsBottom = distanceFromBottom(in: scrollView) <= jumpButtonTolerance
-        }
+        guard scrollView != nil else { return }
         refreshJumpButton()
-        guard followsBottom, !isLiveUserScroll else { return }
+        guard isPinnedToBottom, !isLiveUserScroll else { return }
         scheduleScrollToBottom(animated: false, force: false)
     }
 
-    private func suspendBottomFollow() {
-        scheduledScrollID += 1
-        followsBottom = false
-    }
-
-    private func userDidScroll() {
-        suspendBottomFollow()
-        refreshJumpButton()
-        scheduleUserScrollResumeCheck()
-    }
-
-    private func scheduleUserScrollResumeCheck() {
-        userScrollResumeID += 1
-        let resumeID = userScrollResumeID
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(180)) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self,
-                      self.userScrollResumeID == resumeID,
-                      !self.isLiveUserScroll,
-                      !self.isProgrammaticScroll
-                else { return }
-                self.updateFollowPreference(resumeTolerance: self.followResumeTolerance)
-            }
-        }
-    }
-
-    private func updateFollowPreference(resumeTolerance: CGFloat) {
+    private func refreshPinnedState(userInitiated: Bool) {
         guard let scrollView else { return }
         let distance = distanceFromBottom(in: scrollView)
-        followsBottom = distance <= resumeTolerance
+        if userInitiated {
+            isPinnedToBottom = distance <= pinnedTolerance
+        } else if distance <= pinnedTolerance {
+            isPinnedToBottom = true
+        }
         setShowJumpToBottom(distance > jumpButtonTolerance)
     }
 
@@ -418,44 +371,25 @@ private final class ChatAutoScrollController: ObservableObject {
         scrollObservers = []
     }
 
+    private func removeDocumentObserver() {
+        if let documentObserver {
+            NotificationCenter.default.removeObserver(documentObserver)
+            self.documentObserver = nil
+        }
+        observedDocumentView = nil
+    }
+
     private func scheduleScrollToBottom(animated: Bool, force: Bool) {
         scheduledScrollID += 1
         let scrollID = scheduledScrollID
-        scheduleScrollPass(scrollID: scrollID, animated: animated, force: force, pass: 0)
-    }
-
-    private func scheduleScrollPass(scrollID: Int,
-                                    animated: Bool,
-                                    force: Bool,
-                                    pass: Int) {
-        let delay = scrollDelay(forPass: pass)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self,
                       self.scheduledScrollID == scrollID,
-                      force || self.followsBottom
+                      force || self.isPinnedToBottom
                 else { return }
-                self.scrollToBottom(animated: animated && pass == 0)
-                if pass + 1 < self.maxScrollPasses {
-                    self.scheduleScrollPass(scrollID: scrollID,
-                                            animated: false,
-                                            force: force,
-                                            pass: pass + 1)
-                }
+                self.scrollToBottom(animated: animated)
             }
-        }
-    }
-
-    private func scrollDelay(forPass pass: Int) -> DispatchTimeInterval {
-        switch pass {
-        case 0: return .nanoseconds(0)
-        case 1: return .milliseconds(16)
-        case 2: return .milliseconds(33)
-        case 3: return .milliseconds(66)
-        case 4: return .milliseconds(120)
-        case 5: return .milliseconds(200)
-        case 6: return .milliseconds(320)
-        default: return .milliseconds(500)
         }
     }
 
@@ -476,7 +410,7 @@ private final class ChatAutoScrollController: ObservableObject {
         )
         let targetOrigin = clipView.constrainBoundsRect(requestedBounds).origin
         guard abs(clipView.bounds.origin.y - targetOrigin.y) > 0.5 else {
-            followsBottom = true
+            isPinnedToBottom = true
             setShowJumpToBottom(false)
             return
         }
@@ -502,31 +436,8 @@ private final class ChatAutoScrollController: ObservableObject {
         }
     }
 
-    @discardableResult
-    private func clampVisibleBoundsIfNeeded(in scrollView: NSScrollView) -> Bool {
-        guard let documentView = scrollView.documentView else { return false }
-
-        scrollView.layoutSubtreeIfNeeded()
-        documentView.layoutSubtreeIfNeeded()
-
-        let clipView = scrollView.contentView
-        let constrainedOrigin = clipView
-            .constrainBoundsRect(clipView.bounds)
-            .origin
-        let currentOrigin = clipView.bounds.origin
-        guard abs(currentOrigin.x - constrainedOrigin.x) > 0.5
-            || abs(currentOrigin.y - constrainedOrigin.y) > 0.5
-        else { return false }
-
-        isProgrammaticScroll = true
-        clipView.scroll(to: constrainedOrigin)
-        scrollView.reflectScrolledClipView(clipView)
-        isProgrammaticScroll = false
-        return true
-    }
-
     private func finishProgrammaticScroll() {
-        followsBottom = true
+        isPinnedToBottom = true
         setShowJumpToBottom(false)
         isProgrammaticScroll = false
     }
@@ -874,32 +785,7 @@ struct MessageView: View {
             )
 
             if canCopyMarkdown {
-                HStack(spacing: 6) {
-                    if !isUser {
-                        CopyMarkdownButton(markdown: markdownForCopy)
-                            .opacity(isHovering ? 1 : 0)
-                            .allowsHitTesting(isHovering)
-                    }
-                    if isHovering, let timestamp = displayTimestamp {
-                        Text(timestamp)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    if isUser {
-                        if isHovering, let timestamp = displayTimestamp {
-                            Text(timestamp)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                        }
-                        CopyMarkdownButton(markdown: markdownForCopy)
-                            .opacity(isHovering ? 1 : 0)
-                            .allowsHitTesting(isHovering)
-                    }
-                }
-                .frame(height: 20)
+                copyControls
             }
         }
         .onHover { hovering in
@@ -920,6 +806,42 @@ struct MessageView: View {
 
     private var canCopyMarkdown: Bool {
         !markdownForCopy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var copyControls: some View {
+        HStack(spacing: 0) {
+            if isUser {
+                Spacer(minLength: 0)
+                controlCluster
+            } else {
+                controlCluster
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 18, maxHeight: 18, alignment: isUser ? .trailing : .leading)
+    }
+
+    private var controlCluster: some View {
+        HStack(spacing: 12) {
+            if !isUser {
+                CopyMarkdownButton(markdown: markdownForCopy)
+                    .opacity(isHovering ? 1 : 0)
+                    .allowsHitTesting(isHovering)
+            }
+            if let timestamp = displayTimestamp {
+                Text(timestamp)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .opacity(isHovering ? 1 : 0)
+            }
+            if isUser {
+                CopyMarkdownButton(markdown: markdownForCopy)
+                    .opacity(isHovering ? 1 : 0)
+                    .allowsHitTesting(isHovering)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
     }
 
     private var displayTimestamp: String? {
@@ -952,7 +874,7 @@ private struct CopyMarkdownButton: View {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 24, height: 20)
+                .frame(width: 16, height: 18, alignment: .leading)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1270,9 +1192,7 @@ private struct ThinkingBlock: View {
     private var header: some View {
         if hasDetails {
             Button {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    userPreference = !collapsed
-                }
+                userPreference = !collapsed
             } label: {
                 headerContent(showChevron: true)
                     .contentShape(Rectangle())
@@ -1316,13 +1236,17 @@ private struct ThinkingBlock: View {
                 .font(.system(size: 12.5))
                 .foregroundStyle(.tertiary)
             if showChevron {
-                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    .animation(Self.expandCollapseAnimation, value: collapsed)
             }
             Spacer(minLength: 0)
         }
     }
+
+    private static let expandCollapseAnimation = Animation.easeInOut(duration: 0.18)
 }
 
 private struct ImagePartView: View {
@@ -1602,20 +1526,21 @@ private final class MessageSkillTextAttachment: NSTextAttachment {
     }
 }
 
-/// Full block-level Markdown renderer for chat content.
+/// Full GitHub-flavored Markdown renderer for completed chat content.
 ///
-/// Uses a single AppKit `NSTextView` (via `NSAttributedString` built from the
-/// Markdown source) so drag selection works across wrapped lines, paragraphs,
-/// list items and headings. SwiftUI's `.textSelection(.enabled)` only works
-/// within a single `Text` view, which is why MarkdownUI-backed rendering kept
-/// selection stuck inside one logical block.
+/// MarkdownUI handles the mature block model here: tables, task lists, fenced
+/// code, blockquotes, links and images. Streaming text still uses the AppKit
+/// plain-text path below so partially emitted Markdown does not thrash layout.
 struct MarkdownishText: View {
     let raw: String
 
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        SelectableMarkdownTextView(markdown: MarkdownDisplaySanitizer.sanitize(raw))
+        let markdown = MarkdownDisplaySanitizer.sanitize(raw)
+        Markdown(markdown)
+            .markdownTheme(.helmChat)
+            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -1628,75 +1553,314 @@ private struct PlainStreamingText: View {
     init(_ raw: String) { self.raw = raw }
 
     var body: some View {
-        SelectableMarkdownTextView(markdown: raw, treatAsPlainText: true)
+        SelectablePlainTextView(text: raw)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-/// AppKit-backed text view that renders Markdown (or plain text) with full
-/// continuous multi-line / cross-paragraph selection support.
-private struct SelectableMarkdownTextView: NSViewRepresentable {
-    let markdown: String
-    var treatAsPlainText: Bool = false
+private extension Theme {
+    static let helmChat = Theme()
+        .text {
+            ForegroundColor(.primary)
+            FontSize(15)
+        }
+        .code {
+            FontFamilyVariant(.monospaced)
+            FontSize(.em(0.9))
+            BackgroundColor(Color.primary.opacity(0.08))
+        }
+        .strong {
+            FontWeight(.semibold)
+        }
+        .link {
+            ForegroundColor(.accentColor)
+        }
+        .heading1 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 4, bottom: 10)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.35))
+                }
+        }
+        .heading2 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 4, bottom: 9)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.22))
+                }
+        }
+        .heading3 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 3, bottom: 8)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(1.1))
+                }
+        }
+        .heading4 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 2, bottom: 7)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                }
+        }
+        .heading5 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 2, bottom: 6)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(0.95))
+                }
+        }
+        .heading6 { configuration in
+            configuration.label
+                .relativeLineSpacing(.em(0.12))
+                .markdownMargin(top: 2, bottom: 6)
+                .markdownTextStyle {
+                    FontWeight(.semibold)
+                    FontSize(.em(0.92))
+                    ForegroundColor(.secondary)
+                }
+        }
+        .paragraph { configuration in
+            configuration.label
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.24))
+                .markdownMargin(top: 0, bottom: 8)
+        }
+        .blockquote { configuration in
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.helmBorderStrong)
+                    .frame(width: 3)
+                configuration.label
+                    .markdownTextStyle {
+                        ForegroundColor(.secondary)
+                    }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .markdownMargin(top: 2, bottom: 10)
+        }
+        .codeBlock { configuration in
+            ScrollView(.horizontal, showsIndicators: false) {
+                configuration.label
+                    .fixedSize(horizontal: true, vertical: true)
+                    .relativeLineSpacing(.em(0.18))
+                    .markdownTextStyle {
+                        FontFamilyVariant(.monospaced)
+                        FontSize(.em(0.9))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+            .background(Color.helmCard.opacity(0.75), in: RoundedRectangle(cornerRadius: DS.cornerRadiusSmall))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.cornerRadiusSmall)
+                    .stroke(Color.helmBorderStrong, lineWidth: 0.5)
+            )
+            .markdownMargin(top: 2, bottom: 10)
+        }
+        .listItem { configuration in
+            configuration.label
+                .markdownMargin(top: .em(0.18))
+        }
+        .taskListMarker { configuration in
+            Image(systemName: configuration.isCompleted ? "checkmark.square.fill" : "square")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.secondary, Color.helmCard)
+                .imageScale(.small)
+                .relativeFrame(minWidth: .em(1.45), alignment: .trailing)
+        }
+        .table { configuration in
+            ScrollView(.horizontal, showsIndicators: true) {
+                configuration.label
+                    .fixedSize(horizontal: true, vertical: true)
+                    .markdownTableBorderStyle(.init(color: Color.helmBorderStrong, width: 0.75))
+                    .markdownTableBackgroundStyle(
+                        .alternatingRows(
+                            Color.clear,
+                            Color.helmHover.opacity(0.55),
+                            header: Color.helmHover.opacity(0.9)
+                        )
+                    )
+            }
+            .markdownMargin(top: 4, bottom: 12)
+        }
+        .tableCell { configuration in
+            configuration.label
+                .markdownTextStyle {
+                    if configuration.row == 0 {
+                        FontWeight(.semibold)
+                    }
+                    BackgroundColor(nil)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .relativeLineSpacing(.em(0.18))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+        }
+        .thematicBreak {
+            Divider()
+                .overlay(Color.helmBorderStrong)
+                .markdownMargin(top: 10, bottom: 10)
+        }
+}
 
-    func makeNSView(context: Context) -> NSTextView {
-        let tv = NonEditableTextView()
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.isRichText = true
-        tv.allowsUndo = false
-        tv.drawsBackground = false
-        tv.textContainerInset = .zero
-        tv.textContainer?.lineFragmentPadding = 0
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.lineBreakMode = .byWordWrapping
-        tv.isHorizontallyResizable = false
-        tv.isVerticallyResizable = true
-        tv.autoresizingMask = [.width]
-        tv.isAutomaticLinkDetectionEnabled = false
-        tv.isAutomaticDataDetectionEnabled = false
-        tv.isAutomaticDashSubstitutionEnabled = false
-        tv.isAutomaticQuoteSubstitutionEnabled = false
-        tv.isAutomaticTextReplacementEnabled = false
-        tv.isAutomaticSpellingCorrectionEnabled = false
-        tv.linkTextAttributes = [
-            .foregroundColor: NSColor.controlAccentColor,
-            .underlineStyle: NSNumber(value: NSUnderlineStyle.single.rawValue)
-        ]
-        tv.importsGraphics = true
-        updateContent(in: tv)
-        return tv
+/// AppKit-backed plain text view with continuous multi-line selection support.
+private struct SelectablePlainTextView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> MeasuredSelectableTextView {
+        let view = MeasuredSelectableTextView()
+        updateContent(in: view)
+        return view
     }
 
-    func updateNSView(_ nsView: NSTextView, context: Context) {
+    func updateNSView(_ nsView: MeasuredSelectableTextView, context: Context) {
         updateContent(in: nsView)
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
-        guard let lm = nsView.layoutManager, let tc = nsView.textContainer else { return nil }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: MeasuredSelectableTextView, context: Context) -> CGSize? {
         let width: CGFloat = {
             if let w = proposal.width, w.isFinite, w > 0 { return w }
             if nsView.bounds.width > 0 { return nsView.bounds.width }
             return 600
         }()
-        if tc.size.width != width {
-            tc.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
-        }
-        lm.ensureLayout(for: tc)
-        let used = lm.usedRect(for: tc)
-        let minHeight = lm.defaultLineHeight(for: ChatTextStyler.baseFont)
-        return CGSize(width: width, height: max(minHeight, ceil(used.height)))
+        return nsView.sizeThatFits(width: width)
     }
 
-    private func updateContent(in tv: NSTextView) {
-        let attributed: NSAttributedString = {
-            if treatAsPlainText {
-                return ChatTextStyler.plainTextAttributedString(markdown)
-            }
-            return ChatTextStyler.attributedString(fromMarkdown: markdown)
-        }()
-        tv.textStorage?.setAttributedString(attributed)
+    private func updateContent(in view: MeasuredSelectableTextView) {
+        let attributed = ChatTextStyler.plainTextAttributedString(text)
+        view.setAttributedString(attributed,
+                                 sourceText: text,
+                                 treatsAsPlainText: true)
+    }
+}
+
+private final class MeasuredSelectableTextView: NSView {
+    private let textView = NonEditableTextView()
+    private var hasContent = false
+    private var lastSourceText = ""
+    private var lastTreatsAsPlainText = false
+    private var measuredWidth: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureTextView()
+        addSubview(textView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func setAttributedString(_ attributed: NSAttributedString,
+                             sourceText: String,
+                             treatsAsPlainText: Bool) {
+        guard !hasContent
+            || sourceText != lastSourceText
+            || treatsAsPlainText != lastTreatsAsPlainText
+        else { return }
+
+        hasContent = true
+        lastSourceText = sourceText
+        lastTreatsAsPlainText = treatsAsPlainText
+        textView.textStorage?.setAttributedString(attributed)
+        invalidateMeasuredLayout()
+    }
+
+    func sizeThatFits(width: CGFloat) -> CGSize {
+        let resolvedWidth = max(1, width)
+        let height = measuredHeight(for: resolvedWidth)
+        return CGSize(width: resolvedWidth, height: height)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let width = measuredWidth > 0 ? measuredWidth : max(1, bounds.width)
+        return NSSize(width: NSView.noIntrinsicMetric,
+                      height: measuredHeight(for: width))
+    }
+
+    override func layout() {
+        super.layout()
+        textView.frame = bounds
+        updateTextContainerWidth(max(1, bounds.width))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldWidth = frame.size.width
+        super.setFrameSize(newSize)
+        if abs(oldWidth - newSize.width) > 0.5 {
+            updateTextContainerWidth(max(1, newSize.width))
+            invalidateMeasuredLayout()
+        }
+    }
+
+    private func configureTextView() {
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.allowsUndo = false
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.linkTextAttributes = [
+            .foregroundColor: NSColor.controlAccentColor,
+            .underlineStyle: NSNumber(value: NSUnderlineStyle.single.rawValue)
+        ]
+        textView.importsGraphics = true
+    }
+
+    private func measuredHeight(for width: CGFloat) -> CGFloat {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer
+        else {
+            return ceil(ChatTextStyler.baseFont.pointSize * 1.3)
+        }
+
+        updateTextContainerWidth(width)
+        layoutManager.ensureLayout(for: textContainer)
+        let usedHeight = ceil(layoutManager.usedRect(for: textContainer).height)
+        let minimumHeight = ceil(layoutManager.defaultLineHeight(for: ChatTextStyler.baseFont))
+        return max(minimumHeight, usedHeight)
+    }
+
+    private func updateTextContainerWidth(_ width: CGFloat) {
+        guard let textContainer = textView.textContainer else { return }
+        let textWidth = max(1, width - textView.textContainerInset.width * 2)
+        if abs(textContainer.size.width - textWidth) > 0.5 {
+            textContainer.size = NSSize(width: textWidth,
+                                        height: CGFloat.greatestFiniteMagnitude)
+        }
+        measuredWidth = width
+    }
+
+    private func invalidateMeasuredLayout() {
+        needsLayout = true
+        invalidateIntrinsicContentSize()
+        superview?.needsLayout = true
     }
 }
 
@@ -1753,213 +1917,65 @@ private final class NonEditableTextView: NSTextView {
     }
 }
 
-/// Converts Markdown (and plain text) into rich `NSAttributedString` values
-/// that match Helm's chat visual style. The pipeline uses cmark-gfm (via
-/// MarkdownUI) for HTML generation and AppKit's HTML importer for the
-/// initial styling pass, then normalises font sizes / colors to match the
-/// rest of the chat surface.
+/// Styles plain streaming text for the AppKit-backed selectable text view.
 private enum ChatTextStyler {
-    static let baseFont = NSFont.systemFont(ofSize: 13.5)
-    static let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    static let baseFont = NSFont.systemFont(ofSize: 15)
+    private static let bodyLineSpacing: CGFloat = 5.2
+    private static let bodyParagraphSpacing: CGFloat = 8.0
 
     static func plainTextAttributedString(_ text: String) -> NSAttributedString {
+        let displayText = trimTrailingWhitespaceAndNewlines(text)
         let para = NSMutableParagraphStyle()
-        para.lineSpacing = 0.18 * baseFont.pointSize
+        para.lineSpacing = bodyLineSpacing
+        para.paragraphSpacing = bodyParagraphSpacing
         para.lineBreakMode = .byWordWrapping
-        return NSAttributedString(string: text, attributes: [
+        let attributed = NSMutableAttributedString(string: displayText, attributes: [
             .font: baseFont,
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: para
         ])
+        removeTrailingParagraphSpacing(in: attributed)
+        return attributed
     }
 
-    static func attributedString(fromMarkdown markdown: String) -> NSAttributedString {
-        let html = renderedHTML(from: markdown)
-        guard let data = html.data(using: .utf8) else {
-            return plainTextAttributedString(markdown)
+    private static func trimTrailingWhitespaceAndNewlines(_ text: String) -> String {
+        var output = text
+        while let scalar = output.unicodeScalars.last,
+              CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            output.removeLast()
         }
-        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue
-        ]
-        guard let loaded = try? NSMutableAttributedString(data: data, options: options, documentAttributes: nil) else {
-            return plainTextAttributedString(markdown)
+        return output
+    }
+
+    private static func trimTrailingWhitespaceAndNewlines(in attributed: NSMutableAttributedString) {
+        while attributed.length > 0 {
+            let tailRange = NSRange(location: attributed.length - 1, length: 1)
+            let tail = attributed.attributedSubstring(from: tailRange).string
+            guard let scalar = tail.unicodeScalars.first,
+                  CharacterSet.whitespacesAndNewlines.contains(scalar)
+            else { break }
+            attributed.deleteCharacters(in: tailRange)
         }
-        normalise(loaded)
-        return loaded
     }
 
-    // MARK: - Helpers
+    private static func removeTrailingParagraphSpacing(in attributed: NSMutableAttributedString) {
+        guard attributed.length > 0 else { return }
+        let lastLocation = attributed.length - 1
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        let paragraphRange = (attributed.string as NSString)
+            .paragraphRange(for: NSRange(location: lastLocation, length: 1))
+        let constrainedRange = NSIntersectionRange(paragraphRange, fullRange)
+        guard constrainedRange.length > 0 else { return }
 
-    private static func renderedHTML(from markdown: String) -> String {
-        // MarkdownUI ships a cmark-gfm parser; going through HTML lets us
-        // keep GFM support (tables, task lists, strikethrough, autolinks)
-        // without pulling in a separate parser.
-        let content = MarkdownContent(markdown)
-        let html = content.renderHTML()
-        if html.isEmpty { return "" }
-
-        // Wrap the fragment in a full HTML document with a base style so the
-        // AppKit HTML importer has a well-defined starting point. We still
-        // run a normalisation pass afterwards to line up with Helm's metrics.
-        let escapedBaseColor = "#000000" // colour is fixed up later; this is a placeholder
-        let style = """
-        body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; \
-        font-size: 13.5px; color: \(escapedBaseColor); line-height: 1.45; } \
-        pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
-        font-size: 12px; background: rgba(127,127,127,0.12); padding: 0 0.25em; \
-        border-radius: 3px; } \
-        pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; } \
-        pre code { background: transparent; padding: 0; } \
-        h1 { font-size: 18px; font-weight: 600; margin: 12px 0 8px; } \
-        h2 { font-size: 16px; font-weight: 600; margin: 12px 0 8px; } \
-        h3 { font-size: 14.5px; font-weight: 600; margin: 10px 0 6px; } \
-        h4 { font-size: 13.5px; font-weight: 600; margin: 8px 0 5px; } \
-        blockquote { margin: 2px 0 8px; padding: 2px 0 2px 10px; \
-        border-left: 3px solid rgba(0,0,0,0.25); color: rgba(0,0,0,0.55); } \
-        p { margin: 0 0 8px; } \
-        ul, ol { margin: 0 0 8px; padding-left: 22px; } \
-        li { margin: 2px 0; } \
-        table { border-collapse: collapse; margin: 2px 0 10px; } \
-        th, td { border: 1px solid rgba(127,127,127,0.35); padding: 5px 10px; font-size: 13px; } \
-        th { background: rgba(127,127,127,0.08); font-weight: 600; } \
-        hr { border: none; border-top: 1px solid rgba(127,127,127,0.35); margin: 10px 0; }
-        """
-        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\(style)</style></head><body>\(html)</body></html>"
-    }
-
-    /// Walk every run and make fonts / colours consistent with Helm's chat
-    /// appearance. AppKit's HTML importer picks arbitrary defaults, so we
-    /// explicitly clamp sizes, swap in system fonts and honour the current
-    /// effective appearance via `NSColor.labelColor`/`.secondaryLabelColor`.
-    private static func normalise(_ astr: NSMutableAttributedString) {
-        let full = NSRange(location: 0, length: astr.length)
-        astr.enumerateAttributes(in: full, options: []) { attrs, range, _ in
-            var updated = attrs
-            var changed = false
-
-            // Font: keep monospaced runs as monospaced; everything else uses
-            // the chat base font. Preserve bold / italic traits and clamp size
-            // to a sensible range so headings stay readable.
-            if let currentFont = updated[.font] as? NSFont {
-                let isMono = currentFont.fontDescriptor.symbolicTraits.contains(.monoSpace)
-                    || currentFont.familyName?.lowercased().contains("mono") ?? false
-                var traits = currentFont.fontDescriptor.symbolicTraits
-                traits.remove(.monoSpace) // trait doesn't combine cleanly with NSFont()
-                var size = currentFont.pointSize
-                if size < 10 { size = 11 }
-                if size > 24 { size = 24 }
-                let base: NSFont = isMono ? monoFont : baseFont
-                // Headings get a size bump above the base; monospace and
-                // regular body text both anchor to their respective base
-                // font sizes so inline/fenced code stays visually smaller.
-                let defaultTarget: CGFloat = isMono ? monoFont.pointSize : baseFont.pointSize
-                let targetSize: CGFloat = {
-                    if isMono {
-                        // Preserve HTML-implied size within a narrow band so
-                        // 12pt (body) and 13px (table) styles both land near 12.
-                        return max(11, min(size, 13.5))
-                    }
-                    if size > baseFont.pointSize + 0.5 {
-                        // Heuristic: a size noticeably above base is a heading.
-                        return min(size, baseFont.pointSize + 5)
-                    }
-                    return defaultTarget
-                }()
-                var newFont: NSFont
-                if traits.contains(.bold) && traits.contains(.italic) {
-                    newFont = NSFontManager.shared.convert(
-                        NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask),
-                        toHaveTrait: .italicFontMask
-                    )
-                } else if traits.contains(.bold) {
-                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
-                } else if traits.contains(.italic) {
-                    newFont = NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask)
-                } else {
-                    newFont = base
-                }
-                if abs(newFont.pointSize - targetSize) > 0.25,
-                   let resized = NSFont(descriptor: newFont.fontDescriptor, size: targetSize) {
-                    newFont = resized
-                }
-                if newFont != currentFont {
-                    updated[.font] = newFont
-                    changed = true
-                }
-            } else {
-                updated[.font] = baseFont
-                changed = true
-            }
-
-            // Colour: links keep accent; everything else falls back to the
-            // current effective foreground. We specifically do NOT use an
-            // absolute `NSColor.black` so dark mode stays readable.
-            if updated[.link] != nil {
-                let accent = NSColor.controlAccentColor
-                let underline = NSNumber(value: NSUnderlineStyle.single.rawValue)
-                if updated[.foregroundColor] as? NSColor != accent
-                    || (updated[.underlineStyle] as? NSNumber) != underline {
-                    updated[.foregroundColor] = accent
-                    updated[.underlineStyle] = underline
-                    changed = true
-                }
-            } else {
-                // Always map HTML-injected absolute colours to the adaptive
-                // label colour family so dark mode stays readable. Blockquote
-                // text from the HTML pipeline tends to render as a mid-gray;
-                // detect those via alpha (semitransparent black → ~55% opacity)
-                // and promote to `.secondaryLabel`.
-                let existingColor = updated[.foregroundColor] as? NSColor
-                let effectiveAlpha: CGFloat
-                let effectiveBrightness: CGFloat
-                if let existing = existingColor {
-                    if let rgb = existing.usingColorSpace(.sRGB) {
-                        effectiveBrightness = rgb.brightnessComponent
-                        effectiveAlpha = rgb.alphaComponent
-                    } else if let gray = existing.usingColorSpace(.genericGray) {
-                        effectiveBrightness = gray.whiteComponent
-                        effectiveAlpha = gray.alphaComponent
-                    } else {
-                        effectiveBrightness = 0.5
-                        effectiveAlpha = 1.0
-                    }
-                } else {
-                    effectiveBrightness = 0.0
-                    effectiveAlpha = 1.0
-                }
-                // Treat a semitransparent black (brightness near 0, alpha < 1)
-                // as the HTML importer's representation of a muted blockquote
-                // or comment style → map it to secondaryLabelColor. Otherwise
-                // use brightness alone: darker == label, lighter == secondary.
-                let looksMuted = effectiveBrightness < 0.15 && effectiveAlpha < 0.95
-                let target: NSColor = (looksMuted || effectiveBrightness >= 0.55)
-                    ? NSColor.secondaryLabelColor
-                    : NSColor.labelColor
-                if existingColor != target {
-                    updated[.foregroundColor] = target
-                    changed = true
-                }
-            }
-
-            // Line height — bump leading slightly for readability, matching
-            // the SwiftUI `.relativeLineSpacing(.em(0.18))` used previously.
-            if let para = (updated[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
-                let lineHeight = baseFont.pointSize * 1.18
-                if para.minimumLineHeight < lineHeight * 0.9 {
-                    para.minimumLineHeight = lineHeight
-                    para.maximumLineHeight = lineHeight
-                    updated[.paragraphStyle] = para
-                    changed = true
-                }
-            }
-
-            // Strikethrough / underline already set by the HTML importer —
-            // keep them as long as the values aren't `nil` placeholders.
-
-            if changed {
-                astr.setAttributes(updated, range: range)
-            }
+        var updates: [(NSRange, NSParagraphStyle)] = []
+        attributed.enumerateAttribute(.paragraphStyle, in: constrainedRange, options: []) { value, range, _ in
+            guard let paragraph = (value as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle
+            else { return }
+            paragraph.paragraphSpacing = 0
+            updates.append((range, paragraph))
+        }
+        for (range, paragraph) in updates {
+            attributed.addAttribute(.paragraphStyle, value: paragraph, range: range)
         }
     }
 }
