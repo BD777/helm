@@ -2888,14 +2888,17 @@ else:
         else { return }
         guard !loadingHistorySessionIds.contains(sessionId) else { return }
 
+        loadingHistorySessionIds.insert(sessionId)
+        defer { loadingHistorySessionIds.remove(sessionId) }
+
         if sessions[sIdx].transcript.isEmpty {
-            restoreTranscriptSnapshotIfNeeded(for: sessionId)
+            if restoreTranscriptSnapshotIfNeeded(for: sessionId) {
+                return
+            }
         } else {
             return
         }
 
-        loadingHistorySessionIds.insert(sessionId)
-        defer { loadingHistorySessionIds.remove(sessionId) }
         // Use the vendor session id if we have one; otherwise our session.id
         // doubles as the vendor id for Claude (we passed it via --session-id).
         let vendorId = sessions[sIdx].vendorSessionId
@@ -3267,12 +3270,19 @@ else:
     }
 
     private func finishStreaming(sessionId: UUID, runId: UUID? = nil) {
-        guard let run = activeRuns[sessionId] else { return }
-        if let runId, run.runId != runId { return }
-        activeRuns[sessionId]?.assistantTextFlushTask?.cancel()
-        flushAssistantTextBuffer(sessionId: sessionId,
-                                 runId: run.runId,
-                                 assistantId: run.assistantId)
+        let run = activeRuns[sessionId]
+        if let runId, let run, run.runId != runId { return }
+        let wasMarkedRunning = run != nil
+            || runningSessionIds.contains(sessionId)
+            || activeRunStartedAts[sessionId] != nil
+            || pendingApprovalQueue.contains { $0.sessionId == sessionId }
+        guard wasMarkedRunning else { return }
+        if let run {
+            activeRuns[sessionId]?.assistantTextFlushTask?.cancel()
+            flushAssistantTextBuffer(sessionId: sessionId,
+                                     runId: run.runId,
+                                     assistantId: run.assistantId)
+        }
         persistTranscriptSnapshot(for: sessionId)
         activeRuns[sessionId] = nil
         runningSessionIds.remove(sessionId)
