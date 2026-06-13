@@ -2126,8 +2126,8 @@ private enum ChatTextStyler {
         font-size: 15px; color: #000001; line-height: 1.45; } \
         p { margin: 0 0 11px; line-height: 1.45; } \
         pre, code, kbd, samp { font-family: "SF Mono", Menlo, Consolas, monospace; \
-        font-size: 13px; background: rgba(31,31,31,0.08); padding: 0.08em 0.35em; \
-        border-radius: 4px; color: #000001; line-height: 1.25; } \
+        font-size: 13px; background: transparent; padding: 0; \
+        border-radius: 0; color: #000001; } \
         pre { padding: 10px 14px; border-radius: 6px; overflow-x: auto; \
         background: rgba(31,31,31,0.05) !important; margin: 6px 0 14px; \
         line-height: 1.45; } \
@@ -2175,9 +2175,14 @@ private enum ChatTextStyler {
 
             // MARK: Font
 
-            if let currentFont = updated[.font] as? NSFont {
-                let isMono = currentFont.fontDescriptor.symbolicTraits.contains(.monoSpace)
-                    || currentFont.familyName?.lowercased().contains("mono") ?? false
+            let currentFont = updated[.font] as? NSFont
+            let isMono: Bool = {
+                guard let f = currentFont else { return false }
+                return f.fontDescriptor.symbolicTraits.contains(.monoSpace)
+                    || f.familyName?.lowercased().contains("mono") ?? false
+            }()
+
+            if let currentFont {
                 var traits = currentFont.fontDescriptor.symbolicTraits
                 traits.remove(.monoSpace)
                 var size = currentFont.pointSize
@@ -2191,8 +2196,12 @@ private enum ChatTextStyler {
 
                 let targetSize: CGFloat = {
                     if isMono {
-                        // Keep monospace runs near the mono base size.
-                        return max(12, min(size, monoFont.pointSize + 1))
+                        // Inline code gets a slightly smaller size for visual
+                        // balance with surrounding body text. Code blocks
+                        // keep their full size.
+                        return isWithinCodeBlock(range, in: astr)
+                            ? monoFont.pointSize
+                            : round(baseFont.pointSize * 0.88)
                     }
                     if size > baseFont.pointSize + 1 {
                         // Heuristic: a size noticeably above base is a heading.
@@ -2228,6 +2237,28 @@ private enum ChatTextStyler {
             } else {
                 updated[.font] = baseFont
                 changed = true
+            }
+
+            // MARK: Inline code styling
+            //
+            // Fine-tune inline code runs directly on the attributed string
+            // because CSS padding on inline elements doesn't render reliably
+            // in TextKit.
+            if isMono, !isWithinCodeBlock(range, in: astr) {
+                // Subtle background — softer than the CSS default so it
+                // doesn't look like a solid rectangle plopped on the line.
+                let bgColor = NSColor.labelColor.withAlphaComponent(0.07)
+                if (updated[.backgroundColor] as? NSColor) != bgColor {
+                    updated[.backgroundColor] = bgColor
+                    changed = true
+                }
+                // Nudge baseline down a hair so monospace text sits at the
+                // same visual baseline as surrounding body text.
+                let baselineOffset: CGFloat = -0.5
+                if (updated[.baselineOffset] as? CGFloat) != baselineOffset {
+                    updated[.baselineOffset] = baselineOffset
+                    changed = true
+                }
             }
 
             // MARK: Colour
@@ -2408,6 +2439,25 @@ private enum ChatTextStyler {
     }
 
     // MARK: - Helpers
+
+    /// Returns true if the given range falls entirely within a code block
+    /// (a paragraph where every character is monospace). Inline code spans
+    /// within a body paragraph return false.
+    private static func isWithinCodeBlock(_ range: NSRange, in astr: NSAttributedString) -> Bool {
+        let string = astr.string as NSString
+        let paraRange = string.paragraphRange(for: range)
+        var isAllMono = true
+        astr.enumerateAttribute(.font, in: paraRange, options: []) { value, _, stop in
+            guard let font = value as? NSFont else { return }
+            let isMono = font.fontDescriptor.symbolicTraits.contains(.monoSpace)
+                || font.familyName?.lowercased().contains("mono") ?? false
+            if !isMono {
+                isAllMono = false
+                stop.pointee = true
+            }
+        }
+        return isAllMono
+    }
 
     private static func trimTrailingWhitespaceAndNewlines(_ text: String) -> String {
         var output = text
