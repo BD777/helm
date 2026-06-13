@@ -1566,6 +1566,12 @@ struct MarkdownishText: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.vertical, 10)
+                case .codeBlock(let text):
+                    Markdown(text)
+                        .markdownTheme(.helmChat)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 4)
                 }
             }
         }
@@ -1579,6 +1585,7 @@ private enum MarkdownBlockSplitter {
     enum Block {
         case text(String)
         case table(String)
+        case codeBlock(String)
     }
 
     static func split(_ markdown: String) -> [Block] {
@@ -1596,6 +1603,25 @@ private enum MarkdownBlockSplitter {
 
         while i < lines.count {
             let line = lines[i]
+
+            // Detect a fenced code block (``` or ~~~). Route it to MarkdownUI,
+            // whose `.codeBlock` theme renders far nicer line spacing, padding,
+            // and background than the AppKit HTML importer.
+            if let fence = fenceMarker(in: line) {
+                flushText()
+
+                var codeLines: [String] = [line] // opening fence (keeps language)
+                i += 1
+                while i < lines.count {
+                    codeLines.append(lines[i])
+                    let closed = fenceMarker(in: lines[i]) == fence
+                    i += 1
+                    if closed { break }
+                }
+
+                blocks.append(.codeBlock(codeLines.joined(separator: "\n")))
+                continue
+            }
 
             // Detect a potential table: line contains | and next line is a
             // separator row (| --- | --- | pattern).
@@ -1623,6 +1649,21 @@ private enum MarkdownBlockSplitter {
 
         flushText()
         return blocks
+    }
+
+    /// Returns the fence character (` ` ``` ` or `~`) if the line opens/closes a
+    /// fenced code block, else nil. A fence is 3+ identical markers, optionally
+    /// indented up to 3 spaces, optionally followed by an info string.
+    private static func fenceMarker(in line: String) -> Character? {
+        var trimmed = Substring(line)
+        var indent = 0
+        while let first = trimmed.first, first == " ", indent < 3 {
+            trimmed = trimmed.dropFirst()
+            indent += 1
+        }
+        guard let marker = trimmed.first, marker == "`" || marker == "~" else { return nil }
+        let run = trimmed.prefix { $0 == marker }
+        return run.count >= 3 ? marker : nil
     }
 
     private static func looksLikeTableRow(_ line: String) -> Bool {
@@ -2002,6 +2043,18 @@ private final class MeasuredSelectableTextView: NSView {
 private final class NonEditableTextView: NSTextView {
     override var isFlipped: Bool { true }
 
+    /// Build the view on a TextKit 1 stack that uses `InlineCodeLayoutManager`
+    /// so inline code spans render as rounded, padded pills.
+    convenience init() {
+        let textStorage = NSTextStorage()
+        let layoutManager = InlineCodeLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layoutManager.addTextContainer(container)
+        self.init(frame: .zero, textContainer: container)
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .iBeam)
@@ -2048,6 +2101,97 @@ private final class NonEditableTextView: NSTextView {
         super.mouseDown(with: event)
     }
 }
+
+/// A layout manager that paints a rounded, padded background behind inline
+/// code spans (runs carrying `inlineCodeKey`). This replaces the default
+/// `.backgroundColor` rendering, which draws a tight square box with no
+/// padding and looks like a flat grey rectangle.
+private final class InlineCodeLayoutManager: NSLayoutManager {
+    /// Visual padding painted on each side of the glyphs inside the pill.
+    private let horizontalPadding = inlineCodePillPadding
+    private let paddingTop: CGFloat = 2.5
+    private let paddingBottom: CGFloat = 3.0
+    private let cornerRadius: CGFloat = 4.5
+
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+        guard let textStorage, let textContainer = textContainers.first else { return }
+
+        let fill = NSColor.labelColor.withAlphaComponent(0.075)
+        let stroke = NSColor.labelColor.withAlphaComponent(0.09)
+
+        let charRange = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        textStorage.enumerateAttribute(inlineCodeKey, in: charRange, options: []) { value, runRange, _ in
+            guard (value as? Bool) == true else { return }
+
+            let font = (textStorage.attribute(.font, at: runRange.location, effectiveRange: nil) as? NSFont)
+                ?? ChatTextStyler.monoFont
+            let runGlyphRange = self.glyphRange(forCharacterRange: runRange, actualCharacterRange: nil)
+
+            // `enumerateEnclosingRects` returns tight rects that start exactly at
+            // the glyphs (the same geometry selection highlighting uses), so —
+            // unlike `boundingRect` — a run that begins a line never has its
+            // left edge snapped to the line origin. That prevents swallowing a
+            // preceding list marker and prevents over-extending into the next
+            // span (which made adjacent pills overlap). It also splits wrapped
+            // runs into one rect per line fragment automatically.
+            var rects: [CGRect] = []
+            self.enumerateEnclosingRects(forGlyphRange: runGlyphRange,
+                                         withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                         in: textContainer) { fragmentRect, _ in
+                rects.append(fragmentRect)
+            }
+            guard !rects.isEmpty else { return }
+
+            let textHeight = font.ascender - font.descender
+            let pillHeight = textHeight + self.paddingTop + self.paddingBottom
+
+            for (index, fragmentRect) in rects.enumerated() {
+                // The run's last glyph carries a trailing `.kern` margin (added
+                // in `addInlineCodeMargins`) which inflates the enclosing rect.
+                // Trim it off the final fragment so the gap stays *outside* the
+                // pill rather than padding its interior.
+                var width = fragmentRect.width
+                if index == rects.count - 1 {
+                    width -= inlineCodeMarginKern
+                }
+
+                // Center a font-metrics-sized pill on the glyph rect so the text
+                // is evenly inset top and bottom regardless of line spacing.
+                let midY = fragmentRect.midY
+                var rect = CGRect(x: fragmentRect.minX - self.horizontalPadding,
+                                  y: midY - pillHeight / 2,
+                                  width: width + self.horizontalPadding * 2,
+                                  height: pillHeight)
+                rect.origin.x += origin.x
+                rect.origin.y += origin.y
+
+                let path = NSBezierPath(roundedRect: rect,
+                                        xRadius: self.cornerRadius,
+                                        yRadius: self.cornerRadius)
+                fill.setFill()
+                path.fill()
+                stroke.setStroke()
+                path.lineWidth = 1
+                path.stroke()
+            }
+        }
+    }
+}
+
+
+/// Custom attribute marking an inline code span. `InlineCodeLayoutManager`
+/// paints a rounded, padded background behind runs carrying this attribute,
+/// instead of relying on `.backgroundColor` (which TextKit draws as a tight,
+/// square box with no padding).
+let inlineCodeKey = NSAttributedString.Key("helm.inlineCode")
+
+/// Visual padding painted on each side of the glyphs inside an inline code pill.
+let inlineCodePillPadding: CGFloat = 5.0
+/// Real layout space reserved on each side of an inline code run (via `.kern`)
+/// so the pill keeps a margin from neighbouring characters. Must exceed
+/// `inlineCodePillPadding` for a visible gap to remain after the pill is drawn.
+let inlineCodeMarginKern: CGFloat = 9.0
 
 /// Styles text for the AppKit-backed selectable text views.
 private enum ChatTextStyler {
@@ -2245,11 +2389,17 @@ private enum ChatTextStyler {
             // because CSS padding on inline elements doesn't render reliably
             // in TextKit.
             if isMono, !isWithinCodeBlock(range, in: astr) {
-                // Subtle background — softer than the CSS default so it
-                // doesn't look like a solid rectangle plopped on the line.
-                let bgColor = NSColor.labelColor.withAlphaComponent(0.07)
-                if (updated[.backgroundColor] as? NSColor) != bgColor {
-                    updated[.backgroundColor] = bgColor
+                // Mark the run so `InlineCodeLayoutManager` can paint a
+                // rounded, padded "pill" behind it. We deliberately avoid
+                // `.backgroundColor`: TextKit draws that as a tight,
+                // square-cornered rectangle hugging the glyphs, which is what
+                // made inline code look like flat grey boxes.
+                if updated[.backgroundColor] != nil {
+                    updated[.backgroundColor] = nil
+                    changed = true
+                }
+                if updated[inlineCodeKey] == nil {
+                    updated[inlineCodeKey] = true
                     changed = true
                 }
                 // Nudge baseline down a hair so monospace text sits at the
@@ -2332,6 +2482,84 @@ private enum ChatTextStyler {
         // We do this in a separate pass because paragraph spacing applies
         // to whole paragraphs, not individual attribute runs.
         tuneParagraphSpacing(astr)
+
+        // Strip inline-code marking that leaked onto list-item markers before we
+        // reserve margins around the (now correct) runs.
+        stripListMarkersFromInlineCode(astr)
+
+        // Third pass: reserve horizontal layout space around inline code runs
+        // so the drawn pill keeps a margin from neighbouring characters.
+        addInlineCodeMargins(astr)
+    }
+
+    /// Removes `inlineCodeKey` (and its baseline nudge) from any list-item
+    /// marker that leaked into an inline code run.
+    ///
+    /// When a list item begins with inline code (`- \`foo\``), AppKit's HTML
+    /// importer renders the bullet/number marker into the *same* monospace
+    /// attribute run as the code that follows it, so the marker inherits
+    /// `inlineCodeKey` and gets swallowed by the pill. The importer always
+    /// formats a list marker as `<marker>\t` (a tab terminates it), so we strip
+    /// the attribute from everything up to and including the last tab at the
+    /// start of a list paragraph.
+    private static func stripListMarkersFromInlineCode(_ astr: NSMutableAttributedString) {
+        let string = astr.string as NSString
+        let full = NSRange(location: 0, length: astr.length)
+        var location = 0
+        while location < full.length {
+            let paraRange = string.paragraphRange(for: NSRange(location: location, length: 0))
+            defer { location = NSMaxRange(paraRange) }
+            guard paraRange.length > 0 else { continue }
+
+            // Only touch paragraphs the importer marked as list items.
+            let style = astr.attribute(.paragraphStyle, at: paraRange.location,
+                                       effectiveRange: nil) as? NSParagraphStyle
+            guard let style, !style.textLists.isEmpty else { continue }
+
+            // Find the last tab within the leading marker region. The marker is
+            // `<tab?><bullet|number><tab>`, so the real content starts right
+            // after that tab.
+            let paraString = string.substring(with: paraRange) as NSString
+            let markerScan = NSRange(location: 0, length: min(paraString.length, 8))
+            let tabRange = paraString.rangeOfCharacter(from: CharacterSet(charactersIn: "\t"),
+                                                       options: .backwards, range: markerScan)
+            guard tabRange.location != NSNotFound else { continue }
+
+            let stripRange = NSRange(location: paraRange.location,
+                                     length: tabRange.location + 1)
+            astr.removeAttribute(inlineCodeKey, range: stripRange)
+            astr.removeAttribute(.baselineOffset, range: stripRange)
+        }
+    }
+
+    /// Adds `.kern` on the boundaries of each inline code run so its pill does
+    /// not visually touch the surrounding text. Kern on a glyph adds space
+    /// *after* it, so we kern the run's last character (trailing gap) and the
+    /// character immediately preceding the run (leading gap).
+    private static func addInlineCodeMargins(_ astr: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: astr.length)
+        astr.enumerateAttribute(inlineCodeKey, in: full, options: []) { value, runRange, _ in
+            guard (value as? Bool) == true, runRange.length > 0 else { return }
+
+            // Trailing gap: kern the last glyph of the run.
+            let lastIndex = NSMaxRange(runRange) - 1
+            astr.addAttribute(.kern, value: inlineCodeMarginKern,
+                              range: NSRange(location: lastIndex, length: 1))
+
+            // Leading gap: kern the character just before the run, if any, and
+            // only when it isn't itself inline code (avoid double-spacing two
+            // adjacent runs — the trailing kern of the first already separates
+            // them).
+            let before = runRange.location - 1
+            if before >= 0 {
+                let precededByCode = (astr.attribute(inlineCodeKey, at: before,
+                                                     effectiveRange: nil) as? Bool) == true
+                if !precededByCode {
+                    astr.addAttribute(.kern, value: inlineCodeMarginKern,
+                                      range: NSRange(location: before, length: 1))
+                }
+            }
+        }
     }
 
     /// Detects the logical type of each paragraph (heading / body / list /
