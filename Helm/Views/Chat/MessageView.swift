@@ -776,8 +776,12 @@ struct MessageView: View {
                                 renderMarkdown: renderMarkdown)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, isUser ? 12 : 0)
-            .padding(.top, isUser ? 9 : 0)
-            .padding(.bottom, isUser ? 7 : 0)
+            // Inner text blocks already carry a 2pt top inset (see textView),
+            // so the user bubble uses 6 on top + 8 on the bottom to land on an
+            // equal 8pt of visible space above and below the glyphs now that
+            // the forced line-height slack has been removed.
+            .padding(.top, isUser ? 6 : 0)
+            .padding(.bottom, isUser ? 8 : 0)
             .background(
                 isUser
                 ? RoundedRectangle(cornerRadius: DS.cornerRadius)
@@ -2143,8 +2147,16 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
             }
             guard !rects.isEmpty else { return }
 
-            let textHeight = font.ascender - font.descender
-            let pillHeight = textHeight + self.paddingTop + self.paddingBottom
+            let pillHeight = font.ascender - font.descender + self.paddingTop + self.paddingBottom
+
+            // Anchor the pill on the text *baseline*, not the line-fragment
+            // centre. Body paragraphs force a tall line height (≈1.42×), which
+            // inflates each line box and pushes the glyphs above its centre —
+            // centring the pill on `fragmentRect.midY` made it float low. The
+            // baseline offset (distance from the line-fragment top to the
+            // baseline) is constant within a paragraph, so we read it once from
+            // the run's first glyph and reuse it for every wrapped fragment.
+            let baselineOffset = self.location(forGlyphAt: runGlyphRange.location).y
 
             for (index, fragmentRect) in rects.enumerated() {
                 // The run's last glyph carries a trailing `.kern` margin (added
@@ -2156,11 +2168,12 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
                     width -= inlineCodeMarginKern
                 }
 
-                // Center a font-metrics-sized pill on the glyph rect so the text
-                // is evenly inset top and bottom regardless of line spacing.
-                let midY = fragmentRect.midY
+                // Size the pill from font metrics and seat it on the glyph
+                // baseline so text is evenly inset top and bottom regardless of
+                // the surrounding line spacing.
+                let baseline = fragmentRect.minY + baselineOffset
                 var rect = CGRect(x: fragmentRect.minX - self.horizontalPadding,
-                                  y: midY - pillHeight / 2,
+                                  y: baseline - font.ascender - self.paddingTop,
                                   width: width + self.horizontalPadding * 2,
                                   height: pillHeight)
                 rect.origin.x += origin.x
@@ -2464,10 +2477,19 @@ private enum ChatTextStyler {
             // MARK: Paragraph style — line height
 
             if let para = (updated[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle {
-                let targetLineHeight = baseFont.pointSize * 1.42
-                if para.minimumLineHeight < targetLineHeight * 0.9 {
-                    para.minimumLineHeight = targetLineHeight
-                    para.maximumLineHeight = targetLineHeight
+                // Add breathing room *between* wrapped lines via lineSpacing
+                // rather than forcing each line box to pointSize * 1.42 with
+                // minimum/maximumLineHeight. Forcing the line height injects
+                // ~3.8pt of phantom leading above the first glyph (TextKit
+                // parks the slack above the baseline), which makes a single
+                // line message's top/bottom look unequal. lineSpacing only
+                // affects the gaps between lines, so the first line's top and
+                // the last line's bottom stay tight to the glyphs while
+                // multi-line text keeps the same line-to-line rhythm
+                // (natural 1.2x + 0.22x ≈ 1.42x).
+                let extraLineSpacing = baseFont.pointSize * 0.22
+                if para.lineSpacing < extraLineSpacing * 0.9 {
+                    para.lineSpacing = extraLineSpacing
                     updated[.paragraphStyle] = para
                     changed = true
                 }
